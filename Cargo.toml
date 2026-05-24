@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres", "macros", "chrono", "uuid", "migrate"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -15,3 +15,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.5", features = ["trace"] }
 chrono = { version = "0.4", features = ["serde"] }
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.45"
+aws-credential-types = { version = "1.2", features = ["hardcoded-credentials"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+sha2 = "0.10"

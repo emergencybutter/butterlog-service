@@ -1,7 +1,7 @@
 use axum::{
     extract::{Query, State},
-    response::{Html, IntoResponse, Redirect},
-    routing::get,
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post, put, delete},
     Router,
 };
 use serde::Deserialize;
@@ -13,21 +13,30 @@ mod config;
 mod db;
 mod error;
 mod auth;
+mod r2;
+mod handlers;
 
 use crate::config::Config;
 use crate::error::AppError;
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     db: sqlx::PgPool,
     config: Config,
     http_client: reqwest::Client,
+    r2: r2::R2Client,
+}
+
+#[derive(Deserialize)]
+struct LoginQuery {
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
 struct CallbackQuery {
     code: Option<String>,
     error: Option<String>,
+    state: Option<String>,
 }
 
 #[tokio::main]
@@ -47,10 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database pool and run migrations
     let db_pool = db::init_db(&config.database_url).await?;
 
+    let r2_client = r2::R2Client::new(&config);
+
     let state = AppState {
         db: db_pool,
         config: config.clone(),
         http_client: reqwest::Client::new(),
+        r2: r2_client,
     };
 
     // Build the router with trace logging
@@ -58,6 +70,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(home_handler))
         .route("/login", get(login_handler))
         .route("/auth/callback", get(callback_handler))
+        .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
+        .route(
+            "/api/v0/users/:webhook_token/flights/:id",
+            put(handlers::update_flight_handler).get(handlers::get_flight_handler),
+        )
+        .route(
+            "/api/v0/users/:webhook_token/flights/:id/screenshots",
+            post(handlers::upload_screenshot_handler),
+        )
+        .route(
+            "/api/v0/users/:webhook_token/flights/:id/screenshots/:hash",
+            delete(handlers::delete_screenshot_handler),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -137,15 +162,23 @@ async fn home_handler() -> impl IntoResponse {
     "#)
 }
 
-async fn login_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let auth_url = auth::get_login_url(&state.config.discord_client_id, &state.config.discord_redirect_uri);
+async fn login_handler(
+    State(state): State<AppState>,
+    Query(query): Query<LoginQuery>,
+) -> impl IntoResponse {
+    let state_param = query.port.map(|p| p.to_string());
+    let auth_url = auth::get_login_url(
+        &state.config.discord_client_id,
+        &state.config.discord_redirect_uri,
+        state_param.as_deref(),
+    );
     Redirect::temporary(&auth_url)
 }
 
 async fn callback_handler(
     State(state): State<AppState>,
     Query(params): Query<CallbackQuery>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     if let Some(err) = params.error {
         return Err(AppError::Auth(format!("Discord OAuth error: {}", err)));
     }
@@ -167,8 +200,16 @@ async fn callback_handler(
     // Fetch details of authenticating user from Discord
     let discord_user = auth::fetch_discord_user(&state.http_client, &access_token).await?;
 
-    // Insert or update user info in DB
-    auth::save_or_update_user(&state.db, &discord_user).await?;
+    // Insert or update user info in DB and get api_token
+    let api_token = auth::save_or_update_user(&state.db, &discord_user).await?;
+
+    // Check if we need to redirect back to the local app's loopback listener
+    if let Some(ref state_val) = params.state {
+        if let Ok(port) = state_val.parse::<u16>() {
+            let redirect_url = format!("http://127.0.0.1:{}?token={}", port, api_token);
+            return Ok(Redirect::temporary(&redirect_url).into_response());
+        }
+    }
 
     let display_name = discord_user.global_name.unwrap_or(discord_user.username);
 
@@ -223,5 +264,6 @@ async fn callback_handler(
         </html>
         "#,
         display_name
-    )))
+    ))
+    .into_response())
 }

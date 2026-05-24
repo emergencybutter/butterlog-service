@@ -7,6 +7,11 @@ pub struct Config {
     pub discord_client_secret: String,
     pub discord_redirect_uri: String,
     pub port: u16,
+    pub r2_bucket: String,
+    pub r2_endpoint: String,
+    pub r2_access_key_id: String,
+    pub r2_secret_access_key: String,
+    pub r2_public_url: String,
 }
 
 impl Config {
@@ -31,12 +36,32 @@ impl Config {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8080);
 
+        let r2_bucket = env::var("R2_BUCKET")
+            .expect("R2_BUCKET environment variable must be set");
+
+        let r2_endpoint = env::var("R2_ENDPOINT")
+            .expect("R2_ENDPOINT environment variable must be set");
+
+        let r2_access_key_id = env::var("R2_ACCESS_KEY_ID")
+            .expect("R2_ACCESS_KEY_ID environment variable must be set");
+
+        let r2_secret_access_key = env::var("R2_SECRET_ACCESS_KEY")
+            .expect("R2_SECRET_ACCESS_KEY environment variable must be set");
+
+        let r2_public_url = env::var("R2_PUBLIC_URL")
+            .expect("R2_PUBLIC_URL environment variable must be set");
+
         Self {
             database_url,
             discord_client_id,
             discord_client_secret,
             discord_redirect_uri,
             port,
+            r2_bucket,
+            r2_endpoint,
+            r2_access_key_id,
+            r2_secret_access_key,
+            r2_public_url,
         }
     }
 }

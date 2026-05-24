@@ -16,13 +16,16 @@ pub struct DiscordUser {
 }
 
 /// Generates the Discord OAuth2 authorization URL
-pub fn get_login_url(client_id: &str, redirect_uri: &str) -> String {
-    let params = [
+pub fn get_login_url(client_id: &str, redirect_uri: &str, state: Option<&str>) -> String {
+    let mut params = vec![
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
         ("response_type", "code"),
         ("scope", "identify"),
     ];
+    if let Some(s) = state {
+        params.push(("state", s));
+    }
     let url = reqwest::Url::parse_with_params("https://discord.com/oauth2/authorize", &params)
         .expect("Failed to build Discord Auth URL");
     url.to_string()
@@ -85,27 +88,28 @@ pub async fn fetch_discord_user(
     Ok(user)
 }
 
-/// Inserts or updates the user info in PostgreSQL
+/// Inserts or updates the user info in PostgreSQL and returns their API token
 pub async fn save_or_update_user(
     db_pool: &PgPool,
     user: &DiscordUser,
-) -> Result<(), AppError> {
-    sqlx::query(
-        "INSERT INTO users (discord_id, username, global_name, avatar, last_login) \
-         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) \
+) -> Result<String, AppError> {
+    let api_token: String = sqlx::query_scalar(
+        "INSERT INTO users (discord_id, username, global_name, avatar, api_token, last_login) \
+         VALUES ($1, $2, $3, $4, md5(random()::text || clock_timestamp()::text), CURRENT_TIMESTAMP) \
          ON CONFLICT (discord_id) \
          DO UPDATE SET \
              username = EXCLUDED.username, \
              global_name = EXCLUDED.global_name, \
              avatar = EXCLUDED.avatar, \
-             last_login = EXCLUDED.last_login"
+             last_login = EXCLUDED.last_login \
+         RETURNING api_token"
     )
     .bind(&user.id)
     .bind(&user.username)
     .bind(&user.global_name)
     .bind(&user.avatar)
-    .execute(db_pool)
+    .fetch_one(db_pool)
     .await?;
 
-    Ok(())
+    Ok(api_token)
 }

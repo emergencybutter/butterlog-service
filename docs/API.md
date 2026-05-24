@@ -5,7 +5,7 @@ This document describes the Web API for Butterlog, designed for consumption by b
 ## Rediretions
 
 You can assume these base urls are proxied to the webservice:
-`https://butterlog.flyvoyager.net/api`
+`https://butterlog.flyvoyager.net/api/v0`
 `https://butterlog.flyvoyager.net/login`
 
 ## Authentication
@@ -13,7 +13,7 @@ You can assume these base urls are proxied to the webservice:
 In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/login`. At this point the use would follow the auth workflow normally and the client gets back some authentication token.
 
 Each user is given a webhookToken. Each user uses this base url:
-`https://butterlog.flyvoyager.net/api/users/:webhookToken`
+`https://butterlog.flyvoyager.net/api/v0/users/:webhookToken`
 
 
 ## Endpoints
@@ -69,7 +69,7 @@ Retrieves a specific flight's data.
 #### Upload a Screenshot
 `POST /flights/:id/screenshots`
 
-Uploads an image for a specific flight. Images are automatically resized to 1600px width and compressed as optimized JPEGs.
+Uploads an image for a specific flight. Images are automatically resized to 1600px width and compressed as optimized webp format.
 
 *   **Path Parameters:**
     *   `webhookToken`: Your unique authentication token.
@@ -125,6 +125,7 @@ The `statistics` field contains detailed flight data:
   "takeoff_snapshot": object | null,
   "landing_snapshot": object | null,
   "current_snapshot": object | null,
-  "max_entries": object | null
+  "max_entries": object | null,
+  "landing_scorecard": object | null
 }
 ```
