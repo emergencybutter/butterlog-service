@@ -16,7 +16,7 @@ RUN apt-get update && \
     cargo build --release
 
 # 2. Runner Stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install SSL CA certificates (required for secure outgoing HTTPS requests to Discord API)
 RUN apt-get update && apt-get install -y --no-install-recommends \

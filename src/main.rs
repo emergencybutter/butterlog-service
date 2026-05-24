@@ -68,8 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the router with trace logging
     let app = Router::new()
         .route("/", get(home_handler))
-        .route("/login", get(login_handler))
-        .route("/auth/callback", get(callback_handler))
+        .route("/api/v0/auth/login", get(login_handler))
+        .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
         .route(
             "/api/v0/users/:webhook_token/flights/:id",
@@ -155,7 +155,7 @@ async fn home_handler() -> impl IntoResponse {
             <div class="container">
                 <h1>ButterLog Backend</h1>
                 <p>Welcome! Authenticate using your Discord account to get started.</p>
-                <a href="/login" class="btn">Log In with Discord</a>
+                <a href="/api/v0/auth/login" class="btn">Log In with Discord</a>
             </div>
         </body>
         </html>
