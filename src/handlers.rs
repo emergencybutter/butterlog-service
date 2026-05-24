@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use crate::AppState;
 use sha2::{Digest, Sha256};
-use std::io::Cursor;
 
 #[derive(Deserialize)]
 pub struct CreateFlightRequest {
@@ -220,35 +219,35 @@ pub async fn upload_screenshot_handler(
         None => return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No screenshot field found" })))),
     };
 
+    // Refuse upload if file is larger than 100MB
+    if raw_bytes.len() > 100 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "File size exceeds 100MB limit" }))));
+    }
+
+    // Verify format is WebP
+    let format = image::guess_format(&raw_bytes).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Could not identify image format: {}", e) })))
+    })?;
+    if format != image::ImageFormat::WebP {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Only WebP images are allowed" }))));
+    }
+
+    // Load and verify dimensions (max width and height of 1600px)
+    let img = image::load_from_memory(&raw_bytes).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Invalid image data: {}", e) })))
+    })?;
+    if img.width() > 1600 || img.height() > 1600 {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Image dimensions exceed 1600px limit" }))));
+    }
+
     // Calculate SHA-256 hash of the upload
     let mut hasher = Sha256::new();
     hasher.update(&raw_bytes);
     let hash = format!("{:x}", hasher.finalize());
 
-    // Process image: resize to 1600px width if larger, compress to JPEG
-    let img = image::load_from_memory(&raw_bytes).map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Invalid image format: {}", e) })))
-    })?;
-
-    let resized_img = if img.width() > 1600 {
-        let aspect_ratio = img.height() as f32 / img.width() as f32;
-        let new_height = (1600.0 * aspect_ratio) as u32;
-        img.resize_exact(1600, new_height, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-
-    // Encode as optimized JPEG
-    let mut jpeg_bytes = Vec::new();
-    let mut cursor = Cursor::new(&mut jpeg_bytes);
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 80);
-    encoder.encode_image(&resized_img).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to compress image: {}", e) })))
-    })?;
-
     // Upload to Cloudflare R2
-    let key = format!("screenshots/{}/{}.jpg", flight_id, hash);
-    let url = state.r2.upload_object(&key, jpeg_bytes, "image/jpeg").await.map_err(|e| {
+    let key = format!("screenshots/{}/{}.webp", flight_id, hash);
+    let url = state.r2.upload_object(&key, raw_bytes, "image/webp").await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e })))
     })?;
 
@@ -286,8 +285,25 @@ pub async fn delete_screenshot_handler(
         return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Flight not found" }))));
     }
 
+    // Query URL from DB to determine file extension for R2 key
+    let url: Option<String> = sqlx::query_scalar("SELECT url FROM screenshots WHERE flight_id = $1 AND hash = $2")
+        .bind(flight_id)
+        .bind(&hash)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let key = if let Some(url_str) = url {
+        if url_str.ends_with(".webp") {
+            format!("screenshots/{}/{}.webp", flight_id, hash)
+        } else {
+            format!("screenshots/{}/{}.jpg", flight_id, hash)
+        }
+    } else {
+        format!("screenshots/{}/{}.webp", flight_id, hash)
+    };
+
     // Delete from R2
-    let key = format!("screenshots/{}/{}.jpg", flight_id, hash);
     let _ = state.r2.delete_object(&key).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e })))
     })?;
