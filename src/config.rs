@@ -13,6 +13,7 @@ pub struct Config {
     pub r2_access_key_id: String,
     pub r2_secret_access_key: String,
     pub r2_public_url: String,
+    #[allow(dead_code)]
     pub predetermined_channels: Option<String>,
 }
 

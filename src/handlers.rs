@@ -126,6 +126,24 @@ pub async fn add_discord_channel_handler(
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid channel ID format. Must be numeric." })))
     })?;
 
+    // Check if the channel is allowlisted
+    let is_allowlisted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM allowlisted_channels WHERE channel_id = $1)"
+    )
+    .bind(&payload.channel_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+
+    if !is_allowlisted {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "This channel is not allowlisted by server administrators for notifications."
+            }))
+        ));
+    }
+
     // Verify channel with serenity
     crate::discord::validate_discord_channel(&state.discord_http, parsed_id).await
         .map_err(|err| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": err }))))?;
@@ -481,6 +499,120 @@ pub async fn delete_screenshot_handler(
             tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
         }
     });
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct AllowlistChannelRequest {
+    #[serde(rename = "channelId", alias = "channel_id")]
+    pub channel_id: String,
+    #[serde(rename = "guildId", alias = "guild_id")]
+    pub guild_id: String,
+    #[serde(rename = "channelName", alias = "channel_name")]
+    pub channel_name: String,
+}
+
+pub async fn add_allowlist_channel_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AllowlistChannelRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    let user_discord_id: String = sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let user_discord_id_u64 = user_discord_id.parse::<u64>().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Invalid user Discord ID" })))
+    })?;
+
+    let guild_id_u64 = payload.guild_id.parse::<u64>().map_err(|_| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid guild ID" })))
+    })?;
+
+    let is_admin = crate::discord::is_user_admin_in_guild(&state.discord_http, guild_id_u64, user_discord_id_u64).await;
+    if !is_admin {
+        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "You are not an administrator of this server" }))));
+    }
+
+    // Verify channel with serenity
+    let channel_id_u64 = payload.channel_id.parse::<u64>().map_err(|_| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid channel ID format. Must be numeric." })))
+    })?;
+
+    crate::discord::validate_discord_channel(&state.discord_http, channel_id_u64).await
+        .map_err(|err| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": err }))))?;
+
+    // Insert into allowlisted_channels
+    sqlx::query(
+        "INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, $2, $3) \
+         ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name"
+    )
+    .bind(&payload.channel_id)
+    .bind(&payload.channel_name)
+    .bind(&payload.guild_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn delete_allowlist_channel_handler(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    let user_discord_id: String = sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let user_discord_id_u64 = user_discord_id.parse::<u64>().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Invalid user Discord ID" })))
+    })?;
+
+    // Fetch the guild_id of the channel first
+    let guild_id: Option<String> = sqlx::query_scalar("SELECT guild_id FROM allowlisted_channels WHERE channel_id = $1")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let guild_id_str = match guild_id {
+        Some(g) => g,
+        None => return Ok(StatusCode::NO_CONTENT), // Already deleted or not found
+    };
+
+    let guild_id_u64 = guild_id_str.parse::<u64>().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Invalid guild ID format in database" })))
+    })?;
+
+    let is_admin = crate::discord::is_user_admin_in_guild(&state.discord_http, guild_id_u64, user_discord_id_u64).await;
+    if !is_admin {
+        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "You are not an administrator of this server" }))));
+    }
+
+    // Delete from allowlisted_channels
+    sqlx::query("DELETE FROM allowlisted_channels WHERE channel_id = $1")
+        .bind(&channel_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    // Also clean up any user-registered notification channels mapped to this channel ID
+    sqlx::query("DELETE FROM discord_notification_channels WHERE channel_id = $1")
+        .bind(&channel_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

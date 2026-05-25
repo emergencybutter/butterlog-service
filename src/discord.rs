@@ -1,7 +1,7 @@
 use serenity::async_trait;
 use serenity::prelude::*;
 use serenity::model::gateway::Ready;
-use serenity::model::id::{ChannelId, MessageId, RoleId};
+use serenity::model::id::{ChannelId, MessageId, RoleId, GuildId, UserId};
 use serenity::model::channel::{Channel, ChannelType, GuildChannel};
 use serenity::model::guild::Member;
 use serenity::model::permissions::Permissions;
@@ -619,6 +619,7 @@ fn d_or_null<'a>(val: &'a Value, key: &str) -> Option<&'a Value> {
     }
 }
 
+#[allow(dead_code)]
 pub async fn get_bot_channels(
     http: &serenity::http::Http,
     predetermined_env: Option<&str>,
@@ -664,4 +665,84 @@ pub async fn get_bot_channels(
     }
 
     Ok(channels_list)
+}
+
+#[derive(Debug, Clone)]
+pub struct BotGuildInfo {
+    pub id: String,
+    pub name: String,
+    pub channels: Vec<(String, String)>, // (channel_id, channel_name)
+    pub is_user_admin: bool,
+}
+
+pub async fn is_user_admin_in_guild(
+    http: &serenity::http::Http,
+    guild_id: u64,
+    user_id: u64,
+) -> bool {
+    let g_id = GuildId::new(guild_id);
+    let u_id = UserId::new(user_id);
+
+    // 1. Check if the user is the owner of the guild
+    if let Ok(guild) = g_id.to_partial_guild(http).await {
+        if guild.owner_id == u_id {
+            return true;
+        }
+    }
+
+    // 2. Fetch member and check permissions based on roles
+    if let Ok(member) = http.get_member(g_id, u_id).await {
+        if let Ok(roles) = http.get_guild_roles(g_id).await {
+            let roles_map: std::collections::HashMap<_, _> = roles.into_iter().map(|r| (r.id, r)).collect();
+            let everyone_role_id = RoleId::new(guild_id);
+            let mut permissions = match roles_map.get(&everyone_role_id) {
+                Some(role) => role.permissions,
+                None => Permissions::empty(),
+            };
+
+            for role_id in &member.roles {
+                if let Some(role) = roles_map.get(role_id) {
+                    permissions |= role.permissions;
+                }
+            }
+
+            return permissions.administrator();
+        }
+    }
+
+    false
+}
+
+pub async fn get_bot_guilds_and_channels(
+    http: &serenity::http::Http,
+    user_discord_id: Option<u64>,
+) -> Result<Vec<BotGuildInfo>, String> {
+    let guilds = http.get_guilds(None, None).await
+        .map_err(|e| format!("Failed to fetch bot guilds: {}", e))?;
+
+    let mut list = Vec::new();
+    for guild in guilds {
+        let is_user_admin = if let Some(u_id) = user_discord_id {
+            is_user_admin_in_guild(http, guild.id.get(), u_id).await
+        } else {
+            false
+        };
+
+        let mut channels_list = Vec::new();
+        if let Ok(channels) = http.get_channels(guild.id).await {
+            for channel in channels {
+                if channel.kind == ChannelType::Text {
+                    channels_list.push((channel.id.to_string(), channel.name.clone()));
+                }
+            }
+        }
+
+        list.push(BotGuildInfo {
+            id: guild.id.to_string(),
+            name: guild.name.clone(),
+            channels: channels_list,
+            is_user_admin,
+        });
+    }
+    Ok(list)
 }

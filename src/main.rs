@@ -93,6 +93,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/discord-notification-channels/:channel_id",
             delete(handlers::delete_discord_channel_handler),
         )
+        .route(
+            "/api/v0/admin/allowlist-channel",
+            post(handlers::add_allowlist_channel_handler),
+        )
+        .route(
+            "/api/v0/admin/allowlist-channel/:channel_id",
+            delete(handlers::delete_allowlist_channel_handler),
+        )
+        .route(
+            "/admin/allowlist-channel",
+            post(handlers::add_allowlist_channel_handler),
+        )
+        .route(
+            "/admin/allowlist-channel/:channel_id",
+            delete(handlers::delete_allowlist_channel_handler),
+        )
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
         .route(
             "/api/v0/users/:webhook_token/flights/:id",
@@ -260,14 +276,47 @@ async fn settings_handler(
         }
     };
 
-    let channels = match discord::get_bot_channels(&state.discord_http, state.config.predetermined_channels.as_deref()).await {
-        Ok(c) => c,
+    // Fetch user's Discord ID from the database
+    let user_discord_id_str: String = match sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(id) => id,
         Err(e) => {
-            tracing::error!("Failed to fetch bot channels: {}", e);
-            vec![("1462209019740426452".to_string(), "Default Voyager Channel".to_string())]
+            tracing::error!("Failed to fetch user Discord ID: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load user profile. Please try logging in again."
+            ).into_response();
         }
     };
 
+    let user_discord_id = user_discord_id_str.parse::<u64>().ok();
+
+    // Fetch all guilds the bot is in and details about the user's admin status
+    let guilds_info = match discord::get_bot_guilds_and_channels(&state.discord_http, user_discord_id).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!("Failed to fetch bot guilds and channels: {}", e);
+            vec![]
+        }
+    };
+
+    // Fetch allowlisted channels from the database
+    let allowlisted_channels: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT channel_id, channel_name, guild_id FROM allowlisted_channels"
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let allowlisted_ids: std::collections::HashSet<String> = allowlisted_channels
+        .iter()
+        .map(|(id, _, _)| id.clone())
+        .collect();
+
+    // Fetch channels the current user has enabled for notifications
     let enabled_channels: Vec<String> = sqlx::query_scalar(
         "SELECT channel_id FROM discord_notification_channels WHERE user_id = $1"
     )
@@ -276,62 +325,169 @@ async fn settings_handler(
     .await
     .unwrap_or_default();
 
-    let mut predetermined_html = String::new();
-    for (id, name) in &channels {
-        let is_checked = enabled_channels.contains(id);
-        let checked_attr = if is_checked { "checked" } else { "" };
-        predetermined_html.push_str(&format!(
-            r#"
-            <div class="channel-row">
-                <div class="channel-info">
-                    <span class="channel-name">{}</span>
-                    <span class="channel-id">ID: {}</span>
-                </div>
-                <label class="switch">
-                    <input type="checkbox" id="switch-{}" onclick="toggleChannel('{}', this.checked)" {}>
-                    <span class="slider"></span>
-                </label>
-            </div>
-            "#,
-            name, id, id, id, checked_attr
-        ));
-    }
+    // Group allowlisted channels by guild name
+    let guild_names: std::collections::HashMap<String, String> = guilds_info
+        .iter()
+        .map(|g| (g.id.clone(), g.name.clone()))
+        .collect();
 
-    let mut custom_html = String::new();
-    for id in &enabled_channels {
-        if !channels.iter().any(|(p_id, _)| p_id == id) {
-            custom_html.push_str(&format!(
+    // 1. Build Admin Controls HTML
+    let mut admin_html = String::new();
+    let mut is_any_admin = false;
+
+    for guild in &guilds_info {
+        if guild.is_user_admin {
+            is_any_admin = true;
+            let mut channels_html = String::new();
+
+            if guild.channels.is_empty() {
+                channels_html.push_str(r#"<div class="no-channels">No text channels found in this server.</div>"#);
+            } else {
+                for (chan_id, chan_name) in &guild.channels {
+                    let is_checked = allowlisted_ids.contains(chan_id);
+                    let checked_attr = if is_checked { "checked" } else { "" };
+                    
+                    // Escape channel name for javascript string parameters and HTML safety
+                    let escaped_name = chan_name
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('"', "&quot;");
+
+                    channels_html.push_str(&format!(
+                        r#"
+                        <div class="channel-row">
+                            <div class="channel-info">
+                                <span class="channel-name">#{}</span>
+                                <span class="channel-id">ID: {}</span>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="allowlist-{}" onclick="toggleAllowlist('{}', '{}', '{}', this.checked)" {}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        "#,
+                        chan_name, chan_id, chan_id, chan_id, guild.id, escaped_name, checked_attr
+                    ));
+                }
+            }
+
+            admin_html.push_str(&format!(
                 r#"
-                <div class="channel-row custom-row">
-                    <div class="channel-info">
-                        <span class="channel-name">Custom Channel</span>
-                        <span class="channel-id">ID: {}</span>
+                <div class="guild-card">
+                    <div class="guild-header">
+                        <svg class="guild-icon-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                        <span class="guild-title">{}</span>
+                        <span class="badge admin-badge">Server Admin</span>
                     </div>
-                    <button class="btn-delete" onclick="deleteChannel('{}')">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                        Remove
-                    </button>
+                    <div class="channel-list">
+                        {}
+                    </div>
                 </div>
                 "#,
-                id, id
+                guild.name, channels_html
             ));
         }
     }
-    
-    let custom_section = if custom_html.is_empty() {
-        "".to_string()
-    } else {
+
+    let admin_section = if is_any_admin {
         format!(
             r#"
-            <div class="section-title">Registered Custom Channels</div>
-            <div class="channel-list">
-                {}
-            </div>
+            <section class="settings-section">
+                <div class="section-title-container">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                    <span class="section-title">Admin Controls</span>
+                </div>
+                <p class="section-desc">As a Discord administrator, allowlist channels to let server members subscribe to flight notifications there.</p>
+                <div class="guilds-container">
+                    {}
+                </div>
+            </section>
             "#,
-            custom_html
+            admin_html
         )
+    } else {
+        "".to_string()
     };
 
+    // 2. Build User Available Channels HTML
+    let mut available_html = String::new();
+    
+    // Group allowlisted channels by guild
+    let mut allowlisted_by_guild: std::collections::HashMap<String, Vec<(&String, &String)>> = std::collections::HashMap::new();
+    for (chan_id, chan_name, guild_id) in &allowlisted_channels {
+        allowlisted_by_guild.entry(guild_id.clone()).or_default().push((chan_id, chan_name));
+    }
+
+    if allowlisted_channels.is_empty() {
+        available_html.push_str(
+            r#"
+            <div class="no-channels-fallback">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                <p>No channels have been allowlisted by server administrators yet.</p>
+                <p class="small-desc">Please ask a Discord admin to log in and allowlist channels.</p>
+            </div>
+            "#
+        );
+    } else {
+        for (guild_id, chans) in &allowlisted_by_guild {
+            let guild_name = guild_names.get(guild_id).cloned().unwrap_or_else(|| format!("Server ({})", guild_id));
+            let mut chans_html = String::new();
+
+            for (chan_id, chan_name) in chans {
+                let is_checked = enabled_channels.contains(*chan_id);
+                let checked_attr = if is_checked { "checked" } else { "" };
+
+                chans_html.push_str(&format!(
+                    r#"
+                    <div class="channel-row">
+                        <div class="channel-info">
+                            <span class="channel-name">#{}</span>
+                            <span class="channel-id">ID: {}</span>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="switch-{}" onclick="toggleNotification('{}', this.checked)" {}>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    "#,
+                    chan_name, chan_id, chan_id, chan_id, checked_attr
+                ));
+            }
+
+            available_html.push_str(&format!(
+                r#"
+                <div class="guild-card">
+                    <div class="guild-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                        <span class="guild-title">{}</span>
+                    </div>
+                    <div class="channel-list">
+                        {}
+                    </div>
+                </div>
+                "#,
+                guild_name, chans_html
+            ));
+        }
+    }
+
+    let user_section = format!(
+        r#"
+        <section class="settings-section">
+            <div class="section-title-container">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+                <span class="section-title">Notification Channels</span>
+            </div>
+            <p class="section-desc">Select which allowlisted channels will receive your flight log announcements.</p>
+            <div class="guilds-container">
+                {}
+            </div>
+        </section>
+        "#,
+        available_html
+    );
+
+    // Render the layout
     Html(format!(
         r#"
         <!DOCTYPE html>
@@ -342,105 +498,242 @@ async fn settings_handler(
             <title>ButterLog Notification Settings</title>
             <meta name="description" content="Manage your Discord notification channels for ButterLog flight telemetry.">
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
+                @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+                
+                :root {{
+                    --bg-gradient: radial-gradient(circle at 50% 0%, #1e1e3f 0%, #0d0d16 100%);
+                    --panel-bg: rgba(30, 30, 46, 0.45);
+                    --border-color: rgba(255, 255, 255, 0.08);
+                    --text-primary: #cdd6f4;
+                    --text-secondary: #a6adc8;
+                    --text-muted: #6c7086;
+                    --primary-color: #cba6f7;
+                    --primary-hover: #b4befe;
+                    --accent-pink: #f5c2e7;
+                    --accent-green: #a6e3a1;
+                    --accent-red: #f38ba8;
+                    --card-bg: rgba(17, 17, 27, 0.35);
+                }}
+
                 body {{
                     font-family: 'Outfit', sans-serif;
-                    background: radial-gradient(circle at top left, #1e1e38, #11111b);
-                    color: #cdd6f4;
+                    background: var(--bg-gradient);
+                    color: var(--text-primary);
                     min-height: 100vh;
                     margin: 0;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: flex-start;
-                    padding: 2rem 1rem;
+                    padding: 3rem 1rem;
                     box-sizing: border-box;
                 }}
+
                 .settings-container {{
-                    max-width: 600px;
+                    max-width: 700px;
                     width: 100%;
-                    background: rgba(30, 30, 46, 0.45);
-                    backdrop-filter: blur(16px);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 24px;
-                    padding: 2.5rem;
-                    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-                    margin-top: 1.5rem;
+                    background: var(--panel-bg);
+                    backdrop-filter: blur(20px);
+                    -webkit-backdrop-filter: blur(20px);
+                    border: 1px solid var(--border-color);
+                    border-radius: 28px;
+                    padding: 3rem;
+                    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
                     box-sizing: border-box;
+                    animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
                 }}
+
+                @keyframes fadeIn {{
+                    from {{ opacity: 0; transform: translateY(15px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+
                 .header {{
                     text-align: center;
-                    margin-bottom: 2rem;
+                    margin-bottom: 3rem;
                 }}
+
                 h1 {{
-                    font-size: 2.2rem;
+                    font-size: 2.5rem;
                     font-weight: 700;
                     margin: 0 0 0.5rem 0;
-                    background: linear-gradient(90deg, #cba6f7, #b4befe);
+                    background: linear-gradient(90deg, var(--primary-color), var(--primary-hover));
                     -webkit-background-clip: text;
                     -webkit-text-fill-color: transparent;
+                    letter-spacing: -0.5px;
                 }}
+
                 .subtitle {{
-                    color: #a6adc8;
-                    font-size: 1rem;
+                    color: var(--text-secondary);
+                    font-size: 1.1rem;
                     margin: 0;
+                    font-weight: 300;
                 }}
+
+                .settings-section {{
+                    margin-bottom: 3.5rem;
+                }}
+
+                .settings-section:last-of-type {{
+                    margin-bottom: 1rem;
+                }}
+
+                .section-title-container {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.75rem;
+                    margin-bottom: 0.5rem;
+                    color: var(--accent-pink);
+                }}
+
                 .section-title {{
-                    font-size: 0.95rem;
+                    font-size: 1.2rem;
                     font-weight: 600;
-                    color: #f5c2e7;
-                    margin: 2rem 0 1rem 0;
                     text-transform: uppercase;
-                    letter-spacing: 1px;
+                    letter-spacing: 1.5px;
                 }}
-                .channel-list {{
-                    background: rgba(17, 17, 27, 0.35);
+
+                .section-desc {{
+                    font-size: 0.95rem;
+                    color: var(--text-secondary);
+                    margin: 0 0 1.5rem 0;
+                    line-height: 1.5;
+                }}
+
+                .guilds-container {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 1.5rem;
+                }}
+
+                .guild-card {{
+                    background: var(--card-bg);
                     border: 1px solid rgba(255, 255, 255, 0.04);
-                    border-radius: 16px;
-                    padding: 0.5rem;
-                    margin-bottom: 1.5rem;
+                    border-radius: 20px;
+                    padding: 1.5rem;
+                    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+                    transition: border-color 0.3s, transform 0.3s;
                 }}
+
+                .guild-card:hover {{
+                    border-color: rgba(255, 255, 255, 0.08);
+                }}
+
+                .guild-header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.75rem;
+                    margin-bottom: 1.25rem;
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+                    padding-bottom: 0.75rem;
+                }}
+
+                .guild-title {{
+                    font-weight: 600;
+                    font-size: 1.1rem;
+                    color: var(--text-primary);
+                }}
+
+                .badge {{
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    padding: 0.25rem 0.5rem;
+                    border-radius: 6px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }}
+
+                .admin-badge {{
+                    background: rgba(203, 166, 247, 0.15);
+                    color: var(--primary-color);
+                    border: 1px solid rgba(203, 166, 247, 0.3);
+                }}
+
+                .channel-list {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.5rem;
+                }}
+
                 .channel-row {{
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    padding: 1rem;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-                    transition: background-color 0.2s;
-                }}
-                .channel-row:last-child {{
-                    border-bottom: none;
-                }}
-                .channel-row:hover {{
-                    background-color: rgba(255, 255, 255, 0.02);
+                    padding: 0.75rem 1rem;
                     border-radius: 12px;
+                    background: rgba(255, 255, 255, 0.01);
+                    border: 1px solid transparent;
+                    transition: background-color 0.2s, border-color 0.2s;
                 }}
+
+                .channel-row:hover {{
+                    background-color: rgba(255, 255, 255, 0.03);
+                    border-color: rgba(255, 255, 255, 0.03);
+                }}
+
                 .channel-info {{
                     display: flex;
                     flex-direction: column;
                 }}
+
                 .channel-name {{
-                    font-weight: 600;
-                    color: #cdd6f4;
+                    font-weight: 500;
+                    color: var(--text-primary);
                     font-size: 1rem;
                 }}
+
                 .channel-id {{
                     font-size: 0.8rem;
-                    color: #6c7086;
-                    margin-top: 0.2rem;
+                    color: var(--text-muted);
+                    margin-top: 0.15rem;
                 }}
-                /* Toggle switch */
+
+                .no-channels {{
+                    color: var(--text-muted);
+                    font-size: 0.9rem;
+                    text-align: center;
+                    padding: 1rem 0;
+                    font-style: italic;
+                }}
+
+                .no-channels-fallback {{
+                    text-align: center;
+                    padding: 3rem 2rem;
+                    background: var(--card-bg);
+                    border-radius: 20px;
+                    border: 1px dashed rgba(255, 255, 255, 0.1);
+                    color: var(--text-secondary);
+                }}
+
+                .no-channels-fallback svg {{
+                    margin-bottom: 1rem;
+                    color: var(--accent-pink);
+                }}
+
+                .no-channels-fallback p {{
+                    margin: 0.25rem 0;
+                    font-size: 1rem;
+                }}
+
+                .no-channels-fallback .small-desc {{
+                    font-size: 0.85rem;
+                    color: var(--text-muted);
+                }}
+
+                /* Toggle Switch */
                 .switch {{
                     position: relative;
                     display: inline-block;
                     width: 48px;
                     height: 24px;
                 }}
+
                 .switch input {{
                     opacity: 0;
                     width: 0;
                     height: 0;
                 }}
+
                 .slider {{
                     position: absolute;
                     cursor: pointer;
@@ -450,6 +743,7 @@ async fn settings_handler(
                     border-radius: 24px;
                     border: 1px solid rgba(255, 255, 255, 0.05);
                 }}
+
                 .slider:before {{
                     position: absolute;
                     content: "";
@@ -457,42 +751,48 @@ async fn settings_handler(
                     width: 16px;
                     left: 3px;
                     bottom: 3px;
-                    background-color: #a6adc8;
+                    background-color: var(--text-secondary);
                     transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
                     border-radius: 50%;
                 }}
+
                 input:checked + .slider {{
                     background-color: rgba(166, 227, 161, 0.2);
                     border-color: rgba(166, 227, 161, 0.4);
                 }}
+
                 input:checked + .slider:before {{
                     transform: translateX(24px);
-                    background-color: #a6e3a1;
+                    background-color: var(--accent-green);
                 }}
-                /* Buttons and input */
+
+                /* Input and Custom Channels */
                 .input-group {{
                     display: flex;
                     gap: 0.75rem;
                     margin-top: 1rem;
                 }}
+
                 input[type="text"] {{
                     flex: 1;
                     background: rgba(17, 17, 27, 0.6);
                     border: 1px solid rgba(255, 255, 255, 0.08);
                     border-radius: 12px;
                     padding: 0.75rem 1rem;
-                    color: #cdd6f4;
+                    color: var(--text-primary);
                     font-family: inherit;
                     font-size: 0.95rem;
                     outline: none;
                     transition: border-color 0.2s, box-shadow 0.2s;
                 }}
+
                 input[type="text"]:focus {{
-                    border-color: #cba6f7;
+                    border-color: var(--primary-color);
                     box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.15);
                 }}
+
                 button {{
-                    background: #cba6f7;
+                    background: var(--primary-color);
                     color: #11111b;
                     border: none;
                     border-radius: 12px;
@@ -503,57 +803,51 @@ async fn settings_handler(
                     font-size: 0.95rem;
                     transition: transform 0.2s, background-color 0.2s;
                 }}
+
                 button:hover {{
-                    background: #b4befe;
+                    background: var(--primary-hover);
                     transform: translateY(-1px);
                 }}
-                .btn-delete {{
-                    background: rgba(243, 139, 168, 0.1);
-                    color: #f38ba8;
-                    border: 1px solid rgba(243, 139, 168, 0.2);
-                    padding: 0.5rem 1rem;
-                    font-size: 0.85rem;
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                    border-radius: 8px;
-                    cursor: pointer;
-                    font-family: inherit;
-                    transition: background-color 0.2s;
-                }}
-                .btn-delete:hover {{
-                    background: rgba(243, 139, 168, 0.2);
-                }}
-                /* Toast Notification */
+
+                /* Toast Notifications */
                 .toast-container {{
                     position: fixed;
                     bottom: 2rem;
                     right: 2rem;
                     z-index: 1000;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.75rem;
                 }}
+
                 .toast {{
                     background: rgba(30, 30, 46, 0.95);
                     border: 1px solid rgba(255, 255, 255, 0.1);
                     padding: 1rem 1.5rem;
-                    border-radius: 12px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                    border-radius: 14px;
+                    box-shadow: 0 15px 30px rgba(0,0,0,0.5);
                     display: flex;
                     align-items: center;
                     gap: 0.75rem;
-                    margin-top: 0.5rem;
-                    animation: slideIn 0.3s ease, fadeOut 0.3s ease 2.7s forwards;
-                    color: #cdd6f4;
+                    animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1), fadeOut 0.3s ease 2.7s forwards;
+                    color: var(--text-primary);
+                    font-weight: 500;
+                    font-size: 0.95rem;
                 }}
+
                 .toast.success {{
-                    border-left: 4px solid #a6e3a1;
+                    border-left: 4px solid var(--accent-green);
                 }}
+
                 .toast.error {{
-                    border-left: 4px solid #f38ba8;
+                    border-left: 4px solid var(--accent-red);
                 }}
+
                 @keyframes slideIn {{
-                    from {{ transform: translateX(100%); opacity: 0; }}
+                    from {{ transform: translateX(120%); opacity: 0; }}
                     to {{ transform: translateX(0); opacity: 1; }}
                 }}
+
                 @keyframes fadeOut {{
                     to {{ opacity: 0; transform: translateY(10px); }}
                 }}
@@ -566,20 +860,19 @@ async fn settings_handler(
                     <p class="subtitle">Select the channels you wish to receive flight telemetry embeds</p>
                 </header>
 
-                <section>
-                    <div class="section-title">Available Channels</div>
-                    <div class="channel-list">
-                        {}
-                    </div>
-                </section>
+                {}
 
                 {}
 
-                <section>
-                    <div class="section-title">Register Custom Channel</div>
+                <section class="settings-section">
+                    <div class="section-title-container">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                        <span class="section-title">Register Channel by ID</span>
+                    </div>
+                    <p class="section-desc">Have an allowlisted channel that doesn't appear above? Add it directly by its ID.</p>
                     <div class="input-group">
-                        <input type="text" id="custom-channel-id" placeholder="Enter custom Discord Channel ID..." />
-                        <button onclick="addCustomChannel()">Add Channel</button>
+                        <input type="text" id="custom-channel-id" placeholder="Enter Discord Channel ID..." />
+                        <button onclick="addCustomChannel()">Register</button>
                     </div>
                 </section>
             </main>
@@ -596,7 +889,44 @@ async fn settings_handler(
                     setTimeout(() => toast.remove(), 3000);
                 }}
 
-                async function toggleChannel(channelId, checked) {{
+                async function toggleAllowlist(channelId, guildId, channelName, checked) {{
+                    try {{
+                        let response;
+                        if (checked) {{
+                            response = await fetch('/admin/allowlist-channel', {{
+                                method: 'POST',
+                                headers: {{
+                                    'Content-Type': 'application/json'
+                                }},
+                                body: JSON.stringify({{ 
+                                    channelId: channelId,
+                                    guildId: guildId,
+                                    channelName: channelName
+                                }})
+                            }});
+                        }} else {{
+                            response = await fetch(`/admin/allowlist-channel/${{channelId}}`, {{
+                                method: 'DELETE'
+                            }});
+                        }}
+
+                        if (response.ok) {{
+                            showToast(checked ? 'Channel added to allowlist!' : 'Channel removed from allowlist!', 'success');
+                            // Reload after a short delay to update the user notifications section
+                            setTimeout(() => window.location.reload(), 1000);
+                        }} else {{
+                            const data = await response.json().catch(() => ({{}}));
+                            const errMsg = data.error || 'Request failed';
+                            showToast(errMsg, 'error');
+                            document.getElementById(`allowlist-${{channelId}}`).checked = !checked;
+                        }}
+                    }} catch (err) {{
+                        showToast('Network error occurred', 'error');
+                        document.getElementById(`allowlist-${{channelId}}`).checked = !checked;
+                    }}
+                }}
+
+                async function toggleNotification(channelId, checked) {{
                     try {{
                         let response;
                         if (checked) {{
@@ -614,8 +944,7 @@ async fn settings_handler(
                         }}
 
                         if (response.ok) {{
-                            showToast(checked ? 'Channel enabled successfully!' : 'Channel disabled successfully!', 'success');
-                            setTimeout(() => window.location.reload(), 1000);
+                            showToast(checked ? 'Notifications enabled for channel!' : 'Notifications disabled for channel!', 'success');
                         }} else {{
                             const data = await response.json().catch(() => ({{}}));
                             const errMsg = data.error || 'Request failed';
@@ -625,24 +954,6 @@ async fn settings_handler(
                     }} catch (err) {{
                         showToast('Network error occurred', 'error');
                         document.getElementById(`switch-${{channelId}}`).checked = !checked;
-                    }}
-                }}
-
-                async function deleteChannel(channelId) {{
-                    try {{
-                        const response = await fetch(`/discord-notification-channels/${{channelId}}`, {{
-                            method: 'DELETE'
-                        }});
-                        if (response.ok) {{
-                            showToast('Custom channel removed successfully!', 'success');
-                            setTimeout(() => window.location.reload(), 1000);
-                        }} else {{
-                            const data = await response.json().catch(() => ({{}}));
-                            const errMsg = data.error || 'Failed to remove channel';
-                            showToast(errMsg, 'error');
-                        }}
-                    }} catch (err) {{
-                        showToast('Network error occurred', 'error');
                     }}
                 }}
 
@@ -664,7 +975,7 @@ async fn settings_handler(
                         }});
 
                         if (response.ok) {{
-                            showToast('Custom channel successfully added!', 'success');
+                            showToast('Channel registered successfully!', 'success');
                             input.value = '';
                             setTimeout(() => window.location.reload(), 1000);
                         }} else {{
@@ -680,8 +991,8 @@ async fn settings_handler(
         </body>
         </html>
         "#,
-        predetermined_html,
-        custom_section
+        admin_section,
+        user_section
     ))
     .into_response()
 }
