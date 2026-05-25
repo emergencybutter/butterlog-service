@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State, Multipart},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::IntoResponse,
     Json,
 };
@@ -31,6 +31,12 @@ pub struct FlightResponse {
     pub screenshots: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct AddChannelRequest {
+    #[serde(rename = "channelId", alias = "channel_id")]
+    pub channel_id: String,
+}
+
 async fn authenticate_user(
     db_pool: &PgPool,
     webhook_token: &str,
@@ -45,6 +51,116 @@ async fn authenticate_user(
         Some(id) => Ok(id),
         None => Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Invalid webhook token" })))),
     }
+}
+
+async fn get_user_id_from_session(
+    db_pool: &PgPool,
+    headers: &HeaderMap,
+) -> Result<i64, (StatusCode, Json<serde_json::Value>)> {
+    // 1. Check Authorization header
+    let mut token = None;
+    if let Some(auth_val) = headers.get("Authorization").and_then(|v| v.to_str().ok()) {
+        if auth_val.starts_with("Bearer ") {
+            token = Some(auth_val[7..].to_string());
+        } else {
+            token = Some(auth_val.to_string());
+        }
+    }
+
+    // 2. Check Cookie header
+    if token.is_none() {
+        if let Some(cookie_val) = headers.get("Cookie").and_then(|v| v.to_str().ok()) {
+            for cookie in cookie_val.split(';') {
+                let parts: Vec<&str> = cookie.trim().split('=').collect();
+                if parts.len() == 2 && (parts[0] == "token" || parts[0] == "session") {
+                    token = Some(parts[1].to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    let token_str = match token {
+        Some(t) => t,
+        None => return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" })))),
+    };
+
+    let user_id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE api_token = $1")
+        .bind(&token_str)
+        .fetch_optional(db_pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    match user_id {
+        Some(id) => Ok(id),
+        None => Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Invalid session token" })))),
+    }
+}
+
+pub async fn get_discord_channels_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    let channels: Vec<String> = sqlx::query_scalar(
+        "SELECT channel_id FROM discord_notification_channels WHERE user_id = $1 ORDER BY id"
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok((StatusCode::OK, Json(channels)))
+}
+
+pub async fn add_discord_channel_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AddChannelRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    // Parse channel ID to make sure it's valid u64
+    let parsed_id = payload.channel_id.parse::<u64>().map_err(|_| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid channel ID format. Must be numeric." })))
+    })?;
+
+    // Verify channel with serenity
+    crate::discord::validate_discord_channel(&state.discord_http, parsed_id).await
+        .map_err(|err| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": err }))))?;
+
+    // Insert channel
+    sqlx::query(
+        "INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2) \
+         ON CONFLICT (user_id, channel_id) DO NOTHING"
+    )
+    .bind(user_id)
+    .bind(&payload.channel_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn delete_discord_channel_handler(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    sqlx::query(
+        "DELETE FROM discord_notification_channels WHERE user_id = $1 AND channel_id = $2"
+    )
+    .bind(user_id)
+    .bind(&channel_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn create_flight_handler(
@@ -72,6 +188,17 @@ pub async fn create_flight_handler(
         statistics: row.3,
         screenshots: Vec::new(),
     };
+
+    // Trigger Discord Sync in background
+    let db_clone = state.db.clone();
+    let r2_clone = state.r2.clone();
+    let discord_http_clone = state.discord_http.clone();
+    let flight_id = response.id;
+    tokio::spawn(async move {
+        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
+            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
+        }
+    });
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -126,6 +253,16 @@ pub async fn update_flight_handler(
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    // Trigger Discord Sync in background
+    let db_clone = state.db.clone();
+    let r2_clone = state.r2.clone();
+    let discord_http_clone = state.discord_http.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
+            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
+        }
+    });
 
     let response = FlightResponse {
         id: flight_id,
@@ -262,6 +399,16 @@ pub async fn upload_screenshot_handler(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
 
+    // Trigger Discord Sync in background
+    let db_clone = state.db.clone();
+    let r2_clone = state.r2.clone();
+    let discord_http_clone = state.discord_http.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
+            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
+        }
+    });
+
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash }))))
 }
 
@@ -293,28 +440,47 @@ pub async fn delete_screenshot_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
 
-    let key = if let Some(url_str) = url {
-        if url_str.ends_with(".webp") {
-            format!("screenshots/{}/{}.webp", flight_id, hash)
-        } else {
-            format!("screenshots/{}/{}.jpg", flight_id, hash)
-        }
-    } else {
-        format!("screenshots/{}/{}.webp", flight_id, hash)
-    };
-
-    // Delete from R2
-    let _ = state.r2.delete_object(&key).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e })))
-    })?;
-
-    // Delete from DB
+    // Delete from DB first
     sqlx::query("DELETE FROM screenshots WHERE flight_id = $1 AND hash = $2")
         .bind(flight_id)
         .bind(&hash)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    // Check if any other flight references this hash
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM screenshots WHERE hash = $1")
+        .bind(&hash)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    if count == 0 {
+        let key = if let Some(url_str) = url {
+            if url_str.ends_with(".webp") {
+                format!("screenshots/{}/{}.webp", flight_id, hash)
+            } else {
+                format!("screenshots/{}/{}.jpg", flight_id, hash)
+            }
+        } else {
+            format!("screenshots/{}/{}.webp", flight_id, hash)
+        };
+
+        // Delete from R2
+        let _ = state.r2.delete_object(&key).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e })))
+        })?;
+    }
+
+    // Trigger Discord Sync in background
+    let db_clone = state.db.clone();
+    let r2_clone = state.r2.clone();
+    let discord_http_clone = state.discord_http.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
+            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
+        }
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -64,4 +64,19 @@ impl R2Client {
 
         Ok(())
     }
+
+    pub async fn download_object(&self, key: &str) -> Result<Vec<u8>, String> {
+        let resp = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to download object from R2: {:?}", e))?;
+
+        let data = resp.body.collect().await
+            .map_err(|e| format!("Failed to read R2 byte stream: {:?}", e))?;
+
+        Ok(data.into_bytes().to_vec())
+    }
 }

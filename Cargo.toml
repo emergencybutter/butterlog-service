@@ -20,3 +20,5 @@ aws-sdk-s3 = "1.45"
 aws-credential-types = { version = "1.2", features = ["hardcoded-credentials"] }
 image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png"] }
 sha2 = "0.10"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+

@@ -6,6 +6,7 @@ pub struct Config {
     pub discord_client_id: String,
     pub discord_client_secret: String,
     pub discord_redirect_uri: String,
+    pub discord_bot_token: String,
     pub port: u16,
     pub r2_bucket: String,
     pub r2_endpoint: String,
@@ -30,6 +31,9 @@ impl Config {
 
         let discord_redirect_uri = env::var("DISCORD_REDIRECT_URI")
             .expect("DISCORD_REDIRECT_URI environment variable must be set");
+
+        let discord_bot_token = env::var("DISCORD_BOT_TOKEN")
+            .expect("DISCORD_BOT_TOKEN environment variable must be set");
 
         let port = env::var("PORT")
             .ok()
@@ -56,6 +60,7 @@ impl Config {
             discord_client_id,
             discord_client_secret,
             discord_redirect_uri,
+            discord_bot_token,
             port,
             r2_bucket,
             r2_endpoint,

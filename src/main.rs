@@ -15,6 +15,7 @@ mod error;
 mod auth;
 mod r2;
 mod handlers;
+mod discord;
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -25,6 +26,7 @@ pub struct AppState {
     config: Config,
     http_client: reqwest::Client,
     r2: r2::R2Client,
+    discord_http: std::sync::Arc<serenity::http::Http>,
 }
 
 #[derive(Deserialize)]
@@ -58,11 +60,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let r2_client = r2::R2Client::new(&config);
 
+    // Initialize Discord Bot
+    let discord_http = discord::start_discord_bot(&config.discord_bot_token).await?;
+
     let state = AppState {
         db: db_pool,
         config: config.clone(),
         http_client: reqwest::Client::new(),
         r2: r2_client,
+        discord_http,
     };
 
     // Build the router with trace logging
@@ -70,6 +76,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(home_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
+        .route(
+            "/api/v0/discord-notification-channels",
+            get(handlers::get_discord_channels_handler).post(handlers::add_discord_channel_handler),
+        )
+        .route(
+            "/api/v0/discord-notification-channels/:channel_id",
+            delete(handlers::delete_discord_channel_handler),
+        )
+        .route(
+            "/discord-notification-channels",
+            get(handlers::get_discord_channels_handler).post(handlers::add_discord_channel_handler),
+        )
+        .route(
+            "/discord-notification-channels/:channel_id",
+            delete(handlers::delete_discord_channel_handler),
+        )
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
         .route(
             "/api/v0/users/:webhook_token/flights/:id",

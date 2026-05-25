@@ -6,11 +6,10 @@ This document describes the Web API for Butterlog, designed for consumption by b
 
 You can assume these base urls are proxied to the webservice:
 `https://butterlog.flyvoyager.net/api/v0`
-`https://butterlog.flyvoyager.net/login`
 
 ## Authentication
 
-In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/login`. At this point the use would follow the auth workflow normally and the client gets back some authentication token.
+In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/api/v0/auth/login`. At this point the use would follow the auth workflow normally and the client gets back some authentication token.
 
 Each user is given a webhookToken. Each user uses this base url:
 `https://butterlog.flyvoyager.net/api/v0/users/:webhookToken`
