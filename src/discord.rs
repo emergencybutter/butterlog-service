@@ -618,3 +618,50 @@ fn d_or_null<'a>(val: &'a Value, key: &str) -> Option<&'a Value> {
         None
     }
 }
+
+pub async fn get_bot_channels(
+    http: &serenity::http::Http,
+    predetermined_env: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut channels_list = Vec::new();
+
+    // 1. Parse predetermined channels from env if present
+    if let Some(raw) = predetermined_env {
+        for item in raw.split(',') {
+            let parts: Vec<&str> = item.trim().split(':').collect();
+            if parts.len() == 2 {
+                channels_list.push((parts[0].to_string(), parts[1].to_string()));
+            } else if !item.trim().is_empty() {
+                channels_list.push((item.trim().to_string(), format!("Channel {}", item.trim())));
+            }
+        }
+    }
+
+    // 2. Fetch channels from all guilds the bot is in
+    match http.get_guilds(None, None).await {
+        Ok(guilds) => {
+            for guild in guilds {
+                if let Ok(channels) = http.get_channels(guild.id).await {
+                    for channel in channels {
+                        if channel.kind == ChannelType::Text {
+                            let label = format!("{} - #{}", guild.name, channel.name);
+                            if !channels_list.iter().any(|(id, _)| id == &channel.id.to_string()) {
+                                channels_list.push((channel.id.to_string(), label));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch bot guilds dynamically: {:?}", e);
+        }
+    }
+
+    // 3. Fallback default channel if list is empty
+    if channels_list.is_empty() {
+        channels_list.push(("1462209019740426452".to_string(), "Default Voyager Channel".to_string()));
+    }
+
+    Ok(channels_list)
+}

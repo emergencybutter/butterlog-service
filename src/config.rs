@@ -13,6 +13,7 @@ pub struct Config {
     pub r2_access_key_id: String,
     pub r2_secret_access_key: String,
     pub r2_public_url: String,
+    pub predetermined_channels: Option<String>,
 }
 
 impl Config {
@@ -55,6 +56,8 @@ impl Config {
         let r2_public_url = env::var("R2_PUBLIC_URL")
             .expect("R2_PUBLIC_URL environment variable must be set");
 
+        let predetermined_channels = env::var("PREDETERMINED_CHANNELS").ok();
+
         Self {
             database_url,
             discord_client_id,
@@ -67,6 +70,7 @@ impl Config {
             r2_access_key_id,
             r2_secret_access_key,
             r2_public_url,
+            predetermined_channels,
         }
     }
 }

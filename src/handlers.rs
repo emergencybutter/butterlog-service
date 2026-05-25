@@ -53,7 +53,7 @@ async fn authenticate_user(
     }
 }
 
-async fn get_user_id_from_session(
+pub async fn get_user_id_from_session(
     db_pool: &PgPool,
     headers: &HeaderMap,
 ) -> Result<i64, (StatusCode, Json<serde_json::Value>)> {
