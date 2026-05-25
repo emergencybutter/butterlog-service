@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the router with trace logging
     let app = Router::new()
         .route("/", get(home_handler))
-        .route("/settings", get(settings_handler))
+        .route("/content/settings", get(settings_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(
@@ -240,7 +240,7 @@ async fn callback_handler(
         }
     }
 
-    let mut response = Redirect::temporary("/settings").into_response();
+    let mut response = Redirect::temporary("/content/settings").into_response();
     let cookie_val = format!("token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000", api_token);
     response.headers_mut().insert(
         axum::http::header::SET_COOKIE,
