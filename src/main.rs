@@ -85,27 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             delete(handlers::delete_discord_channel_handler),
         )
         .route(
-            "/discord-notification-channels",
-            get(handlers::get_discord_channels_handler).post(handlers::add_discord_channel_handler),
-        )
-        .route(
-            "/discord-notification-channels/:channel_id",
-            delete(handlers::delete_discord_channel_handler),
-        )
-        .route(
             "/api/v0/admin/allowlist-channel",
             post(handlers::add_allowlist_channel_handler),
         )
         .route(
             "/api/v0/admin/allowlist-channel/:channel_id",
-            delete(handlers::delete_allowlist_channel_handler),
-        )
-        .route(
-            "/admin/allowlist-channel",
-            post(handlers::add_allowlist_channel_handler),
-        )
-        .route(
-            "/admin/allowlist-channel/:channel_id",
             delete(handlers::delete_allowlist_channel_handler),
         )
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
@@ -916,7 +900,7 @@ async fn settings_handler(
                     try {{
                         let response;
                         if (checked) {{
-                            response = await fetch('/admin/allowlist-channel', {{
+                            response = await fetch('/api/v0/admin/allowlist-channel', {{
                                 method: 'POST',
                                 headers: {{
                                     'Content-Type': 'application/json'
@@ -928,7 +912,7 @@ async fn settings_handler(
                                 }})
                             }});
                         }} else {{
-                            response = await fetch(`/admin/allowlist-channel/${{channelId}}`, {{
+                            response = await fetch(`/api/v0/admin/allowlist-channel/${{channelId}}`, {{
                                 method: 'DELETE'
                             }});
                         }}
@@ -953,7 +937,7 @@ async fn settings_handler(
                     try {{
                         let response;
                         if (checked) {{
-                            response = await fetch('/discord-notification-channels', {{
+                            response = await fetch('/api/v0/discord-notification-channels', {{
                                 method: 'POST',
                                 headers: {{
                                     'Content-Type': 'application/json'
@@ -961,7 +945,7 @@ async fn settings_handler(
                                 body: JSON.stringify({{ channelId: channelId }})
                             }});
                         }} else {{
-                            response = await fetch(`/discord-notification-channels/${{channelId}}`, {{
+                            response = await fetch(`/api/v0/discord-notification-channels/${{channelId}}`, {{
                                 method: 'DELETE'
                             }});
                         }}
@@ -989,7 +973,7 @@ async fn settings_handler(
                     }}
 
                     try {{
-                        const response = await fetch('/discord-notification-channels', {{
+                        const response = await fetch('/api/v0/discord-notification-channels', {{
                             method: 'POST',
                             headers: {{
                                 'Content-Type': 'application/json'
