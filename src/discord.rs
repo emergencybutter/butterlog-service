@@ -378,8 +378,14 @@ pub async fn sync_flight_discord(
                     .embeds(all_embeds.clone())
                     .attachments(edit_attachments);
 
-                if let Err(e) = channel_id.edit_message(http, msg_id, builder).await {
-                    tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e);
+                tracing::info!("[Outgoing Request] Discord EDIT message {} in channel {}", msg_id, channel_id);
+                match channel_id.edit_message(http, msg_id, builder).await {
+                    Ok(_) => {
+                        tracing::info!("[Outgoing Response] Edited message {} successfully", msg_id);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e);
+                    }
                 }
             }
         } else {
@@ -388,8 +394,10 @@ pub async fn sync_flight_discord(
                 .embeds(all_embeds.clone())
                 .files(attachments.clone());
 
+            tracing::info!("[Outgoing Request] Discord SEND message in channel {}", channel_id);
             match channel_id.send_message(http, builder).await {
                 Ok(msg) => {
+                    tracing::info!("[Outgoing Response] Sent message {} successfully", msg.id);
                     // Record message in database
                     let msg_id_str = msg.id.to_string();
                     let _ = sqlx::query(

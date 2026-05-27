@@ -47,11 +47,13 @@ pub async fn exchange_code(
         ("redirect_uri", redirect_uri),
     ];
 
+    tracing::info!("[Outgoing Request] POST https://discord.com/api/v10/oauth2/token");
     let response = http_client
         .post("https://discord.com/api/v10/oauth2/token")
         .form(&params)
         .send()
         .await?;
+    tracing::info!("[Outgoing Response] {} for POST https://discord.com/api/v10/oauth2/token", response.status());
 
     if !response.status().is_success() {
         let err_body = response.text().await.unwrap_or_default();
@@ -70,11 +72,13 @@ pub async fn fetch_discord_user(
     http_client: &reqwest::Client,
     access_token: &str,
 ) -> Result<DiscordUser, AppError> {
+    tracing::info!("[Outgoing Request] GET https://discord.com/api/v10/users/@me");
     let response = http_client
         .get("https://discord.com/api/v10/users/@me")
         .bearer_auth(access_token)
         .send()
         .await?;
+    tracing::info!("[Outgoing Response] {} for GET https://discord.com/api/v10/users/@me", response.status());
 
     if !response.status().is_success() {
         let err_body = response.text().await.unwrap_or_default();

@@ -6,7 +6,6 @@ use axum::{
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -122,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/users/:webhook_token/flights/:id/screenshots/:hash",
             delete(handlers::delete_screenshot_handler),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(log_requests))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -132,6 +131,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn log_requests(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    
+    tracing::info!("[Incoming Request] {} {}", method, uri);
+    
+    let start = std::time::Instant::now();
+    let response = next.run(req).await;
+    let latency = start.elapsed();
+    
+    tracing::info!(
+        "[Incoming Response] {} {} -> Status: {} (took {:?})",
+        method,
+        uri,
+        response.status(),
+        latency
+    );
+    
+    response
 }
 
 async fn home_handler() -> impl IntoResponse {
