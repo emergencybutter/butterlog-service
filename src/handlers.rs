@@ -32,6 +32,7 @@ pub struct FlightResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct AddChannelRequest {
     #[serde(rename = "channelId", alias = "channel_id")]
     pub channel_id: String,
@@ -115,70 +116,29 @@ pub async fn get_discord_channels_handler(
 }
 
 pub async fn add_discord_channel_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<AddChannelRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let user_id = get_user_id_from_session(&state.db, &headers).await?;
-
-    // Parse channel ID to make sure it's valid u64
-    let parsed_id = payload.channel_id.parse::<u64>().map_err(|_| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid channel ID format. Must be numeric." })))
-    })?;
-
-    // Check if the channel is allowlisted
-    let is_allowlisted: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM allowlisted_channels WHERE channel_id = $1)"
-    )
-    .bind(&payload.channel_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
-
-    if !is_allowlisted {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "This channel is not allowlisted by server administrators for notifications."
-            }))
-        ));
-    }
-
-    // Verify channel with serenity
-    crate::discord::validate_discord_channel(&state.discord_http, parsed_id).await
-        .map_err(|err| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": err }))))?;
-
-    // Insert channel
-    sqlx::query(
-        "INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2) \
-         ON CONFLICT (user_id, channel_id) DO NOTHING"
-    )
-    .bind(user_id)
-    .bind(&payload.channel_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
-
-    Ok(StatusCode::CREATED)
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
+    Json(_payload): Json<AddChannelRequest>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "Direct mutation of notification channels is disabled. They are automatically managed."
+        }))
+    ))
 }
 
 pub async fn delete_discord_channel_handler(
-    State(state): State<AppState>,
-    Path(channel_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let user_id = get_user_id_from_session(&state.db, &headers).await?;
-
-    sqlx::query(
-        "DELETE FROM discord_notification_channels WHERE user_id = $1 AND channel_id = $2"
-    )
-    .bind(user_id)
-    .bind(&channel_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
-
-    Ok(StatusCode::NO_CONTENT)
+    State(_state): State<AppState>,
+    Path(_channel_id): Path<String>,
+    _headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "Direct mutation of notification channels is disabled. They are automatically managed."
+        }))
+    ))
 }
 
 pub async fn create_flight_handler(

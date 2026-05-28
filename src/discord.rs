@@ -267,6 +267,115 @@ pub struct DiscordUserInfo {
     pub avatar: Option<String>,
 }
 
+pub async fn maybe_update_user_notification_channels(
+    db: &PgPool,
+    http: &serenity::http::Http,
+    user_id: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Fetch user's discord_id and last update timestamp
+    let row: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT discord_id, discord_notification_channels_updated_at FROM users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+
+    let (discord_id_str, last_updated) = match row {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let user_discord_id = match discord_id_str.parse::<u64>() {
+        Ok(id) => id,
+        Err(_) => return Ok(()),
+    };
+
+    // Check if updated in the last hour
+    let now = chrono::Utc::now();
+    if let Some(last) = last_updated {
+        if now.signed_duration_since(last).num_hours() < 1 {
+            return Ok(());
+        }
+    }
+
+    // 2. Fetch all allowlisted channels to know what guilds we care about
+    let allowlisted: Vec<(String, String)> = sqlx::query_as(
+        "SELECT channel_id, guild_id FROM allowlisted_channels"
+    )
+    .fetch_all(db)
+    .await?;
+
+    // Determine distinct guilds
+    let mut guild_ids = std::collections::HashSet::new();
+    for (_, guild_id) in &allowlisted {
+        guild_ids.insert(guild_id.clone());
+    }
+
+    // 3. For each guild, check if user belongs to it
+    let mut user_guilds = std::collections::HashSet::new();
+    for guild_id_str in guild_ids {
+        if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
+            let g_id = serenity::model::id::GuildId::new(guild_id_u64);
+            let u_id = serenity::model::id::UserId::new(user_discord_id);
+            if http.get_member(g_id, u_id).await.is_ok() {
+                user_guilds.insert(guild_id_str);
+            }
+        }
+    }
+
+    // 4. Collect all allowlisted channel IDs that belong to the user's guilds
+    let mut target_channels = Vec::new();
+    for (channel_id, guild_id) in allowlisted {
+        if user_guilds.contains(&guild_id) {
+            target_channels.push(channel_id);
+        }
+    }
+
+    // 5. Update database inside a transaction
+    let mut tx = db.begin().await?;
+
+    // Delete channels not in the target list anymore
+    if target_channels.is_empty() {
+        sqlx::query("DELETE FROM discord_notification_channels WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "DELETE FROM discord_notification_channels WHERE user_id = $1 AND NOT (channel_id = ANY($2))"
+        )
+        .bind(user_id)
+        .bind(&target_channels)
+        .execute(&mut *tx)
+        .await?;
+
+        // Insert new ones
+        for channel_id in &target_channels {
+            sqlx::query(
+                "INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2) \
+                 ON CONFLICT (user_id, channel_id) DO NOTHING"
+            )
+            .bind(user_id)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    // Update timestamp
+    sqlx::query(
+        "UPDATE users SET discord_notification_channels_updated_at = $1 WHERE id = $2"
+    )
+    .bind(now)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
 pub async fn sync_flight_discord(
     db: &PgPool,
     r2: &R2Client,
@@ -274,8 +383,8 @@ pub async fn sync_flight_discord(
     flight_id: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch flight information and user information
-    let row: Option<(i64, String, Option<String>, Value, String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT f.id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar \
+    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
          WHERE f.id = $1"
@@ -284,10 +393,15 @@ pub async fn sync_flight_discord(
     .fetch_optional(db)
     .await?;
 
-    let (_, _departure, _arrival, statistics, discord_id, username, global_name, avatar) = match row {
+    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar) = match row {
         Some(r) => r,
         None => return Ok(()),
     };
+
+    // Update user notification channels before notifying
+    if let Err(e) = maybe_update_user_notification_channels(db, http, user_id).await {
+        tracing::error!("Failed to update user notification channels: {}", e);
+    }
 
     let user_info = DiscordUserInfo {
         discord_id,

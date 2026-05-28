@@ -419,31 +419,30 @@ async fn settings_handler(
     // 2. Build User Available Channels HTML
     let mut available_html = String::new();
     
-    // Group allowlisted channels by guild
-    let mut allowlisted_by_guild: std::collections::HashMap<String, Vec<(&String, &String)>> = std::collections::HashMap::new();
+    // Group enabled channels by guild
+    let mut enabled_by_guild: std::collections::HashMap<String, Vec<(&String, &String)>> = std::collections::HashMap::new();
     for (chan_id, chan_name, guild_id) in &allowlisted_channels {
-        allowlisted_by_guild.entry(guild_id.clone()).or_default().push((chan_id, chan_name));
+        if enabled_channels.contains(chan_id) {
+            enabled_by_guild.entry(guild_id.clone()).or_default().push((chan_id, chan_name));
+        }
     }
 
-    if allowlisted_channels.is_empty() {
+    if enabled_by_guild.is_empty() {
         available_html.push_str(
             r#"
             <div class="no-channels-fallback">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                <p>No channels have been allowlisted by server administrators yet.</p>
-                <p class="small-desc">Please ask a Discord admin to log in and allowlist channels.</p>
+                <p>No active notification channels found.</p>
+                <p class="small-desc">Announcement channels are automatically mapped based on the Discord servers you belong to.</p>
             </div>
             "#
         );
     } else {
-        for (guild_id, chans) in &allowlisted_by_guild {
+        for (guild_id, chans) in &enabled_by_guild {
             let guild_name = guild_names.get(guild_id).cloned().unwrap_or_else(|| format!("Server ({})", guild_id));
             let mut chans_html = String::new();
 
             for (chan_id, chan_name) in chans {
-                let is_checked = enabled_channels.contains(*chan_id);
-                let checked_attr = if is_checked { "checked" } else { "" };
-
                 chans_html.push_str(&format!(
                     r#"
                     <div class="channel-row">
@@ -451,13 +450,10 @@ async fn settings_handler(
                             <span class="channel-name">#{}</span>
                             <span class="channel-id">ID: {}</span>
                         </div>
-                        <label class="switch">
-                            <input type="checkbox" id="switch-{}" onclick="toggleNotification('{}', this.checked)" {}>
-                            <span class="slider"></span>
-                        </label>
+                        <span class="badge notified-badge">Notified</span>
                     </div>
                     "#,
-                    chan_name, chan_id, chan_id, chan_id, checked_attr
+                    chan_name, chan_id
                 ));
             }
 
@@ -485,7 +481,7 @@ async fn settings_handler(
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
                 <span class="section-title">Notification Channels</span>
             </div>
-            <p class="section-desc">Select which allowlisted channels will receive your flight log announcements.</p>
+            <p class="section-desc">The channels currently receiving your ButterLog flight telemetry embeds. Announcement channels are managed automatically.</p>
             <div class="guilds-container">
                 {}
             </div>
@@ -654,6 +650,12 @@ async fn settings_handler(
                     background: rgba(203, 166, 247, 0.15);
                     color: var(--primary-color);
                     border: 1px solid rgba(203, 166, 247, 0.3);
+                }}
+
+                .notified-badge {{
+                    background: rgba(166, 227, 161, 0.15);
+                    color: var(--accent-green);
+                    border: 1px solid rgba(166, 227, 161, 0.3);
                 }}
 
                 .channel-list {{
@@ -871,17 +873,6 @@ async fn settings_handler(
 
                 {}
 
-                <section class="settings-section">
-                    <div class="section-title-container">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-                        <span class="section-title">Register Channel by ID</span>
-                    </div>
-                    <p class="section-desc">Have an allowlisted channel that doesn't appear above? Add it directly by its ID.</p>
-                    <div class="input-group">
-                        <input type="text" id="custom-channel-id" placeholder="Enter Discord Channel ID..." />
-                        <button onclick="addCustomChannel()">Register</button>
-                    </div>
-                </section>
             </main>
 
             <div class="toast-container" id="toast-container"></div>
@@ -933,67 +924,7 @@ async fn settings_handler(
                     }}
                 }}
 
-                async function toggleNotification(channelId, checked) {{
-                    try {{
-                        let response;
-                        if (checked) {{
-                            response = await fetch('/api/v0/discord-notification-channels', {{
-                                method: 'POST',
-                                headers: {{
-                                    'Content-Type': 'application/json'
-                                }},
-                                body: JSON.stringify({{ channelId: channelId }})
-                            }});
-                        }} else {{
-                            response = await fetch(`/api/v0/discord-notification-channels/${{channelId}}`, {{
-                                method: 'DELETE'
-                            }});
-                        }}
 
-                        if (response.ok) {{
-                            showToast(checked ? 'Notifications enabled for channel!' : 'Notifications disabled for channel!', 'success');
-                        }} else {{
-                            const data = await response.json().catch(() => ({{}}));
-                            const errMsg = data.error || 'Request failed';
-                            showToast(errMsg, 'error');
-                            document.getElementById(`switch-${{channelId}}`).checked = !checked;
-                        }}
-                    }} catch (err) {{
-                        showToast('Network error occurred', 'error');
-                        document.getElementById(`switch-${{channelId}}`).checked = !checked;
-                    }}
-                }}
-
-                async function addCustomChannel() {{
-                    const input = document.getElementById('custom-channel-id');
-                    const channelId = input.value.trim();
-                    if (!channelId) {{
-                        showToast('Please enter a valid Channel ID', 'error');
-                        return;
-                    }}
-
-                    try {{
-                        const response = await fetch('/api/v0/discord-notification-channels', {{
-                            method: 'POST',
-                            headers: {{
-                                'Content-Type': 'application/json'
-                            }},
-                            body: JSON.stringify({{ channelId: channelId }})
-                        }});
-
-                        if (response.ok) {{
-                            showToast('Channel registered successfully!', 'success');
-                            input.value = '';
-                            setTimeout(() => window.location.reload(), 1000);
-                        }} else {{
-                            const data = await response.json().catch(() => ({{}}));
-                            const errMsg = data.error || 'Failed to add custom channel';
-                            showToast(errMsg, 'error');
-                        }}
-                    }} catch (err) {{
-                        showToast('Network error occurred', 'error');
-                    }}
-                }}
             </script>
         </body>
         </html>
