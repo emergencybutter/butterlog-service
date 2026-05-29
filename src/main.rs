@@ -26,6 +26,7 @@ pub struct AppState {
     http_client: reqwest::Client,
     r2: r2::R2Client,
     discord_http: std::sync::Arc<serenity::http::Http>,
+    pub peers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, (String, std::time::Instant)>>>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client: reqwest::Client::new(),
         r2: r2_client,
         discord_http,
+        peers: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Build the router with trace logging

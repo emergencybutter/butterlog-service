@@ -13,12 +13,16 @@ use sha2::{Digest, Sha256};
 pub struct CreateFlightRequest {
     pub departure: String,
     pub statistics: serde_json::Value,
+    pub multiplayer_enabled: Option<bool>,
+    pub udp_address: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateFlightRequest {
     pub arrival: Option<String>,
     pub statistics: serde_json::Value,
+    pub multiplayer_enabled: Option<bool>,
+    pub udp_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -29,6 +33,48 @@ pub struct FlightResponse {
     pub arrival: Option<String>,
     pub statistics: serde_json::Value,
     pub screenshots: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers: Option<Vec<String>>,
+}
+
+fn update_and_get_peers(
+    state: &crate::AppState,
+    user_id: i64,
+    multiplayer_enabled: Option<bool>,
+    udp_address: Option<String>,
+) -> Option<Vec<String>> {
+    let mut peers_lock = state.peers.lock().ok()?;
+    let now = std::time::Instant::now();
+
+    // 1. Update or remove current peer
+    if multiplayer_enabled.unwrap_or(false) {
+        if let Some(ref addr) = udp_address {
+            if !addr.trim().is_empty() {
+                peers_lock.insert(user_id, (addr.clone(), now));
+            }
+        }
+    } else if let Some(false) = multiplayer_enabled {
+        peers_lock.remove(&user_id);
+    }
+
+    // 2. Prune stale peers (older than 120s)
+    peers_lock.retain(|_, (_, last_seen)| {
+        now.duration_since(*last_seen) < std::time::Duration::from_secs(120)
+    });
+
+    // 3. Collect other active peers
+    let mut other_peers = Vec::new();
+    for (&peer_user_id, (addr, _)) in peers_lock.iter() {
+        if peer_user_id != user_id {
+            other_peers.push(addr.clone());
+        }
+    }
+
+    if multiplayer_enabled.unwrap_or(false) {
+        Some(other_peers)
+    } else {
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -165,6 +211,7 @@ pub async fn create_flight_handler(
         arrival: row.2,
         statistics: row.3,
         screenshots: Vec::new(),
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
     };
 
     // Trigger Discord Sync in background
@@ -249,6 +296,7 @@ pub async fn update_flight_handler(
         arrival,
         statistics,
         screenshots,
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
     };
 
     Ok((StatusCode::OK, Json(response)))
@@ -289,6 +337,7 @@ pub async fn get_flight_handler(
         arrival,
         statistics,
         screenshots,
+        peers: None,
     };
 
     Ok((StatusCode::OK, Json(response)))
