@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the router with trace logging
     let app = Router::new()
         .route("/", get(home_handler))
+        .route("/content", get(content_handler))
         .route("/content/settings", get(settings_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
@@ -263,7 +264,7 @@ async fn callback_handler(
         }
     }
 
-    let mut response = Redirect::temporary("/content/settings").into_response();
+    let mut response = Redirect::temporary("/content").into_response();
     let cookie_val = format!("token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000", api_token);
     response.headers_mut().insert(
         axum::http::header::SET_COOKIE,
@@ -719,6 +720,35 @@ async fn settings_handler(
                     color: var(--accent-pink);
                 }}
 
+                .nav-tabs {{
+                    display: flex;
+                    justify-content: center;
+                    gap: 1rem;
+                    margin-bottom: 3rem;
+                    border-bottom: 1px solid var(--border-color);
+                    padding-bottom: 1rem;
+                }}
+
+                .nav-tab {{
+                    color: var(--text-muted);
+                    text-decoration: none;
+                    font-weight: 500;
+                    font-size: 1rem;
+                    padding: 0.5rem 1rem;
+                    border-radius: 8px;
+                    transition: all 0.2s;
+                }}
+
+                .nav-tab:hover {{
+                    color: var(--text-primary);
+                    background: rgba(255, 255, 255, 0.05);
+                }}
+
+                .nav-tab.active {{
+                    color: var(--primary-color);
+                    background: rgba(203, 166, 247, 0.1);
+                }}
+
                 .no-channels-fallback p {{
                     margin: 0.25rem 0;
                     font-size: 1rem;
@@ -869,6 +899,11 @@ async fn settings_handler(
                     <p class="subtitle">Select the channels you wish to receive flight telemetry embeds</p>
                 </header>
 
+                <div class="nav-tabs">
+                    <a href="/content" class="nav-tab">Flight History</a>
+                    <a href="/content/settings" class="nav-tab active">Notification Settings</a>
+                </div>
+
                 {}
 
                 {}
@@ -933,4 +968,383 @@ async fn settings_handler(
         user_section
     ))
     .into_response()
+}
+
+async fn content_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    let user_id = match handlers::get_user_id_from_session(&state.db, &headers).await {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(Redirect::temporary("/api/v0/auth/login").into_response());
+        }
+    };
+
+    // Query 10 latest flights for this user with their screenshot counts
+    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(
+        "SELECT id, departure, arrival, statistics, created_at, \
+         (SELECT COUNT(*) FROM screenshots WHERE flight_id = flights.id) AS screenshot_count \
+         FROM flights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10"
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut flights_html = String::new();
+    if flights.is_empty() {
+        flights_html = r#"
+            <div class="no-flights">
+                <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5A2.13 2.13 0 1 0 16.5 4L13 7.5l-8.2-1.8L3 7l7.5 4L7 15l-3-1L3 15l3 2 2 3 1-1-1-3 4-3.5 4 7.5z"></path></svg>
+                <p>No flights logged yet. Start the ButterLog client and take off!</p>
+            </div>
+        "#.to_string();
+    } else {
+        flights_html.push_str(r#"<div class="flight-list">"#);
+        for flight in flights {
+            let dep = flight.1;
+            let arr = flight.2.as_deref().unwrap_or("In Flight");
+            let stats = flight.3;
+            let date_str = flight.4.format("%B %d, %Y, %H:%M UTC").to_string();
+            let screenshots_count = flight.5;
+
+            let airframe = stats.get("airframe_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown Aircraft");
+            
+            let simulator = stats.get("simulator")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown Simulator");
+
+            let mut landing_badge = String::new();
+            if let Some(landing) = stats.get("landing_snapshot") {
+                if let Some(vspd) = landing.get("VSpd").and_then(|v| v.as_f64()) {
+                    let gforce_str = landing.get("NormAc")
+                        .and_then(|v| v.as_f64())
+                        .map(|g| format!(" / {:.2}G", g))
+                        .unwrap_or_default();
+                    
+                    let (class, label) = if vspd >= -150.0 {
+                        ("butter", "BUTTER")
+                    } else if vspd >= -250.0 {
+                        ("smooth", "SMOOTH")
+                    } else if vspd >= -350.0 {
+                        ("firm", "FIRM")
+                    } else {
+                        ("hard", "HARD")
+                    };
+                    
+                    landing_badge = format!(
+                        r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
+                        class, label, vspd.abs(), gforce_str
+                    );
+                }
+            } else {
+                landing_badge = r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string();
+            }
+
+            let screenshots_html = if screenshots_count > 0 {
+                format!(r#"<span class="screenshot-badge">📸 {} screenshot{}</span>"#, screenshots_count, if screenshots_count == 1 { "" } else { "s" })
+            } else {
+                "".to_string()
+            };
+
+            flights_html.push_str(&format!(
+                r#"
+                <div class="flight-card">
+                    <div class="flight-main">
+                        <div class="flight-route">
+                            <span class="route-icao">{}</span>
+                            <span class="route-arrow">→</span>
+                            <span class="route-icao">{}</span>
+                        </div>
+                        <div class="flight-meta">
+                            <div class="airframe">{}</div>
+                            <div class="details">{} • {}</div>
+                            <div class="date">{}</div>
+                        </div>
+                    </div>
+                    <div class="flight-right">
+                        {}
+                    </div>
+                </div>
+                "#,
+                dep, arr, airframe, simulator, screenshots_html, date_str, landing_badge
+            ));
+        }
+        flights_html.push_str("</div>");
+    }
+
+    let html_content = format!(
+        r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>ButterLog Flight Log</title>
+            <meta name="description" content="View your latest telemetry logs on ButterLog.">
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+                
+                :root {{
+                    --bg-gradient: radial-gradient(circle at 50% 0%, #1e1e3f 0%, #0d0d16 100%);
+                    --panel-bg: rgba(30, 30, 46, 0.45);
+                    --border-color: rgba(255, 255, 255, 0.08);
+                    --text-primary: #cdd6f4;
+                    --text-secondary: #a6adc8;
+                    --text-muted: #6c7086;
+                    --primary-color: #cba6f7;
+                    --primary-hover: #b4befe;
+                    --accent-pink: #f5c2e7;
+                    --accent-green: #a6e3a1;
+                    --accent-red: #f38ba8;
+                    --accent-orange: #fab387;
+                    --accent-yellow: #f9e2af;
+                    --card-bg: rgba(17, 17, 27, 0.35);
+                }}
+
+                body {{
+                    font-family: 'Outfit', sans-serif;
+                    background: var(--bg-gradient);
+                    color: var(--text-primary);
+                    min-height: 100vh;
+                    margin: 0;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: flex-start;
+                    padding: 3rem 1rem;
+                    box-sizing: border-box;
+                }}
+
+                .container {{
+                    max-width: 750px;
+                    width: 100%;
+                    background: var(--panel-bg);
+                    backdrop-filter: blur(20px);
+                    -webkit-backdrop-filter: blur(20px);
+                    border: 1px solid var(--border-color);
+                    border-radius: 28px;
+                    padding: 3rem;
+                    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+                    box-sizing: border-box;
+                    animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+                }}
+
+                @keyframes fadeIn {{
+                    from {{ opacity: 0; transform: translateY(15px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+
+                .header {{
+                    text-align: center;
+                    margin-bottom: 2.5rem;
+                }}
+
+                h1 {{
+                    font-size: 2.5rem;
+                    font-weight: 700;
+                    margin: 0 0 0.5rem 0;
+                    background: linear-gradient(90deg, var(--primary-color), var(--primary-hover));
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    letter-spacing: -0.5px;
+                }}
+
+                .subtitle {{
+                    color: var(--text-secondary);
+                    font-size: 1.1rem;
+                    margin: 0;
+                    font-weight: 300;
+                }}
+
+                .nav-tabs {{
+                    display: flex;
+                    justify-content: center;
+                    gap: 1rem;
+                    margin-bottom: 3rem;
+                    border-bottom: 1px solid var(--border-color);
+                    padding-bottom: 1rem;
+                }}
+
+                .nav-tab {{
+                    color: var(--text-muted);
+                    text-decoration: none;
+                    font-weight: 500;
+                    font-size: 1rem;
+                    padding: 0.5rem 1rem;
+                    border-radius: 8px;
+                    transition: all 0.2s;
+                }}
+
+                .nav-tab:hover {{
+                    color: var(--text-primary);
+                    background: rgba(255, 255, 255, 0.05);
+                }}
+
+                .nav-tab.active {{
+                    color: var(--primary-color);
+                    background: rgba(203, 166, 247, 0.1);
+                }}
+
+                .flight-list {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 1.5rem;
+                }}
+
+                .flight-card {{
+                    background: var(--card-bg);
+                    border: 1px solid var(--border-color);
+                    border-radius: 20px;
+                    padding: 1.5rem 2rem;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
+                }}
+
+                .flight-card:hover {{
+                    transform: translateY(-4px);
+                    border-color: rgba(203, 166, 247, 0.3);
+                }}
+
+                .flight-main {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.5rem;
+                }}
+
+                .flight-route {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.75rem;
+                }}
+
+                .route-icao {{
+                    font-size: 1.6rem;
+                    font-weight: 700;
+                    letter-spacing: -0.5px;
+                    color: var(--text-primary);
+                }}
+
+                .route-arrow {{
+                    font-size: 1.4rem;
+                    color: var(--primary-color);
+                }}
+
+                .flight-meta {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.25rem;
+                }}
+
+                .airframe {{
+                    font-size: 1.1rem;
+                    font-weight: 500;
+                    color: var(--accent-pink);
+                }}
+
+                .details {{
+                    font-size: 0.9rem;
+                    color: var(--text-secondary);
+                }}
+
+                .screenshot-badge {{
+                    color: var(--primary-color);
+                    background: rgba(203, 166, 247, 0.1);
+                    padding: 0.15rem 0.5rem;
+                    border-radius: 6px;
+                    font-size: 0.8rem;
+                    margin-left: 0.5rem;
+                }}
+
+                .date {{
+                    font-size: 0.85rem;
+                    color: var(--text-muted);
+                }}
+
+                .flight-right {{
+                    display: flex;
+                    flex-direction: column;
+                    align-items: flex-end;
+                    gap: 0.75rem;
+                }}
+
+                .badge {{
+                    padding: 0.6rem 1.2rem;
+                    border-radius: 12px;
+                    font-weight: 700;
+                    font-size: 0.85rem;
+                    text-align: center;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                    line-height: 1.2;
+                }}
+
+                .badge-detail {{
+                    font-size: 0.75rem;
+                    font-weight: 400;
+                    opacity: 0.9;
+                }}
+
+                .badge-butter {{
+                    background: linear-gradient(135deg, #a6e3a1, #89b4fa);
+                    color: #11111b;
+                }}
+
+                .badge-smooth {{
+                    background: linear-gradient(135deg, #94e2d5, #a6e3a1);
+                    color: #11111b;
+                }}
+
+                .badge-firm {{
+                    background: linear-gradient(135deg, #fab387, #f9e2af);
+                    color: #11111b;
+                }}
+
+                .badge-hard {{
+                    background: linear-gradient(135deg, #f38ba8, #eba0ac);
+                    color: #11111b;
+                }}
+
+                .badge-ongoing {{
+                    background: rgba(255, 255, 255, 0.05);
+                    border: 1px solid var(--border-color);
+                    color: var(--text-secondary);
+                }}
+
+                .no-flights {{
+                    text-align: center;
+                    padding: 4rem 2rem;
+                    color: var(--text-muted);
+                }}
+
+                .no-flights svg {{
+                    margin-bottom: 1.5rem;
+                    opacity: 0.5;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>ButterLog history</h1>
+                    <p class="subtitle">Telemetry records and landing reports</p>
+                </div>
+                
+                <div class="nav-tabs">
+                    <a href="/content" class="nav-tab active">Flight History</a>
+                    <a href="/content/settings" class="nav-tab">Notification Settings</a>
+                </div>
+
+                {}
+            </div>
+        </body>
+        </html>
+        "#,
+        flights_html
+    );
+
+    Ok(Html(html_content).into_response())
 }
