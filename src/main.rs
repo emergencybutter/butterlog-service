@@ -110,6 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/users/:webhook_token/flights/:id/screenshots/:hash",
             delete(handlers::delete_screenshot_handler),
         )
+        .route(
+            "/api/v0/users/:webhook_token/multiplayer/ping",
+            post(handlers::multiplayer_ping_handler),
+        )
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state);
 

@@ -625,3 +625,32 @@ pub async fn delete_allowlist_channel_handler(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[derive(Deserialize)]
+pub struct MultiplayerPingRequest {
+    pub udp_address: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MultiplayerPingResponse {
+    pub peers: Vec<String>,
+}
+
+pub async fn multiplayer_ping_handler(
+    State(state): State<AppState>,
+    Path(webhook_token): Path<String>,
+    Json(payload): Json<MultiplayerPingRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = authenticate_user(&state.db, &webhook_token).await?;
+
+    let has_udp = payload.udp_address.is_some() && !payload.udp_address.as_ref().unwrap().trim().is_empty();
+
+    let peers = update_and_get_peers(
+        &state,
+        user_id,
+        Some(has_udp),
+        payload.udp_address,
+    ).unwrap_or_default();
+
+    Ok((StatusCode::OK, Json(MultiplayerPingResponse { peers })))
+}
