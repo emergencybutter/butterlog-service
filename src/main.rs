@@ -990,15 +990,32 @@ async fn content_handler(
         }
     };
 
-    // Query 10 latest flights for this user with their screenshot counts
-    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(
-        "SELECT id, departure, arrival, statistics, created_at, \
-         (SELECT COUNT(*) FROM screenshots WHERE flight_id = flights.id) AS screenshot_count \
+    // Query 10 latest flights for this user
+    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, departure, arrival, statistics, created_at \
          FROM flights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10"
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+
+    // Bulk-fetch all screenshots for these flights in one query
+    let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
+    let raw_screenshots: Vec<(i64, String)> = if !flight_ids.is_empty() {
+        sqlx::query_as(
+            "SELECT flight_id, url FROM screenshots WHERE flight_id = ANY($1) ORDER BY flight_id, created_at"
+        )
+        .bind(&flight_ids)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        vec![]
+    };
+
+    let mut screenshots_by_flight: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for (flight_id, url) in raw_screenshots {
+        screenshots_by_flight.entry(flight_id).or_default().push(url);
+    }
 
     let mut flights_html = String::new();
     if flights.is_empty() {
@@ -1011,16 +1028,17 @@ async fn content_handler(
     } else {
         flights_html.push_str(r#"<div class="flight-list">"#);
         for flight in flights {
+            let flight_id = flight.0;
             let dep = flight.1;
             let arr = flight.2.as_deref().unwrap_or("In Flight");
             let stats = flight.3;
             let date_str = flight.4.format("%B %d, %Y, %H:%M UTC").to_string();
-            let screenshots_count = flight.5;
+            let flight_screenshots = screenshots_by_flight.get(&flight_id).map(|v| v.as_slice()).unwrap_or_default();
 
             let airframe = stats.get("airframe_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown Aircraft");
-            
+
             let simulator = stats.get("simulator")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown Simulator");
@@ -1032,7 +1050,7 @@ async fn content_handler(
                         .and_then(|v| v.as_f64())
                         .map(|g| format!(" / {:.2}G", g))
                         .unwrap_or_default();
-                    
+
                     let (class, label) = if vspd >= -150.0 {
                         ("butter", "BUTTER")
                     } else if vspd >= -250.0 {
@@ -1042,7 +1060,7 @@ async fn content_handler(
                     } else {
                         ("hard", "HARD")
                     };
-                    
+
                     landing_badge = format!(
                         r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
                         class, label, vspd.abs(), gforce_str
@@ -1052,33 +1070,43 @@ async fn content_handler(
                 landing_badge = r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string();
             }
 
-            let screenshots_html = if screenshots_count > 0 {
-                format!(r#"<span class="screenshot-badge">📸 {} screenshot{}</span>"#, screenshots_count, if screenshots_count == 1 { "" } else { "s" })
+            // Build screenshot gallery HTML
+            let gallery_html = if !flight_screenshots.is_empty() {
+                let urls_json = serde_json::to_string(flight_screenshots).unwrap_or_default();
+                let thumbs: String = flight_screenshots.iter().enumerate().map(|(i, url)| {
+                    format!(
+                        r#"<img class="screenshot-thumb" src="{}" alt="Screenshot {}" loading="lazy" onclick='openLightbox({}, {})'>"#,
+                        url, i + 1, urls_json, i
+                    )
+                }).collect();
+                format!(r#"<div class="screenshot-gallery">{}</div>"#, thumbs)
             } else {
-                "".to_string()
+                String::new()
             };
 
             flights_html.push_str(&format!(
                 r#"
                 <div class="flight-card">
-                    <div class="flight-main">
-                        <div class="flight-route">
-                            <span class="route-icao">{}</span>
-                            <span class="route-arrow">→</span>
-                            <span class="route-icao">{}</span>
+                    <div class="flight-top">
+                        <div class="flight-main">
+                            <div class="flight-route">
+                                <span class="route-icao">{dep}</span>
+                                <span class="route-arrow">→</span>
+                                <span class="route-icao">{arr}</span>
+                            </div>
+                            <div class="flight-meta">
+                                <div class="airframe">{airframe}</div>
+                                <div class="details">{simulator}</div>
+                                <div class="date">{date_str}</div>
+                            </div>
                         </div>
-                        <div class="flight-meta">
-                            <div class="airframe">{}</div>
-                            <div class="details">{} • {}</div>
-                            <div class="date">{}</div>
+                        <div class="flight-right">
+                            {landing_badge}
                         </div>
                     </div>
-                    <div class="flight-right">
-                        {}
-                    </div>
+                    {gallery_html}
                 </div>
-                "#,
-                dep, arr, airframe, simulator, screenshots_html, date_str, landing_badge
+                "#
             ));
         }
         flights_html.push_str("</div>");
@@ -1209,8 +1237,8 @@ async fn content_handler(
                     border-radius: 20px;
                     padding: 1.5rem 2rem;
                     display: flex;
-                    justify-content: space-between;
-                    align-items: center;
+                    flex-direction: column;
+                    gap: 0;
                     transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
                 }}
 
@@ -1218,6 +1246,115 @@ async fn content_handler(
                     transform: translateY(-4px);
                     border-color: rgba(203, 166, 247, 0.3);
                 }}
+
+                .flight-top {{
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }}
+
+                .screenshot-gallery {{
+                    display: flex;
+                    gap: 8px;
+                    overflow-x: auto;
+                    padding-top: 1rem;
+                    margin-top: 1rem;
+                    border-top: 1px solid var(--border-color);
+                    scrollbar-width: thin;
+                    scrollbar-color: var(--border-color) transparent;
+                }}
+
+                .screenshot-gallery::-webkit-scrollbar {{
+                    height: 4px;
+                }}
+
+                .screenshot-gallery::-webkit-scrollbar-thumb {{
+                    background: var(--border-color);
+                    border-radius: 2px;
+                }}
+
+                .screenshot-thumb {{
+                    width: 140px;
+                    height: 88px;
+                    object-fit: cover;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    flex-shrink: 0;
+                    border: 1px solid var(--border-color);
+                    transition: transform 0.2s, border-color 0.2s;
+                }}
+
+                .screenshot-thumb:hover {{
+                    transform: scale(1.04);
+                    border-color: rgba(203, 166, 247, 0.5);
+                }}
+
+                .lightbox {{
+                    display: none;
+                    position: fixed;
+                    inset: 0;
+                    background: rgba(0, 0, 0, 0.92);
+                    z-index: 1000;
+                    align-items: center;
+                    justify-content: center;
+                    flex-direction: column;
+                    gap: 1rem;
+                }}
+
+                .lightbox.open {{
+                    display: flex;
+                }}
+
+                .lightbox-img {{
+                    max-width: 90vw;
+                    max-height: 82vh;
+                    object-fit: contain;
+                    border-radius: 10px;
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+                }}
+
+                .lightbox-counter {{
+                    color: rgba(255,255,255,0.6);
+                    font-size: 0.9rem;
+                }}
+
+                .lb-btn {{
+                    position: absolute;
+                    top: 50%;
+                    transform: translateY(-50%);
+                    background: rgba(255,255,255,0.08);
+                    border: 1px solid rgba(255,255,255,0.12);
+                    color: white;
+                    font-size: 1.8rem;
+                    width: 3rem;
+                    height: 3rem;
+                    border-radius: 50%;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    transition: background 0.2s;
+                    line-height: 1;
+                }}
+
+                .lb-btn:hover {{ background: rgba(255,255,255,0.15); }}
+                .lb-prev {{ left: 1.5rem; }}
+                .lb-next {{ right: 1.5rem; }}
+
+                .lb-close {{
+                    position: absolute;
+                    top: 1rem;
+                    right: 1rem;
+                    background: none;
+                    border: none;
+                    color: rgba(255,255,255,0.6);
+                    font-size: 1.5rem;
+                    cursor: pointer;
+                    padding: 0.5rem;
+                    transition: color 0.2s;
+                }}
+
+                .lb-close:hover {{ color: white; }}
 
                 .flight-main {{
                     display: flex;
@@ -1258,15 +1395,6 @@ async fn content_handler(
                 .details {{
                     font-size: 0.9rem;
                     color: var(--text-secondary);
-                }}
-
-                .screenshot-badge {{
-                    color: var(--primary-color);
-                    background: rgba(203, 166, 247, 0.1);
-                    padding: 0.15rem 0.5rem;
-                    border-radius: 6px;
-                    font-size: 0.8rem;
-                    margin-left: 0.5rem;
                 }}
 
                 .date {{
@@ -1350,6 +1478,47 @@ async fn content_handler(
 
                 {}
             </div>
+
+            <div id="lightbox" class="lightbox" onclick="lbBackdropClick(event)">
+                <button class="lb-close" onclick="closeLightbox()" aria-label="Close">✕</button>
+                <button class="lb-btn lb-prev" id="lb-prev" onclick="lbNav(-1)" aria-label="Previous">‹</button>
+                <img id="lb-img" class="lightbox-img" src="" alt="">
+                <button class="lb-btn lb-next" id="lb-next" onclick="lbNav(1)" aria-label="Next">›</button>
+                <div id="lb-counter" class="lightbox-counter"></div>
+            </div>
+            <script>
+                var lbImages = [], lbIdx = 0;
+                function openLightbox(urls, idx) {{
+                    lbImages = urls; lbIdx = idx;
+                    updateLb();
+                    document.getElementById('lightbox').classList.add('open');
+                    document.body.style.overflow = 'hidden';
+                }}
+                function closeLightbox() {{
+                    document.getElementById('lightbox').classList.remove('open');
+                    document.body.style.overflow = '';
+                }}
+                function lbNav(dir) {{
+                    lbIdx = (lbIdx + dir + lbImages.length) % lbImages.length;
+                    updateLb();
+                }}
+                function lbBackdropClick(e) {{
+                    if (e.target === document.getElementById('lightbox')) closeLightbox();
+                }}
+                function updateLb() {{
+                    document.getElementById('lb-img').src = lbImages[lbIdx];
+                    var multi = lbImages.length > 1;
+                    document.getElementById('lb-prev').style.display = multi ? '' : 'none';
+                    document.getElementById('lb-next').style.display = multi ? '' : 'none';
+                    document.getElementById('lb-counter').textContent = multi ? (lbIdx + 1) + ' / ' + lbImages.length : '';
+                }}
+                document.addEventListener('keydown', function(e) {{
+                    if (!document.getElementById('lightbox').classList.contains('open')) return;
+                    if (e.key === 'ArrowLeft') lbNav(-1);
+                    else if (e.key === 'ArrowRight') lbNav(1);
+                    else if (e.key === 'Escape') closeLightbox();
+                }});
+            </script>
         </body>
         </html>
         "#,
