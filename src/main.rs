@@ -983,21 +983,20 @@ async fn content_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let user_id = match handlers::get_user_id_from_session(&state.db, &headers).await {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok(Redirect::temporary("/api/v0/auth/login").into_response());
-        }
-    };
+    let user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
 
-    // Query 10 latest flights for this user
-    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT id, departure, arrival, statistics, created_at \
-         FROM flights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10"
-    )
-    .bind(user_id)
-    .fetch_all(&state.db)
-    .await?;
+    // Query 10 latest flights for this user (empty when not logged in)
+    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = if let Some(uid) = user_id {
+        sqlx::query_as(
+            "SELECT id, departure, arrival, statistics, created_at \
+             FROM flights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10"
+        )
+        .bind(uid)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        vec![]
+    };
 
     // Bulk-fetch all screenshots for these flights in one query
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
@@ -1547,13 +1546,6 @@ async fn map_data_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let _user_id = match handlers::get_user_id_from_session(&state.db, &headers).await {
-        Ok(id) => id,
-        Err(_) => {
-            return Err(AppError::Auth("Unauthorized".to_string()));
-        }
-    };
-
     let active_flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>)> = sqlx::query_as(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at, u.username, u.global_name \
          FROM flights f \
@@ -1622,13 +1614,6 @@ async fn map_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let _user_id = match handlers::get_user_id_from_session(&state.db, &headers).await {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok(Redirect::temporary("/api/v0/auth/login").into_response());
-        }
-    };
-
     let html_content = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
