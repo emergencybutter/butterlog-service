@@ -112,6 +112,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             delete(handlers::delete_screenshot_handler),
         )
         .route(
+            "/api/v0/users/:webhook_token/flights/share",
+            post(handlers::upload_flight_share_handler),
+        )
+        .route(
+            "/api/v0/flights/share/:share_id",
+            get(handlers::get_flight_share_json_handler),
+        )
+        .route("/flights/share/:share_id", get(flight_share_detail_handler))
+        .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
             post(handlers::multiplayer_ping_handler),
         )
@@ -2373,4 +2382,222 @@ async fn map_handler(
 </html>"##;
 
     Ok(Html(html_content).into_response())
+}
+
+async fn flight_share_detail_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(share_id): axum::extract::Path<String>,
+) -> Result<Response, AppError> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let r2_key: Option<String> = sqlx::query_scalar(
+        "SELECT r2_key FROM flight_shares WHERE id = $1"
+    )
+    .bind(&share_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let key = match r2_key {
+        Some(k) => k,
+        None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Share not found</h1>".to_string())).into_response()),
+    };
+
+    let compressed = match state.r2.download_object(&key).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("Failed to download share {}: {}", share_id, e);
+            return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to load share data</h1>".to_string())).into_response());
+        }
+    };
+
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut json_str = String::new();
+    if let Err(e) = decoder.read_to_string(&mut json_str) {
+        tracing::error!("Failed to decompress share {}: {}", share_id, e);
+        return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to decompress share data</h1>".to_string())).into_response());
+    }
+
+    let json_escaped = json_str.replace('\\', "\\\\").replace("</", "<\\/");
+
+    let html = format!(r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ButterLog Flight Share</title>
+    <meta property="og:site_name" content="ButterLog">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg: #0d0d16; --panel: rgba(30,30,46,0.5); --border: rgba(255,255,255,0.08);
+            --text: #cdd6f4; --muted: #a6adc8; --dim: #6c7086;
+            --purple: #cba6f7; --pink: #f5c2e7; --green: #a6e3a1; --blue: #89b4fa; --red: #f38ba8; --yellow: #f9e2af;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }}
+        .page {{ max-width: 900px; margin: 0 auto; padding: 2rem 1rem 4rem; }}
+        .back {{ color: var(--dim); text-decoration: none; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 0.4rem; margin-bottom: 1.5rem; }}
+        .back:hover {{ color: var(--purple); }}
+        .route {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 0.4rem; }}
+        .icao {{ font-size: 2.2rem; font-weight: 700; }}
+        .arrow {{ font-size: 2rem; color: var(--purple); }}
+        .aircraft {{ font-size: 1.1rem; color: var(--pink); font-weight: 500; margin-bottom: 0.25rem; }}
+        .meta {{ color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem; }}
+        .badge {{ display: inline-block; padding: 0.4rem 0.9rem; border-radius: 8px; font-weight: 700; font-size: 0.8rem; margin-bottom: 1.5rem; }}
+        .badge-butter {{ background: linear-gradient(135deg, #a6e3a1, #89b4fa); color: #11111b; }}
+        .badge-smooth {{ background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }}
+        .badge-firm {{ background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }}
+        .badge-hard {{ background: linear-gradient(135deg, #f38ba8, #eba0ac); color: #11111b; }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
+        .stat-card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; text-align: center; }}
+        .stat-label {{ color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }}
+        .stat-value {{ font-size: 1.4rem; font-weight: 700; }}
+        .landing-card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; }}
+        .section-title {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.5px; color: var(--pink); font-weight: 600; margin-bottom: 0.75rem; }}
+        .landing-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1rem; }}
+        .li-label {{ color: var(--dim); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; margin-bottom: 0.2rem; }}
+        .li-val {{ font-size: 1.3rem; font-weight: 700; }}
+        #map {{ height: 400px; border-radius: 12px; margin-bottom: 2rem; border: 1px solid var(--border); }}
+        .charts {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem; }}
+        @media (max-width: 600px) {{ .charts {{ grid-template-columns: 1fr; }} }}
+        .chart-card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; }}
+        .chart-card canvas {{ max-height: 200px; }}
+        .gallery {{ display: flex; gap: 8px; overflow-x: auto; padding-bottom: 0.5rem; scrollbar-width: thin; }}
+        .gallery img {{ width: 160px; height: 100px; object-fit: cover; border-radius: 8px; flex-shrink: 0; border: 1px solid var(--border); cursor: pointer; transition: transform 0.2s; }}
+        .gallery img:hover {{ transform: scale(1.04); }}
+        .gallery-section {{ margin-bottom: 2rem; }}
+        .lightbox {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1000; align-items: center; justify-content: center; }}
+        .lightbox.open {{ display: flex; }}
+        .lightbox img {{ max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: 10px; }}
+        .lb-close {{ position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: rgba(255,255,255,0.6); font-size: 1.5rem; cursor: pointer; padding: 0.5rem; }}
+    </style>
+</head>
+<body>
+<div class="page">
+    <a href="/content" class="back">← Flight History</a>
+    <div id="header-mount"></div>
+    <div id="map"></div>
+    <div class="charts" id="charts-mount"></div>
+    <div id="gallery-mount"></div>
+</div>
+<div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
+    <button class="lb-close" onclick="closeLb()">✕</button>
+    <img id="lb-img" src="" alt="">
+</div>
+<script>
+const SHARE_DATA = {json_escaped};
+function reconstructTs(deltas) {{
+    if (!deltas || !deltas.length) return [];
+    const ts = [deltas[0]];
+    for (let i = 1; i < deltas.length; i++) ts.push(ts[i-1] + deltas[i]);
+    return ts;
+}}
+function fmtDur(m) {{ const h = Math.floor(m/60); return h > 0 ? h+'h '+(m%60)+'m' : m+'m'; }}
+function fmtDate(s) {{
+    if (!s) return '';
+    try {{ return new Date(s.replace(' ','T')+'Z').toLocaleString(undefined,{{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'}}); }} catch {{ return s; }}
+}}
+(function() {{
+    const d = SHARE_DATA;
+    const td = d.transposed_data || {{}};
+    const sum = d.summary || {{}};
+    const scrns = d.screenshots || [];
+    const timestamps = reconstructTs(td.timestamps);
+    const lats = td.latitudes || [], lons = td.longitudes || [], alts = td.altitudes || [];
+    const ias = td.ias || [], vs = td.vspeed || [], pitch = td.pitch || [];
+    const dep = sum.startIcao || sum.departure || '?';
+    const arr = sum.endIcao || sum.arrival || '?';
+    const ac = sum.aircraftTitle || sum.airframe_name || '';
+    const dur = sum.durationMinutes || sum.duration_minutes || 0;
+    const maxAlt = (sum.maxAltitude || sum.max_altitude || 0).toFixed(0);
+    const maxGs = (sum.maxGroundSpeed || sum.max_ground_speed || 0).toFixed(0);
+    const fuel = (sum.fuelConsumed || sum.fuel_consumed || 0).toFixed(1);
+    const events = sum.events || [];
+    const lEvt = events.filter(e => (e.eventType||e.event_type) === 'landing').pop();
+    const lvs = lEvt && (lEvt.touchdownFpm || lEvt.touchdown_fpm);
+    let badgeHtml = '';
+    if (lvs != null) {{
+        const a = Math.abs(lvs);
+        const [cls, lbl] = a < 150 ? ['butter','BUTTER'] : a < 250 ? ['smooth','SMOOTH'] : a < 350 ? ['firm','FIRM'] : ['hard','HARD'];
+        badgeHtml = `<div class="badge badge-${{cls}}">${{lbl}} — ${{Math.round(a)}} fpm</div>`;
+    }}
+    document.getElementById('header-mount').innerHTML = `
+        <div style="margin-bottom:1.5rem">
+            <div class="route"><span class="icao">${{dep}}</span><span class="arrow">→</span><span class="icao">${{arr}}</span></div>
+            <div class="aircraft">${{ac}}</div>
+            <div class="meta">${{fmtDate(sum.startTime||sum.start_time)}} · ${{fmtDur(dur)}}</div>
+            ${{badgeHtml}}
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Max Altitude</div><div class="stat-value">${{maxAlt}} ft</div></div>
+            <div class="stat-card"><div class="stat-label">Max Speed (GS)</div><div class="stat-value">${{maxGs}} kt</div></div>
+            <div class="stat-card"><div class="stat-label">Fuel Consumed</div><div class="stat-value">${{fuel}} gal</div></div>
+            <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${{fmtDur(dur)}}</div></div>
+        </div>
+        ${{lEvt ? `<div class="landing-card"><div class="section-title">Landing Performance</div><div class="landing-grid">
+            ${{lvs != null ? `<div><div class="li-label">Touchdown VS</div><div class="li-val">${{Math.round(lvs)}} fpm</div></div>` : ''}}
+            ${{(lEvt.landingG||lEvt.landing_g) != null ? `<div><div class="li-label">Landing G</div><div class="li-val">${{(lEvt.landingG||lEvt.landing_g).toFixed(2)}} G</div></div>` : ''}}
+            ${{(lEvt.offsetPercent||lEvt.offset_percent) != null ? `<div><div class="li-label">Offset</div><div class="li-val">${{(lEvt.offsetPercent||lEvt.offset_percent).toFixed(1)}}%</div></div>` : ''}}
+            ${{(lEvt.thresholdDistFt||lEvt.threshold_dist_ft) != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${{Math.round(lEvt.thresholdDistFt||lEvt.threshold_dist_ft)}} ft</div></div>` : ''}}
+        </div></div>` : ''}}
+    `;
+    if (lats.length > 0) {{
+        const map = L.map('map');
+        L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png',{{attribution:'© OSM © CARTO',subdomains:'abcd',maxZoom:19}}).addTo(map);
+        const coords = lats.map((la, i) => [la, lons[i]]);
+        const path = L.polyline(coords,{{color:'#cba6f7',weight:2.5,opacity:0.9}}).addTo(map);
+        map.fitBounds(path.getBounds().pad(0.12));
+        events.forEach(e => {{
+            const type = e.eventType||e.event_type;
+            if (!e.latitude || !e.longitude) return;
+            const color = type==='takeoff'?'#a6e3a1':type==='landing'?'#f38ba8':'#89b4fa';
+            const label = type==='takeoff'?'Takeoff':type==='landing'?'Landing':type==='top_of_climb'?'TOC':'TOD';
+            L.circleMarker([e.latitude,e.longitude],{{radius:7,color,fillColor:color,fillOpacity:0.9,weight:2}}).bindTooltip(label).addTo(map);
+        }});
+    }} else {{ document.getElementById('map').style.display = 'none'; }}
+    if (timestamps.length > 0) {{
+        const step = Math.max(1, Math.floor(timestamps.length / 300));
+        const labels=[], ad=[], id=[], vd=[], pd=[];
+        for (let i=0; i<timestamps.length; i+=step) {{
+            labels.push(new Date(timestamps[i]*1000).toISOString().slice(11,16));
+            ad.push(alts[i]||0); id.push(ias[i]||0); vd.push(vs[i]||0); pd.push(pitch[i]||0);
+        }}
+        const opts = () => ({{
+            responsive:true, maintainAspectRatio:true,
+            plugins:{{legend:{{display:false}},tooltip:{{mode:'index',intersect:false}}}},
+            scales:{{
+                x:{{ticks:{{color:'#6c7086',maxTicksLimit:6}},grid:{{color:'rgba(255,255,255,0.04)'}}}},
+                y:{{ticks:{{color:'#6c7086'}},grid:{{color:'rgba(255,255,255,0.04)'}}}},
+            }}
+        }});
+        const mk = (id2, lbl, data, color) => {{
+            const el = document.createElement('div'); el.className='chart-card';
+            el.innerHTML=`<div class="section-title">${{lbl}}</div><canvas id="${{id2}}"></canvas>`;
+            document.getElementById('charts-mount').appendChild(el);
+            new Chart(document.getElementById(id2),{{type:'line',data:{{labels,datasets:[{{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}}]}},options:opts()}});
+        }};
+        mk('ca','Altitude (ft)',ad,'#89b4fa');
+        mk('ci','Airspeed (kt)',id,'#a6e3a1');
+        mk('cv','Vert Speed (fpm)',vd,'#f38ba8');
+        mk('cp','Pitch (°)',pd,'#f9e2af');
+    }}
+    if (scrns.length > 0) {{
+        const urls = scrns.map(s=>s.url);
+        window._lbUrls = urls;
+        const thumbs = urls.map((u,i)=>`<img src="${{u}}" loading="lazy" onclick="openLb(${{i}})" alt="">`).join('');
+        document.getElementById('gallery-mount').innerHTML=`<div class="gallery-section"><div class="section-title">Screenshots</div><div class="gallery">${{thumbs}}</div></div>`;
+    }}
+}})();
+function openLb(i){{ document.getElementById('lb-img').src=window._lbUrls[i]; document.getElementById('lightbox').classList.add('open'); document.body.style.overflow='hidden'; }}
+function closeLb(){{ document.getElementById('lightbox').classList.remove('open'); document.body.style.overflow=''; }}
+document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeLb();}});
+</script>
+</body>
+</html>"##, json_escaped = json_escaped);
+
+    Ok(Html(html).into_response())
 }

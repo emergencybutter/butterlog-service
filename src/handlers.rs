@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use crate::AppState;
 use sha2::{Digest, Sha256};
+use flate2::read::GzDecoder;
+use std::io::Read;
 
 #[derive(Deserialize)]
 pub struct CreateFlightRequest {
@@ -436,7 +438,7 @@ pub async fn upload_screenshot_handler(
         }
     });
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash }))))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash, "url": url }))))
 }
 
 pub async fn delete_screenshot_handler(
@@ -510,6 +512,81 @@ pub async fn delete_screenshot_handler(
     });
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn upload_flight_share_handler(
+    State(state): State<AppState>,
+    Path(webhook_token): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = authenticate_user(&state.db, &webhook_token).await?;
+
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Empty body" }))));
+    }
+
+    // Decompress only to validate and extract remote_flight_id for the DB record
+    let mut decoder = GzDecoder::new(body.as_ref());
+    let mut json_str = String::new();
+    decoder.read_to_string(&mut json_str)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Failed to decompress: {}", e) }))))?;
+
+    let share: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Invalid JSON: {}", e) }))))?;
+
+    let remote_flight_id = share.get("remoteFlightId").and_then(|v| v.as_i64())
+        .or_else(|| share.get("remote_flight_id").and_then(|v| v.as_i64()));
+
+    // Store the original compressed bytes as-is
+    let share_id = uuid::Uuid::new_v4().to_string();
+    let r2_key = format!("shares/{}.json.gz", share_id);
+    state.r2.upload_object(&r2_key, body.to_vec(), "application/octet-stream")
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))))?;
+
+    sqlx::query(
+        "INSERT INTO flight_shares (id, user_id, remote_flight_id, r2_key) VALUES ($1, $2, $3, $4)"
+    )
+    .bind(&share_id)
+    .bind(user_id)
+    .bind(remote_flight_id)
+    .bind(&r2_key)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let share_url = format!("https://butterlog.flyvoyager.net/flights/share/{}", share_id);
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
+}
+
+pub async fn get_flight_share_json_handler(
+    State(state): State<AppState>,
+    Path(share_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let r2_key: Option<String> = sqlx::query_scalar(
+        "SELECT r2_key FROM flight_shares WHERE id = $1"
+    )
+    .bind(&share_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let key = r2_key.ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Share not found" }))))?;
+
+    let compressed = state.r2.download_object(&key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))))?;
+
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut json_str = String::new();
+    decoder.read_to_string(&mut json_str)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Decompression failed: {}", e) }))))?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json"),
+         (axum::http::header::CACHE_CONTROL, "public, max-age=86400")],
+        json_str,
+    ))
 }
 
 #[derive(Deserialize)]
