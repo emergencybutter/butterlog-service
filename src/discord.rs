@@ -424,7 +424,7 @@ pub async fn sync_flight_discord(
     }
 
     // 3. Assemble primary embed & helper embeds
-    let (embeds, _) = assemble_embeds(&statistics, &user_info)?;
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id)?;
 
     // 4. Fetch screenshots associated with this flight from DB
     // Limit to up to 9 screenshots as specified
@@ -543,6 +543,7 @@ struct LocalField {
 fn assemble_embeds(
     statistics: &Value,
     user_info: &DiscordUserInfo,
+    flight_id: i64,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
     let departure_name = statistics.get("departure").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -713,7 +714,7 @@ fn assemble_embeds(
 
     let primary_embed = CreateEmbed::new()
         .title(title)
-        .url("https://butterlog.flyvoyager.net/")
+        .url(format!("https://butterlog.flyvoyager.net/flights/{}", flight_id))
         .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png")
         .color(color)
         .author(author)
