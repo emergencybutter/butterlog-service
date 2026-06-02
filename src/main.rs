@@ -2545,9 +2545,9 @@ async function deleteShare(){{
         {delete_button}
     </div>
     <div id="header-mount"></div>
+    <div id="gallery-mount"></div>
     <div id="map"></div>
     <div class="charts" id="charts-mount"></div>
-    <div id="gallery-mount"></div>
 </div>
 <div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
     <button class="lb-close" onclick="closeLb()">✕</button>
