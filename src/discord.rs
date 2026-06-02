@@ -423,8 +423,18 @@ pub async fn sync_flight_discord(
         return Ok(());
     }
 
-    // 3. Assemble primary embed & helper embeds
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id)?;
+    // 3. Look up share URL for this flight (if shared)
+    let share_url: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(flight_id)
+    .fetch_optional(db)
+    .await
+    .unwrap_or(None)
+    .map(|sid: String| format!("https://butterlog.flyvoyager.net/content/flights/share/{}", sid));
+
+    // 4. Assemble primary embed & helper embeds
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, share_url)?;
 
     // 4. Fetch screenshots associated with this flight from DB
     // Limit to up to 9 screenshots as specified
@@ -544,6 +554,7 @@ fn assemble_embeds(
     statistics: &Value,
     user_info: &DiscordUserInfo,
     flight_id: i64,
+    share_url: Option<String>,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
     let departure_name = statistics.get("departure").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -712,10 +723,13 @@ fn assemble_embeds(
     let footer = CreateEmbedFooter::new("ButterLog")
         .icon_url("https://butterlog.flyvoyager.net/apple-touch-icon.png");
 
-    let primary_embed = CreateEmbed::new()
+    let mut primary_embed = CreateEmbed::new()
         .title(title)
-        .url(format!("https://butterlog.flyvoyager.net/content/flights/{}", flight_id))
-        .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png")
+        .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png");
+    if let Some(ref url) = share_url {
+        primary_embed = primary_embed.url(url.clone());
+    }
+    let primary_embed = primary_embed
         .color(color)
         .author(author)
         .description(description)
