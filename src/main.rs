@@ -115,6 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::upload_flight_share_handler),
         )
         .route(
+            "/api/v0/users/:webhook_token/flights/share/:share_id",
+            delete(handlers::delete_flight_share_handler),
+        )
+        .route(
             "/api/v0/flights/share/:share_id",
             get(handlers::get_flight_share_json_handler),
         )

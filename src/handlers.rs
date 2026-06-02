@@ -559,6 +559,38 @@ pub async fn upload_flight_share_handler(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
 }
 
+pub async fn delete_flight_share_handler(
+    State(state): State<AppState>,
+    Path((webhook_token, share_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = authenticate_user(&state.db, &webhook_token).await?;
+
+    let row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT fs.r2_key, fs.remote_flight_id FROM flight_shares fs \
+         WHERE fs.id = $1 AND fs.user_id = $2"
+    )
+    .bind(&share_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let (r2_key, _) = row.ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Share not found" }))))?;
+
+    // Delete from R2
+    state.r2.delete_object(&r2_key).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))))?;
+
+    // Delete from DB
+    sqlx::query("DELETE FROM flight_shares WHERE id = $1")
+        .bind(&share_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn get_flight_share_json_handler(
     State(state): State<AppState>,
     Path(share_id): Path<String>,
