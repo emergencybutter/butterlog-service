@@ -714,7 +714,7 @@ fn assemble_embeds(
 
     let primary_embed = CreateEmbed::new()
         .title(title)
-        .url(format!("https://butterlog.flyvoyager.net/flights/{}", flight_id))
+        .url(format!("https://butterlog.flyvoyager.net/content/flights/{}", flight_id))
         .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png")
         .color(color)
         .author(author)

@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(home_handler))
         .route("/content", get(content_handler))
         .route("/content/settings", get(settings_handler))
-        .route("/flights/:id", get(flight_detail_handler))
+        .route("/content/flights/:id", get(flight_detail_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/auth/login", get(login_handler))
@@ -1261,6 +1261,7 @@ async fn content_handler(
 
             flights_html.push_str(&format!(
                 r#"
+                <a href="/content/flights/{flight_id}" class="flight-card-link">
                 <div class="flight-card">
                     <div class="flight-top">
                         <div class="flight-main">
@@ -1281,6 +1282,7 @@ async fn content_handler(
                     </div>
                     {gallery_html}
                 </div>
+                </a>
                 "#
             ));
         }
@@ -1404,6 +1406,12 @@ async fn content_handler(
                     display: flex;
                     flex-direction: column;
                     gap: 1.5rem;
+                }}
+
+                .flight-card-link {{
+                    text-decoration: none;
+                    color: inherit;
+                    display: block;
                 }}
 
                 .flight-card {{
