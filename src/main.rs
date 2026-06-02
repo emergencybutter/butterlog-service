@@ -2452,39 +2452,6 @@ async fn flight_share_detail_handler(
         return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to decompress share data</h1>".to_string())).into_response());
     }
 
-    // If the blob has no screenshots, fall back to looking them up from the DB
-    let json_str = {
-        let mut share: serde_json::Value = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
-        let has_screenshots = share.get("screenshots")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-
-        if !has_screenshots {
-            let remote_flight_id = share.get("remoteFlightId").and_then(|v| v.as_i64())
-                .or_else(|| share.get("remote_flight_id").and_then(|v| v.as_i64()));
-
-            if let Some(flight_id) = remote_flight_id {
-                let screenshots: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-                    "SELECT url, created_at FROM screenshots WHERE flight_id = $1 ORDER BY created_at"
-                )
-                .bind(flight_id)
-                .fetch_all(&state.db)
-                .await
-                .unwrap_or_default();
-
-                if !screenshots.is_empty() {
-                    let scr_json: Vec<serde_json::Value> = screenshots.iter().map(|(url, ts)| {
-                        serde_json::json!({ "timestamp": ts.timestamp(), "url": url })
-                    }).collect();
-                    share["screenshots"] = serde_json::Value::Array(scr_json);
-                }
-            }
-        }
-
-        serde_json::to_string(&share).unwrap_or(json_str)
-    };
-
     let json_escaped = json_str.replace('\\', "\\\\").replace("</", "<\\/");
 
     let html = format!(r##"<!DOCTYPE html>
