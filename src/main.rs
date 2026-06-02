@@ -2461,6 +2461,33 @@ async fn flight_share_detail_handler(
         return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to decompress share data</h1>".to_string())).into_response());
     }
 
+    // If the blob has no screenshots but remoteFlightId is known, pull them from the DB
+    let json_str = {
+        if let Ok(mut share) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            let empty = share.get("screenshots").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true);
+            if empty {
+                let remote_flight_id = share.get("remoteFlightId").and_then(|v| v.as_i64())
+                    .or_else(|| share.get("remote_flight_id").and_then(|v| v.as_i64()));
+                if let Some(fid) = remote_flight_id {
+                    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                        "SELECT url, created_at FROM screenshots WHERE flight_id = $1 ORDER BY created_at"
+                    )
+                    .bind(fid)
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap_or_default();
+                    if !rows.is_empty() {
+                        share["screenshots"] = serde_json::json!(
+                            rows.iter().map(|(url, ts)| serde_json::json!({"timestamp": ts.timestamp(), "url": url})).collect::<Vec<_>>()
+                        );
+                        json_str = serde_json::to_string(&share).unwrap_or(json_str);
+                    }
+                }
+            }
+        }
+        json_str
+    };
+
     let json_escaped = json_str.replace('\\', "\\\\").replace("</", "<\\/");
 
     let delete_button = if is_owner {
