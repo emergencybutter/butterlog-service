@@ -591,6 +591,36 @@ pub async fn delete_flight_share_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn delete_flight_share_session_handler(
+    State(state): State<AppState>,
+    Path(share_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+
+    let r2_key: Option<String> = sqlx::query_scalar(
+        "SELECT r2_key FROM flight_shares WHERE id = $1 AND user_id = $2"
+    )
+    .bind(&share_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    let r2_key = r2_key.ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Share not found" }))))?;
+
+    state.r2.delete_object(&r2_key).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))))?;
+
+    sqlx::query("DELETE FROM flight_shares WHERE id = $1")
+        .bind(&share_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn get_flight_share_json_handler(
     State(state): State<AppState>,
     Path(share_id): Path<String>,

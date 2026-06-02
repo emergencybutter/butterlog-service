@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/v0/flights/share/:share_id",
-            get(handlers::get_flight_share_json_handler),
+            get(handlers::get_flight_share_json_handler).delete(handlers::delete_flight_share_session_handler),
         )
         .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
         .route(
@@ -2425,21 +2425,26 @@ async fn map_handler(
 async fn flight_share_detail_handler(
     State(state): State<AppState>,
     axum::extract::Path(share_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
-    let r2_key: Option<String> = sqlx::query_scalar(
-        "SELECT r2_key FROM flight_shares WHERE id = $1"
+    let row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT r2_key, user_id FROM flight_shares WHERE id = $1"
     )
     .bind(&share_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let key = match r2_key {
-        Some(k) => k,
+    let (key, share_owner_id) = match row {
+        Some(r) => r,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Share not found</h1>".to_string())).into_response()),
     };
+
+    // Check if the logged-in user owns this share
+    let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+    let is_owner = logged_in_user_id.is_some() && logged_in_user_id == share_owner_id;
 
     let compressed = match state.r2.download_object(&key).await {
         Ok(d) => d,
@@ -2457,6 +2462,25 @@ async fn flight_share_detail_handler(
     }
 
     let json_escaped = json_str.replace('\\', "\\\\").replace("</", "<\\/");
+
+    let delete_button = if is_owner {
+        format!(
+            r#"<button onclick="deleteShare()" style="background:rgba(243,139,168,0.12);color:#f38ba8;border:1px solid rgba(243,139,168,0.3);border-radius:8px;padding:0.5rem 1rem;cursor:pointer;font-family:inherit;font-size:0.9rem" id="delete-btn">Delete Share</button>
+<script>
+async function deleteShare(){{
+    if(!confirm('Delete this shared flight? This cannot be undone.'))return;
+    document.getElementById('delete-btn').textContent='Deleting...';
+    document.getElementById('delete-btn').disabled=true;
+    const res=await fetch('/api/v0/flights/share/{share_id}',{{method:'DELETE',credentials:'include'}});
+    if(res.ok||res.status===204){{window.location.href='/content';}}
+    else{{document.getElementById('delete-btn').textContent='Delete Share';document.getElementById('delete-btn').disabled=false;alert('Delete failed');}}
+}}
+</script>"#,
+            share_id = share_id
+        )
+    } else {
+        String::new()
+    };
 
     let html = format!(r##"<!DOCTYPE html>
 <html lang="en">
@@ -2516,7 +2540,10 @@ async fn flight_share_detail_handler(
 </head>
 <body>
 <div class="page">
-    <a href="/content" class="back">← Flight History</a>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+        <a href="/content" class="back" style="margin-bottom:0">← Flight History</a>
+        {delete_button}
+    </div>
     <div id="header-mount"></div>
     <div id="map"></div>
     <div class="charts" id="charts-mount"></div>
@@ -2635,7 +2662,7 @@ function closeLb(){{ document.getElementById('lightbox').classList.remove('open'
 document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeLb();}});
 </script>
 </body>
-</html>"##, json_escaped = json_escaped);
+</html>"##, json_escaped = json_escaped, delete_button = delete_button);
 
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
