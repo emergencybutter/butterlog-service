@@ -2511,7 +2511,7 @@ function fmtDate(s) {{
 }}
 (function() {{
     const d = SHARE_DATA;
-    const td = d.transposed_data || {{}};
+    const td = d.transposedData || d.transposed_data || {{}};
     const sum = d.summary || {{}};
     const scrns = d.screenshots || [];
     const timestamps = reconstructTs(td.timestamps);
