@@ -555,7 +555,7 @@ pub async fn upload_flight_share_handler(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
 
-    let share_url = format!("https://butterlog.flyvoyager.net/flights/share/{}", share_id);
+    let share_url = format!("https://butterlog.flyvoyager.net/content/flights/share/{}", share_id);
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
 }
 

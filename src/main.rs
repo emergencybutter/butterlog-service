@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/flights/share/:share_id",
             get(handlers::get_flight_share_json_handler),
         )
-        .route("/flights/share/:share_id", get(flight_share_detail_handler))
+        .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
             post(handlers::multiplayer_ping_handler),
