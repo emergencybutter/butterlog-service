@@ -77,7 +77,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(home_handler))
         .route("/content", get(content_handler))
         .route("/content/settings", get(settings_handler))
-        .route("/content/flights/:id", get(flight_detail_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/auth/login", get(login_handler))
@@ -1174,8 +1173,27 @@ async fn content_handler(
         vec![]
     };
 
-    // Bulk-fetch all screenshots for these flights in one query
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
+
+    // Bulk-fetch share IDs for these flights
+    let raw_shares: Vec<(i64, String)> = if !flight_ids.is_empty() {
+        sqlx::query_as(
+            "SELECT remote_flight_id, id FROM flight_shares \
+             WHERE remote_flight_id = ANY($1) ORDER BY created_at DESC"
+        )
+        .bind(&flight_ids)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let mut share_by_flight: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for (flight_id, share_id) in raw_shares {
+        share_by_flight.entry(flight_id).or_insert(share_id);
+    }
+
+    // Bulk-fetch all screenshots for these flights in one query
     let raw_screenshots: Vec<(i64, String)> = if !flight_ids.is_empty() {
         sqlx::query_as(
             "SELECT flight_id, url FROM screenshots WHERE flight_id = ANY($1) ORDER BY flight_id, created_at"
@@ -1259,9 +1277,17 @@ async fn content_handler(
                 String::new()
             };
 
+            let share_href = share_by_flight.get(&flight_id)
+                .map(|sid| format!("/content/flights/share/{}", sid));
+            let card_open = match &share_href {
+                Some(href) => format!(r#"<a href="{}" class="flight-card-link">"#, href),
+                None => r#"<div class="flight-card-link" style="cursor:default">"#.to_string(),
+            };
+            let card_close = if share_href.is_some() { "</a>" } else { "</div>" };
+
             flights_html.push_str(&format!(
                 r#"
-                <a href="/content/flights/{flight_id}" class="flight-card-link">
+                {card_open}
                 <div class="flight-card">
                     <div class="flight-top">
                         <div class="flight-main">
@@ -1282,7 +1308,7 @@ async fn content_handler(
                     </div>
                     {gallery_html}
                 </div>
-                </a>
+                {card_close}
                 "#
             ));
         }
