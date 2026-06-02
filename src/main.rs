@@ -2607,5 +2607,10 @@ document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeLb();}});
 </body>
 </html>"##, json_escaped = json_escaped);
 
-    Ok(Html(html).into_response())
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    Ok(response)
 }

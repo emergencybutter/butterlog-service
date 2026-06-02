@@ -583,8 +583,11 @@ pub async fn get_flight_share_json_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Decompression failed: {}", e) }))))?;
 
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/json"),
-         (axum::http::header::CACHE_CONTROL, "public, max-age=86400")],
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
         json_str,
     ))
 }
