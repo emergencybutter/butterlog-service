@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use sqlx::PgPool;
+use uuid::Uuid;
 use crate::error::AppError;
 
 #[derive(Deserialize, Debug)]
@@ -97,9 +98,13 @@ pub async fn save_or_update_user(
     db_pool: &PgPool,
     user: &DiscordUser,
 ) -> Result<String, AppError> {
+    // 256-bit token from a CSPRNG (uuid v4 is backed by getrandom). Only used for new
+    // users; existing rows keep their token via ON CONFLICT (it is not overwritten on login).
+    let new_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+
     let api_token: String = sqlx::query_scalar(
         "INSERT INTO users (discord_id, username, global_name, avatar, api_token, last_login) \
-         VALUES ($1, $2, $3, $4, md5(random()::text || clock_timestamp()::text), CURRENT_TIMESTAMP) \
+         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) \
          ON CONFLICT (discord_id) \
          DO UPDATE SET \
              username = EXCLUDED.username, \
@@ -112,6 +117,7 @@ pub async fn save_or_update_user(
     .bind(&user.username)
     .bind(&user.global_name)
     .bind(&user.avatar)
+    .bind(&new_token)
     .fetch_one(db_pool)
     .await?;
 

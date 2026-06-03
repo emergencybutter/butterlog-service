@@ -22,40 +22,42 @@ impl Config {
         // Load .env file if present (useful in local development)
         dotenvy::dotenv().ok();
 
-        let database_url = env::var("DATABASE_URL")
-            .expect("DATABASE_URL environment variable must be set");
+        // Collect every missing required variable so the operator sees them all at once,
+        // rather than fixing them one failed startup at a time.
+        let mut missing: Vec<&'static str> = Vec::new();
+        let mut req = |key: &'static str| -> String {
+            match env::var(key) {
+                Ok(v) => v,
+                Err(_) => {
+                    missing.push(key);
+                    String::new()
+                }
+            }
+        };
 
-        let discord_client_id = env::var("DISCORD_CLIENT_ID")
-            .expect("DISCORD_CLIENT_ID environment variable must be set");
+        let database_url = req("DATABASE_URL");
+        let discord_client_id = req("DISCORD_CLIENT_ID");
+        let discord_client_secret = req("DISCORD_CLIENT_SECRET");
+        let discord_redirect_uri = req("DISCORD_REDIRECT_URI");
+        let discord_bot_token = req("DISCORD_BOT_TOKEN");
+        let r2_bucket = req("R2_BUCKET");
+        let r2_endpoint = req("R2_ENDPOINT");
+        let r2_access_key_id = req("R2_ACCESS_KEY_ID");
+        let r2_secret_access_key = req("R2_SECRET_ACCESS_KEY");
+        let r2_public_url = req("R2_PUBLIC_URL");
+        drop(req); // release the mutable borrow of `missing`
 
-        let discord_client_secret = env::var("DISCORD_CLIENT_SECRET")
-            .expect("DISCORD_CLIENT_SECRET environment variable must be set");
-
-        let discord_redirect_uri = env::var("DISCORD_REDIRECT_URI")
-            .expect("DISCORD_REDIRECT_URI environment variable must be set");
-
-        let discord_bot_token = env::var("DISCORD_BOT_TOKEN")
-            .expect("DISCORD_BOT_TOKEN environment variable must be set");
+        if !missing.is_empty() {
+            panic!(
+                "Missing required environment variables: {}",
+                missing.join(", ")
+            );
+        }
 
         let port = env::var("PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8080);
-
-        let r2_bucket = env::var("R2_BUCKET")
-            .expect("R2_BUCKET environment variable must be set");
-
-        let r2_endpoint = env::var("R2_ENDPOINT")
-            .expect("R2_ENDPOINT environment variable must be set");
-
-        let r2_access_key_id = env::var("R2_ACCESS_KEY_ID")
-            .expect("R2_ACCESS_KEY_ID environment variable must be set");
-
-        let r2_secret_access_key = env::var("R2_SECRET_ACCESS_KEY")
-            .expect("R2_SECRET_ACCESS_KEY environment variable must be set");
-
-        let r2_public_url = env::var("R2_PUBLIC_URL")
-            .expect("R2_PUBLIC_URL environment variable must be set");
 
         let predetermined_channels = env::var("PREDETERMINED_CHANNELS").ok();
 

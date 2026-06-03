@@ -382,9 +382,9 @@ pub async fn sync_flight_discord(
     http: &serenity::http::Http,
     flight_id: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Fetch flight information and user information
-    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar \
+    // 1. Fetch flight info, user info, and the Discord sync state used for throttling.
+    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
+        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_last_synced_at, f.discord_screenshot_sig \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
          WHERE f.id = $1"
@@ -393,7 +393,7 @@ pub async fn sync_flight_discord(
     .fetch_optional(db)
     .await?;
 
-    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar) = match row {
+    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar, last_synced_at, stored_sig) = match row {
         Some(r) => r,
         None => return Ok(()),
     };
@@ -423,7 +423,43 @@ pub async fn sync_flight_discord(
         return Ok(());
     }
 
-    // 3. Look up share URL for this flight (if shared)
+    // 3. Fetch screenshots (cheap, no R2 yet) and compute a signature of the ordered set.
+    let screenshot_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT hash, url FROM screenshots WHERE flight_id = $1 ORDER BY id LIMIT 9"
+    )
+    .bind(flight_id)
+    .fetch_all(db)
+    .await?;
+    let screenshot_sig = screenshot_rows.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>().join(",");
+    let screenshot_count = screenshot_rows.len();
+
+    // 4. Existing Discord messages for this flight (one query instead of one per channel).
+    let existing_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT discord_channel_id, discord_message_id FROM flight_discord_messages WHERE flight_id = $1"
+    )
+    .bind(flight_id)
+    .fetch_all(db)
+    .await?;
+    let existing_msgs: std::collections::HashMap<String, String> = existing_rows.into_iter().collect();
+
+    // 5. Decide whether to sync now and whether screenshots must be (re)downloaded.
+    let is_landed = statistics.get("landing_time").and_then(|t| t.as_str()).is_some();
+    let screenshots_changed = stored_sig.as_deref() != Some(screenshot_sig.as_str());
+    let need_send = channels.iter().any(|c| !existing_msgs.contains_key(c));
+    let download_needed = screenshots_changed || need_send;
+    // Push first posts, new channels, landings, and screenshot changes immediately; otherwise
+    // throttle telemetry-only updates to at most once per minute to spare R2 + Discord.
+    let force = download_needed || is_landed;
+    if !force {
+        if let Some(last) = last_synced_at {
+            if chrono::Utc::now().signed_duration_since(last).num_seconds() < 60 {
+                tracing::debug!("Skipping Discord sync for flight {} (throttled, <60s since last)", flight_id);
+                return Ok(());
+            }
+        }
+    }
+
+    // 6. Look up share URL for this flight (if shared)
     let share_url: Option<String> = sqlx::query_scalar(
         "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1"
     )
@@ -433,37 +469,40 @@ pub async fn sync_flight_discord(
     .unwrap_or(None)
     .map(|sid: String| format!("https://butterlog.flyvoyager.net/content/flights/share/{}", sid));
 
-    // 4. Assemble primary embed & helper embeds
+    // 7. Assemble the primary embed.
     let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, share_url)?;
 
-    // 4. Fetch screenshots associated with this flight from DB
-    // Limit to up to 9 screenshots as specified
-    let screenshot_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT hash, url FROM screenshots WHERE flight_id = $1 ORDER BY id LIMIT 9"
-    )
-    .bind(flight_id)
-    .fetch_all(db)
-    .await?;
-
-    // 5. Download screenshot bytes from R2 for attachments
+    // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
+    // changed or a brand-new message must be sent; otherwise reuse the already-attached files
+    // by referencing them by their original filenames.
     let mut attachments = Vec::new();
     let mut helper_embeds = Vec::new();
-
-    for (index, (hash, _url)) in screenshot_rows.into_iter().enumerate() {
-        let key = format!("screenshots/{}/{}.webp", flight_id, hash);
-        match r2.download_object(&key).await {
-            Ok(bytes) => {
-                let filename = format!("screenshot-{}.jpg", index);
-                attachments.push(CreateAttachment::bytes(bytes, &filename));
-
-                let helper = CreateEmbed::new()
+    if download_needed {
+        for (index, (hash, _url)) in screenshot_rows.into_iter().enumerate() {
+            let key = format!("screenshots/{}/{}.webp", flight_id, hash);
+            match r2.download_object(&key).await {
+                Ok(bytes) => {
+                    let filename = format!("screenshot-{}.jpg", index);
+                    attachments.push(CreateAttachment::bytes(bytes, &filename));
+                    helper_embeds.push(
+                        CreateEmbed::new()
+                            .url("https://butterlog.flyvoyager.net/")
+                            .image(format!("attachment://{}", filename)),
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to download screenshot {} from R2: {:?}", hash, e);
+                }
+            }
+        }
+    } else {
+        for index in 0..screenshot_count {
+            let filename = format!("screenshot-{}.jpg", index);
+            helper_embeds.push(
+                CreateEmbed::new()
                     .url("https://butterlog.flyvoyager.net/")
-                    .image(format!("attachment://{}", filename));
-                helper_embeds.push(helper);
-            }
-            Err(e) => {
-                tracing::error!("Failed to download screenshot {} from R2: {:?}", hash, e);
-            }
+                    .image(format!("attachment://{}", filename)),
+            );
         }
     }
 
@@ -471,46 +510,35 @@ pub async fn sync_flight_discord(
     let mut all_embeds = embeds;
     all_embeds.extend(helper_embeds);
 
-    // 6. Process message state synchronization for each channel
-    for channel_str in channels {
+    // 9. Synchronize message state for each channel.
+    for channel_str in &channels {
         let channel_id = match channel_str.parse::<u64>() {
             Ok(c) => ChannelId::new(c),
             Err(_) => continue,
         };
 
-        // Query if message has already been sent to this channel
-        let message_id_str: Option<String> = sqlx::query_scalar(
-            "SELECT discord_message_id FROM flight_discord_messages \
-             WHERE flight_id = $1 AND discord_channel_id = $2"
-        )
-        .bind(flight_id)
-        .bind(&channel_str)
-        .fetch_optional(db)
-        .await?;
+        if let Some(msg_id_str) = existing_msgs.get(channel_str) {
+            let msg_id_val = match msg_id_str.parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let msg_id = MessageId::new(msg_id_val);
 
-        if let Some(msg_id_str) = message_id_str {
-            if let Ok(msg_id_val) = msg_id_str.parse::<u64>() {
-                let msg_id = MessageId::new(msg_id_val);
-
-                // Edit existing message using attachments replacements
+            let mut builder = EditMessage::new().embeds(all_embeds.clone());
+            // Only replace attachments when we actually re-downloaded; otherwise omit the field
+            // so Discord keeps the existing files.
+            if download_needed {
                 let mut edit_attachments = serenity::builder::EditAttachments::new();
                 for attachment in attachments.clone() {
                     edit_attachments = edit_attachments.add(attachment);
                 }
+                builder = builder.attachments(edit_attachments);
+            }
 
-                let builder = EditMessage::new()
-                    .embeds(all_embeds.clone())
-                    .attachments(edit_attachments);
-
-                tracing::info!("[Outgoing Request] Discord EDIT message {} in channel {}", msg_id, channel_id);
-                match channel_id.edit_message(http, msg_id, builder).await {
-                    Ok(_) => {
-                        tracing::info!("[Outgoing Response] Edited message {} successfully", msg_id);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e);
-                    }
-                }
+            tracing::info!("[Outgoing Request] Discord EDIT message {} in channel {}", msg_id, channel_id);
+            match channel_id.edit_message(http, msg_id, builder).await {
+                Ok(_) => tracing::info!("[Outgoing Response] Edited message {} successfully", msg_id),
+                Err(e) => tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e),
             }
         } else {
             // Send new message
@@ -522,7 +550,6 @@ pub async fn sync_flight_discord(
             match channel_id.send_message(http, builder).await {
                 Ok(msg) => {
                     tracing::info!("[Outgoing Response] Sent message {} successfully", msg.id);
-                    // Record message in database
                     let msg_id_str = msg.id.to_string();
                     let _ = sqlx::query(
                         "INSERT INTO flight_discord_messages (flight_id, discord_message_id, discord_channel_id) \
@@ -530,16 +557,23 @@ pub async fn sync_flight_discord(
                     )
                     .bind(flight_id)
                     .bind(&msg_id_str)
-                    .bind(&channel_str)
+                    .bind(channel_str)
                     .execute(db)
                     .await;
                 }
-                Err(e) => {
-                    tracing::error!("Failed to send Discord message in channel {}: {:?}", channel_id, e);
-                }
+                Err(e) => tracing::error!("Failed to send Discord message in channel {}: {:?}", channel_id, e),
             }
         }
     }
+
+    // 10. Record sync state for throttling + change detection.
+    let _ = sqlx::query(
+        "UPDATE flights SET discord_last_synced_at = NOW(), discord_screenshot_sig = $1 WHERE id = $2"
+    )
+    .bind(&screenshot_sig)
+    .bind(flight_id)
+    .execute(db)
+    .await;
 
     Ok(())
 }
@@ -754,54 +788,6 @@ fn d_or_null<'a>(val: &'a Value, key: &str) -> Option<&'a Value> {
     } else {
         None
     }
-}
-
-#[allow(dead_code)]
-pub async fn get_bot_channels(
-    http: &serenity::http::Http,
-    predetermined_env: Option<&str>,
-) -> Result<Vec<(String, String)>, String> {
-    let mut channels_list = Vec::new();
-
-    // 1. Parse predetermined channels from env if present
-    if let Some(raw) = predetermined_env {
-        for item in raw.split(',') {
-            let parts: Vec<&str> = item.trim().split(':').collect();
-            if parts.len() == 2 {
-                channels_list.push((parts[0].to_string(), parts[1].to_string()));
-            } else if !item.trim().is_empty() {
-                channels_list.push((item.trim().to_string(), format!("Channel {}", item.trim())));
-            }
-        }
-    }
-
-    // 2. Fetch channels from all guilds the bot is in
-    match http.get_guilds(None, None).await {
-        Ok(guilds) => {
-            for guild in guilds {
-                if let Ok(channels) = http.get_channels(guild.id).await {
-                    for channel in channels {
-                        if channel.kind == ChannelType::Text {
-                            let label = format!("{} - #{}", guild.name, channel.name);
-                            if !channels_list.iter().any(|(id, _)| id == &channel.id.to_string()) {
-                                channels_list.push((channel.id.to_string(), label));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to fetch bot guilds dynamically: {:?}", e);
-        }
-    }
-
-    // 3. Fallback default channel if list is empty
-    if channels_list.is_empty() {
-        channels_list.push(("1462209019740426452".to_string(), "Default Voyager Channel".to_string()));
-    }
-
-    Ok(channels_list)
 }
 
 #[derive(Debug, Clone)]

@@ -11,6 +11,10 @@ pub enum AppError {
     Network(reqwest::Error),
     Auth(String),
     Migration(sqlx::migrate::MigrateError),
+    NotFound(String),
+    BadRequest(String),
+    Forbidden(String),
+    Storage(String),
 }
 
 impl From<sqlx::Error> for AppError {
@@ -59,6 +63,16 @@ impl IntoResponse for AppError {
                     "Database migration failed".to_string(),
                 )
             }
+            AppError::Storage(ref msg) => {
+                tracing::error!("Storage error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Storage operation failed".to_string(),
+                )
+            }
+            AppError::NotFound(ref msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            AppError::BadRequest(ref msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Forbidden(ref msg) => (StatusCode::FORBIDDEN, msg.clone()),
         };
 
         let body = Json(json!({
@@ -76,6 +90,10 @@ impl std::fmt::Display for AppError {
             AppError::Network(err) => write!(f, "Network error: {}", err),
             AppError::Auth(msg) => write!(f, "Authentication error: {}", msg),
             AppError::Migration(err) => write!(f, "Migration error: {}", err),
+            AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
+            AppError::Storage(msg) => write!(f, "Storage error: {}", msg),
         }
     }
 }

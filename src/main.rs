@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(home_handler))
         .route("/content", get(content_handler))
+        .route("/content/flight/user/:user_id", get(content_user_handler))
         .route("/content/settings", get(settings_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
@@ -123,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::get_flight_share_json_handler).delete(handlers::delete_flight_share_session_handler),
         )
         .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
+        .route("/content/flights/:id", get(flight_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
             post(handlers::multiplayer_ping_handler),
@@ -139,27 +141,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Redacts the secret webhook-token segment from `/api/v0/users/<token>/...` paths so it
+/// never lands in logs. Other path segments (share ids, channel ids) are not secrets.
+fn redact_path(path: &str) -> String {
+    const PREFIX: &str = "/api/v0/users/";
+    if let Some(rest) = path.strip_prefix(PREFIX) {
+        let tail = rest.find('/').map(|i| &rest[i..]).unwrap_or("");
+        format!("{}***{}", PREFIX, tail)
+    } else {
+        path.to_string()
+    }
+}
+
 async fn log_requests(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let method = req.method().clone();
-    let uri = req.uri().clone();
-    
-    tracing::info!("[Incoming Request] {} {}", method, uri);
-    
+    let path = redact_path(req.uri().path());
+
+    tracing::info!("[Incoming Request] {} {}", method, path);
+
     let start = std::time::Instant::now();
     let response = next.run(req).await;
     let latency = start.elapsed();
-    
+
     tracing::info!(
         "[Incoming Response] {} {} -> Status: {} (took {:?})",
         method,
-        uri,
+        path,
         response.status(),
         latency
     );
-    
+
     response
 }
 
@@ -1016,10 +1030,12 @@ async fn flight_detail_handler(
     .fetch_all(&state.db)
     .await?;
 
-    let arr_display = arr.as_deref().unwrap_or("In Flight");
-    let pilot = global_name.as_deref().unwrap_or(&username);
-    let airframe = stats.get("airframe_name").and_then(|v| v.as_str()).unwrap_or("Unknown Aircraft");
-    let simulator = stats.get("simulator").and_then(|v| v.as_str()).unwrap_or("");
+    // Escape all user-controlled fields before interpolating into HTML / og meta tags.
+    let dep = esc(&dep);
+    let arr_display = esc(arr.as_deref().unwrap_or("In Flight"));
+    let pilot = esc(global_name.as_deref().unwrap_or(&username));
+    let airframe = esc(stats.get("airframe_name").and_then(|v| v.as_str()).unwrap_or("Unknown Aircraft"));
+    let simulator = esc(stats.get("simulator").and_then(|v| v.as_str()).unwrap_or(""));
     let date_str = created_at.format("%B %d, %Y, %H:%M UTC").to_string();
 
     let mut landing_badge = String::new();
@@ -1158,25 +1174,75 @@ async fn flight_detail_handler(
     Ok(Html(html).into_response())
 }
 
+/// (id, departure, arrival, statistics, created_at, user_id, username, global_name, avatar, discord_id)
+type FlightListRow = (
+    i64,
+    String,
+    Option<String>,
+    serde_json::Value,
+    chrono::DateTime<chrono::Utc>,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+/// Minimal HTML escaping for user-controlled text rendered into attributes/markup.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 async fn content_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+    let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
 
-    // Query 10 latest flights for this user (empty when not logged in)
-    let flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = if let Some(uid) = user_id {
-        sqlx::query_as(
-            "SELECT id, departure, arrival, statistics, created_at \
-             FROM flights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10"
-        )
-        .bind(uid)
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        vec![]
-    };
+    // Latest flights across every pilot
+    let flights: Vec<FlightListRow> = sqlx::query_as(
+        "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
+                u.id, u.username, u.global_name, u.avatar, u.discord_id \
+         FROM flights f JOIN users u ON f.user_id = u.id \
+         ORDER BY f.created_at DESC LIMIT 50"
+    )
+    .fetch_all(&state.db)
+    .await?;
 
+    render_flights_page(&state, flights, logged_in_user_id, None, "Telemetry records from every pilot").await
+}
+
+async fn content_user_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+
+    // Latest flights for a single pilot
+    let flights: Vec<FlightListRow> = sqlx::query_as(
+        "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
+                u.id, u.username, u.global_name, u.avatar, u.discord_id \
+         FROM flights f JOIN users u ON f.user_id = u.id \
+         WHERE f.user_id = $1 ORDER BY f.created_at DESC LIMIT 50"
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    render_flights_page(&state, flights, logged_in_user_id, Some(user_id), "Telemetry records and landing reports").await
+}
+
+async fn render_flights_page(
+    state: &AppState,
+    flights: Vec<FlightListRow>,
+    logged_in_user_id: Option<i64>,
+    filter_user_id: Option<i64>,
+    subtitle: &str,
+) -> Result<Response, AppError> {
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
 
     // Bulk-fetch share IDs for these flights
@@ -1226,19 +1292,26 @@ async fn content_handler(
         flights_html.push_str(r#"<div class="flight-list">"#);
         for flight in flights {
             let flight_id = flight.0;
-            let dep = flight.1;
-            let arr = flight.2.as_deref().unwrap_or("In Flight");
+            let dep = esc(&flight.1);
+            let arr = esc(flight.2.as_deref().unwrap_or("In Flight"));
             let stats = flight.3;
             let date_str = flight.4.format("%B %d, %Y, %H:%M UTC").to_string();
+            let pilot = esc(flight.7.as_deref().unwrap_or(flight.6.as_str()));
+            let avatar_url = match flight.8.as_deref() {
+                Some(hash) if !hash.is_empty() => {
+                    format!("https://cdn.discordapp.com/avatars/{}/{}.png", flight.9, hash)
+                }
+                _ => "https://cdn.discordapp.com/embed/avatars/0.png".to_string(),
+            };
             let flight_screenshots = screenshots_by_flight.get(&flight_id).map(|v| v.as_slice()).unwrap_or_default();
 
-            let airframe = stats.get("airframe_name")
+            let airframe = esc(stats.get("airframe_name")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Unknown Aircraft");
+                .unwrap_or("Unknown Aircraft"));
 
-            let simulator = stats.get("simulator")
+            let simulator = esc(stats.get("simulator")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Unknown Simulator");
+                .unwrap_or("Unknown Simulator"));
 
             let mut landing_badge = String::new();
             if let Some(landing) = stats.get("landing_snapshot") {
@@ -1295,6 +1368,10 @@ async fn content_handler(
                 <div class="flight-card">
                     <div class="flight-top">
                         <div class="flight-main">
+                            <div class="flight-pilot">
+                                <img class="pilot-avatar" src="{avatar_url}" alt="{pilot}" loading="lazy">
+                                <span class="pilot-name">{pilot}</span>
+                            </div>
                             <div class="flight-route">
                                 <span class="route-icao">{dep}</span>
                                 <span class="route-arrow">→</span>
@@ -1318,6 +1395,22 @@ async fn content_handler(
         }
         flights_html.push_str("</div>");
     }
+
+    // Build navigation tabs; expose a "My Flights" link only when logged in.
+    let history_active = if filter_user_id.is_none() { " active" } else { "" };
+    let my_flights_tab = match logged_in_user_id {
+        Some(uid) => {
+            let active = if filter_user_id == Some(uid) { " active" } else { "" };
+            format!(r#"<a href="/content/flight/user/{uid}" class="nav-tab{active}">My Flights</a>"#)
+        }
+        None => String::new(),
+    };
+    let nav_tabs = format!(
+        r#"<a href="/content" class="nav-tab{history_active}">Flight History</a>
+                    {my_flights_tab}
+                    <a href="/content/settings" class="nav-tab">Notification Settings</a>
+                    <a href="/map" class="nav-tab">Live Map</a>"#
+    );
 
     let html_content = format!(
         r#"
@@ -1575,6 +1668,27 @@ async fn content_handler(
                     gap: 0.5rem;
                 }}
 
+                .flight-pilot {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                    margin-bottom: 0.25rem;
+                }}
+
+                .pilot-avatar {{
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    border: 1px solid var(--border-color);
+                    object-fit: cover;
+                }}
+
+                .pilot-name {{
+                    font-size: 0.9rem;
+                    color: var(--text-secondary);
+                    font-weight: 500;
+                }}
+
                 .flight-route {{
                     display: flex;
                     align-items: center;
@@ -1680,16 +1794,14 @@ async fn content_handler(
             <div class="container">
                 <div class="header">
                     <h1>ButterLog history</h1>
-                    <p class="subtitle">Telemetry records and landing reports</p>
-                </div>
-                
-                <div class="nav-tabs">
-                    <a href="/content" class="nav-tab active">Flight History</a>
-                    <a href="/content/settings" class="nav-tab">Notification Settings</a>
-                    <a href="/map" class="nav-tab">Live Map</a>
+                    <p class="subtitle">{subtitle}</p>
                 </div>
 
-                {}
+                <div class="nav-tabs">
+                    {nav_tabs}
+                </div>
+
+                {flights_html}
             </div>
 
             <div id="lightbox" class="lightbox" onclick="lbBackdropClick(event)">
@@ -1734,8 +1846,7 @@ async fn content_handler(
             </script>
         </body>
         </html>
-        "#,
-        flights_html
+        "#
     );
 
     Ok(Html(html_content).into_response())
@@ -2555,6 +2666,7 @@ async function deleteShare(){{
 </div>
 <script>
 const SHARE_DATA = {json_escaped};
+function esc(s){{ return String(s==null?'':s).replace(/[&<>"']/g, c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])); }}
 function reconstructTs(deltas) {{
     if (!deltas || !deltas.length) return [];
     const ts = [deltas[0]];
@@ -2592,8 +2704,8 @@ function fmtDate(s) {{
     }}
     document.getElementById('header-mount').innerHTML = `
         <div style="margin-bottom:1.5rem">
-            <div class="route"><span class="icao">${{dep}}</span><span class="arrow">→</span><span class="icao">${{arr}}</span></div>
-            <div class="aircraft">${{ac}}</div>
+            <div class="route"><span class="icao">${{esc(dep)}}</span><span class="arrow">→</span><span class="icao">${{esc(arr)}}</span></div>
+            <div class="aircraft">${{esc(ac)}}</div>
             <div class="meta">${{fmtDate(sum.startTime||sum.start_time)}} · ${{fmtDur(dur)}}</div>
             ${{badgeHtml}}
         </div>
