@@ -555,6 +555,18 @@ pub async fn upload_flight_share_handler(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))))?;
 
+    // Update Discord notification with share link if a message exists for this flight
+    if let Some(flight_id) = remote_flight_id {
+        let db_clone = state.db.clone();
+        let r2_clone = state.r2.clone();
+        let discord_http_clone = state.discord_http.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
+                tracing::warn!("Failed to update Discord notification after share: {:?}", e);
+            }
+        });
+    }
+
     let share_url = format!("https://butterlog.flyvoyager.net/content/flights/share/{}", share_id);
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
 }
