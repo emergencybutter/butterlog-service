@@ -12,12 +12,29 @@ use sha2::{Digest, Sha256};
 use flate2::read::GzDecoder;
 use std::io::Read;
 
+/// Maximum allowed length (in characters) of a user-provided flight note.
+const MAX_NOTES_LEN: usize = 500;
+
+/// Validate an optional notes value against the length limit.
+fn validate_notes(notes: &Option<String>) -> Result<(), AppError> {
+    if let Some(text) = notes {
+        if text.chars().count() > MAX_NOTES_LEN {
+            return Err(AppError::BadRequest(format!(
+                "Notes must be {} characters or fewer",
+                MAX_NOTES_LEN
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct CreateFlightRequest {
     pub departure: String,
     pub statistics: serde_json::Value,
     pub multiplayer_enabled: Option<bool>,
     pub udp_address: Option<String>,
+    pub notes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +43,12 @@ pub struct UpdateFlightRequest {
     pub statistics: serde_json::Value,
     pub multiplayer_enabled: Option<bool>,
     pub udp_address: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateNotesRequest {
+    pub notes: String,
 }
 
 #[derive(Serialize)]
@@ -36,6 +59,8 @@ pub struct FlightResponse {
     pub arrival: Option<String>,
     pub statistics: serde_json::Value,
     pub screenshots: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peers: Option<Vec<String>>,
 }
@@ -196,13 +221,15 @@ pub async fn create_flight_handler(
     Json(payload): Json<CreateFlightRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    validate_notes(&payload.notes)?;
 
-    let row: (i64, String, Option<String>, serde_json::Value) = sqlx::query_as(
-        "INSERT INTO flights (user_id, departure, statistics) VALUES ($1, $2, $3) RETURNING id, departure, arrival, statistics"
+    let row: (i64, String, Option<String>, serde_json::Value, Option<String>) = sqlx::query_as(
+        "INSERT INTO flights (user_id, departure, statistics, notes) VALUES ($1, $2, $3, $4) RETURNING id, departure, arrival, statistics, notes"
     )
     .bind(user_id)
     .bind(&payload.departure)
     .bind(&payload.statistics)
+    .bind(&payload.notes)
     .fetch_one(&state.db)
     .await?;
 
@@ -213,6 +240,7 @@ pub async fn create_flight_handler(
         arrival: row.2,
         statistics: row.3,
         screenshots: Vec::new(),
+        notes: row.4,
         peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
     };
 
@@ -236,18 +264,20 @@ pub async fn update_flight_handler(
     Json(payload): Json<UpdateFlightRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    validate_notes(&payload.notes)?;
 
     if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
         return Err(AppError::NotFound("Flight not found".to_string()));
     }
 
-    // Perform update; COALESCE keeps the existing arrival when the payload omits it.
-    let (departure, arrival, statistics): (String, Option<String>, serde_json::Value) = sqlx::query_as(
-        "UPDATE flights SET arrival = COALESCE($1, arrival), statistics = $2, updated_at = CURRENT_TIMESTAMP \
-         WHERE id = $3 RETURNING departure, arrival, statistics"
+    // Perform update; COALESCE keeps the existing value when the payload omits it.
+    let (departure, arrival, statistics, notes): (String, Option<String>, serde_json::Value, Option<String>) = sqlx::query_as(
+        "UPDATE flights SET arrival = COALESCE($1, arrival), statistics = $2, notes = COALESCE($3, notes), updated_at = CURRENT_TIMESTAMP \
+         WHERE id = $4 RETURNING departure, arrival, statistics, notes"
     )
     .bind(&payload.arrival)
     .bind(&payload.statistics)
+    .bind(&payload.notes)
     .bind(flight_id)
     .fetch_one(&state.db)
     .await?;
@@ -277,10 +307,41 @@ pub async fn update_flight_handler(
         arrival,
         statistics,
         screenshots,
+        notes,
         peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
     };
 
     Ok((StatusCode::OK, Json(response)))
+}
+
+/// Update only the notes for a flight, enforcing the 500-character limit.
+pub async fn update_flight_notes_handler(
+    State(state): State<AppState>,
+    Path((webhook_token, flight_id)): Path<(String, i64)>,
+    Json(payload): Json<UpdateNotesRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = authenticate_user(&state.db, &webhook_token).await?;
+
+    if payload.notes.chars().count() > MAX_NOTES_LEN {
+        return Err(AppError::BadRequest(format!(
+            "Notes must be {} characters or fewer",
+            MAX_NOTES_LEN
+        )));
+    }
+
+    if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
+        return Err(AppError::NotFound("Flight not found".to_string()));
+    }
+
+    sqlx::query(
+        "UPDATE flights SET notes = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2"
+    )
+    .bind(&payload.notes)
+    .bind(flight_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_flight_handler(
@@ -289,15 +350,15 @@ pub async fn get_flight_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
 
-    let flight_row: Option<(String, Option<String>, serde_json::Value)> = sqlx::query_as(
-        "SELECT departure, arrival, statistics FROM flights WHERE id = $1 AND user_id = $2"
+    let flight_row: Option<(String, Option<String>, serde_json::Value, Option<String>)> = sqlx::query_as(
+        "SELECT departure, arrival, statistics, notes FROM flights WHERE id = $1 AND user_id = $2"
     )
     .bind(flight_id)
     .bind(user_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (departure, arrival, statistics) = flight_row
+    let (departure, arrival, statistics, notes) = flight_row
         .ok_or_else(|| AppError::NotFound("Flight not found".to_string()))?;
 
     let screenshots = sqlx::query_scalar::<_, String>(
@@ -314,6 +375,7 @@ pub async fn get_flight_handler(
         arrival,
         statistics,
         screenshots,
+        notes,
         peers: None,
     };
 

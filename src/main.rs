@@ -104,6 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             put(handlers::update_flight_handler).get(handlers::get_flight_handler),
         )
         .route(
+            "/api/v0/users/:webhook_token/flights/:id/notes",
+            put(handlers::update_flight_notes_handler),
+        )
+        .route(
             "/api/v0/users/:webhook_token/flights/:id/screenshots",
             post(handlers::upload_screenshot_handler),
         )
@@ -1010,15 +1014,15 @@ async fn flight_detail_handler(
     State(state): State<AppState>,
     axum::extract::Path(flight_id): axum::extract::Path<i64>,
 ) -> Result<Response, AppError> {
-    let row: Option<(String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>)> = sqlx::query_as(
-        "SELECT f.departure, f.arrival, f.statistics, f.created_at, u.username, u.global_name \
+    let row: Option<(String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT f.departure, f.arrival, f.statistics, f.created_at, u.username, u.global_name, f.notes \
          FROM flights f JOIN users u ON f.user_id = u.id WHERE f.id = $1"
     )
     .bind(flight_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (dep, arr, stats, created_at, username, global_name) = match row {
+    let (dep, arr, stats, created_at, username, global_name, notes) = match row {
         Some(r) => r,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Flight not found</h1>".to_string())).into_response()),
     };
@@ -1067,6 +1071,14 @@ async fn flight_detail_handler(
         String::new()
     };
 
+    let notes_html = match notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => format!(
+            r#"<div class="notes-section"><div class="notes-label">Notes</div><div class="notes-body">{}</div></div>"#,
+            esc(n)
+        ),
+        None => String::new(),
+    };
+
     let html = format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1103,6 +1115,12 @@ async fn flight_detail_handler(
         .badge {{ display: inline-block; padding: 0.5rem 1rem; border-radius: 10px; font-weight: 700;
                   font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }}
         .badge-detail {{ font-size: 0.75rem; font-weight: 400; opacity: 0.9; }}
+        .notes-section {{ background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 14px;
+                          padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; }}
+        .notes-label {{ color: var(--text-muted); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
+                        text-transform: uppercase; margin-bottom: 0.5rem; }}
+        .notes-body {{ color: var(--text-primary); font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap;
+                       word-wrap: break-word; }}
         .badge-butter {{ background: linear-gradient(135deg, #a6e3a1, #89b4fa); color: #11111b; }}
         .badge-smooth {{ background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }}
         .badge-firm {{ background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }}
@@ -1140,6 +1158,7 @@ async fn flight_detail_handler(
         <div class="meta">{simulator} • {date_str}</div>
         <div class="pilot">Flown by {pilot}</div>
         {landing_badge}
+        {notes_html}
         {gallery_html}
     </div>
 
@@ -2702,6 +2721,8 @@ function fmtDate(s) {{
         const [cls, lbl] = a < 150 ? ['butter','BUTTER'] : a < 250 ? ['smooth','SMOOTH'] : a < 350 ? ['firm','FIRM'] : ['hard','HARD'];
         badgeHtml = `<div class="badge badge-${{cls}}">${{lbl}} — ${{Math.round(a)}} fpm</div>`;
     }}
+    const notesText = (sum.notes || '').trim();
+    const notesHtml = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${{esc(notesText)}}</div></div>` : '';
     document.getElementById('header-mount').innerHTML = `
         <div style="margin-bottom:1.5rem">
             <div class="route"><span class="icao">${{esc(dep)}}</span><span class="arrow">→</span><span class="icao">${{esc(arr)}}</span></div>
@@ -2721,6 +2742,7 @@ function fmtDate(s) {{
             ${{(lEvt.offsetPercent||lEvt.offset_percent) != null ? `<div><div class="li-label">Offset</div><div class="li-val">${{(lEvt.offsetPercent||lEvt.offset_percent).toFixed(1)}}%</div></div>` : ''}}
             ${{(lEvt.thresholdDistFt||lEvt.threshold_dist_ft) != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${{Math.round(lEvt.thresholdDistFt||lEvt.threshold_dist_ft)}} ft</div></div>` : ''}}
         </div></div>` : ''}}
+        ${{notesHtml}}
     `;
     if (lats.length > 0) {{
         const map = L.map('map');
