@@ -383,8 +383,8 @@ pub async fn sync_flight_discord(
     flight_id: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch flight info, user info, and the Discord sync state used for throttling.
-    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
-        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_last_synced_at, f.discord_screenshot_sig \
+    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_last_synced_at, f.discord_screenshot_sig, f.notes \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
          WHERE f.id = $1"
@@ -393,7 +393,7 @@ pub async fn sync_flight_discord(
     .fetch_optional(db)
     .await?;
 
-    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar, last_synced_at, stored_sig) = match row {
+    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar, last_synced_at, stored_sig, notes) = match row {
         Some(r) => r,
         None => return Ok(()),
     };
@@ -470,7 +470,7 @@ pub async fn sync_flight_discord(
     .map(|sid: String| format!("https://butterlog.flyvoyager.net/content/flights/share/{}", sid));
 
     // 7. Assemble the primary embed.
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, share_url)?;
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, share_url, notes.as_deref())?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
     // changed or a brand-new message must be sent; otherwise reuse the already-attached files
@@ -589,6 +589,7 @@ fn assemble_embeds(
     user_info: &DiscordUserInfo,
     flight_id: i64,
     share_url: Option<String>,
+    notes: Option<&str>,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
     let departure_name = statistics.get("departure").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -752,6 +753,15 @@ fn assemble_embeds(
                 });
             }
         }
+    }
+
+    // Pilot-provided notes (capped at 500 chars upstream, well under Discord's field limit).
+    if let Some(text) = notes.map(str::trim).filter(|n| !n.is_empty()) {
+        fields.push(LocalField {
+            name: "Notes".to_string(),
+            value: text.to_string(),
+            inline: false,
+        });
     }
 
     let footer = CreateEmbedFooter::new("ButterLog")
