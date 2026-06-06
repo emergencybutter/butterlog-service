@@ -471,8 +471,12 @@ pub async fn sync_flight_discord(
 
     // 7. Assemble the primary embed. Every embed in the message must share one
     // url so Discord merges the screenshot images into the primary embed's
-    // gallery instead of rendering them as a separate trailing block.
-    let gallery_url = share_url.unwrap_or_else(|| "https://butterlog.flyvoyager.net/".to_string());
+    // gallery instead of rendering them as a separate trailing block. Fall back
+    // to the flight's public detail page so the title still links somewhere
+    // meaningful when the flight hasn't been shared.
+    let gallery_url = share_url.unwrap_or_else(|| {
+        format!("https://butterlog.flyvoyager.net/content/flights/{}", flight_id)
+    });
     let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, &gallery_url, notes.as_deref())?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
