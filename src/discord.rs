@@ -469,8 +469,11 @@ pub async fn sync_flight_discord(
     .unwrap_or(None)
     .map(|sid: String| format!("https://butterlog.flyvoyager.net/content/flights/share/{}", sid));
 
-    // 7. Assemble the primary embed.
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, share_url, notes.as_deref())?;
+    // 7. Assemble the primary embed. Every embed in the message must share one
+    // url so Discord merges the screenshot images into the primary embed's
+    // gallery instead of rendering them as a separate trailing block.
+    let gallery_url = share_url.unwrap_or_else(|| "https://butterlog.flyvoyager.net/".to_string());
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, &gallery_url, notes.as_deref())?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
     // changed or a brand-new message must be sent; otherwise reuse the already-attached files
@@ -486,7 +489,7 @@ pub async fn sync_flight_discord(
                     attachments.push(CreateAttachment::bytes(bytes, &filename));
                     helper_embeds.push(
                         CreateEmbed::new()
-                            .url("https://butterlog.flyvoyager.net/")
+                            .url(&gallery_url)
                             .image(format!("attachment://{}", filename)),
                     );
                 }
@@ -500,7 +503,7 @@ pub async fn sync_flight_discord(
             let filename = format!("screenshot-{}.jpg", index);
             helper_embeds.push(
                 CreateEmbed::new()
-                    .url("https://butterlog.flyvoyager.net/")
+                    .url(&gallery_url)
                     .image(format!("attachment://{}", filename)),
             );
         }
@@ -588,7 +591,7 @@ fn assemble_embeds(
     statistics: &Value,
     user_info: &DiscordUserInfo,
     flight_id: i64,
-    share_url: Option<String>,
+    gallery_url: &str,
     notes: Option<&str>,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -767,13 +770,12 @@ fn assemble_embeds(
     let footer = CreateEmbedFooter::new("ButterLog")
         .icon_url("https://butterlog.flyvoyager.net/apple-touch-icon.png");
 
-    let mut primary_embed = CreateEmbed::new()
+    // The shared url is what lets Discord group the screenshot image embeds into
+    // this embed's gallery; when the flight is shared it doubles as the title link.
+    let primary_embed = CreateEmbed::new()
         .title(title)
-        .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png");
-    if let Some(ref url) = share_url {
-        primary_embed = primary_embed.url(url.clone());
-    }
-    let primary_embed = primary_embed
+        .url(gallery_url)
+        .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png")
         .color(color)
         .author(author)
         .description(description)
