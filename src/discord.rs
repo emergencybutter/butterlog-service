@@ -252,11 +252,21 @@ fn get_formatted_fields_for_category(snapshot: &Value, category: &str) -> String
 }
 
 fn format_timestamp_to_discord(iso_str: &str) -> String {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_str) {
+    // Timestamps arrive either as RFC3339 or as the app's UTC log format
+    // ("%Y-%m-%d %H:%M:%S%.3f", no 'T' and no timezone). Try RFC3339 first, then
+    // fall back to the log format, treating it as UTC.
+    let dt_utc = chrono::DateTime::parse_from_rfc3339(iso_str)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(iso_str, "%Y-%m-%d %H:%M:%S%.f")
+                .map(|naive| naive.and_utc())
+        });
+
+    if let Ok(dt) = dt_utc {
         let epoch = dt.timestamp();
         // Discord's <t:...> tags always render in each viewer's local timezone, so
         // the UTC/Zulu value is printed literally and the tag supplies local time.
-        let zulu = dt.with_timezone(&chrono::Utc).format("%H%MZ");
+        let zulu = dt.format("%H%MZ");
         format!("{} (<t:{}:F> local, <t:{}:R>)", zulu, epoch, epoch)
     } else {
         iso_str.to_string()
