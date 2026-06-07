@@ -254,7 +254,10 @@ fn get_formatted_fields_for_category(snapshot: &Value, category: &str) -> String
 fn format_timestamp_to_discord(iso_str: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_str) {
         let epoch = dt.timestamp();
-        format!("<t:{}:F> (<t:{}:R>)", epoch, epoch)
+        // Discord's <t:...> tags always render in each viewer's local timezone, so
+        // the UTC/Zulu value is printed literally and the tag supplies local time.
+        let zulu = dt.with_timezone(&chrono::Utc).format("%H%MZ");
+        format!("{} (<t:{}:F> local, <t:{}:R>)", zulu, epoch, epoch)
     } else {
         iso_str.to_string()
     }
@@ -771,7 +774,11 @@ fn assemble_embeds(
         });
     }
 
-    let footer = CreateEmbedFooter::new("ButterLog")
+    // Footer text is plain (no markdown/<t:> support), so the Zulu time is
+    // printed literally; the embed's native timestamp below renders alongside it
+    // in each viewer's local timezone.
+    let now = chrono::Utc::now();
+    let footer = CreateEmbedFooter::new(format!("ButterLog • Updated {}", now.format("%H%MZ")))
         .icon_url("https://butterlog.flyvoyager.net/apple-touch-icon.png");
 
     // The shared url is what lets Discord group the screenshot image embeds into
@@ -783,6 +790,7 @@ fn assemble_embeds(
         .color(color)
         .author(author)
         .description(description)
+        .timestamp(serenity::model::Timestamp::now())
         .footer(footer);
 
     // Apply fields to primary embed
