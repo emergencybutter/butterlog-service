@@ -2760,11 +2760,54 @@ function fmtDate(s) {{
     }} else {{ document.getElementById('map').style.display = 'none'; }}
     if (timestamps.length > 0) {{
         const step = Math.max(1, Math.floor(timestamps.length / 300));
-        const labels=[], ad=[], id=[], vd=[], pd=[];
+        const labels=[], ad=[], id=[], vd=[], pd=[], sampledTs=[];
         for (let i=0; i<timestamps.length; i+=step) {{
             labels.push(new Date(timestamps[i]*1000).toISOString().slice(11,16));
             ad.push(alts[i]||0); id.push(ias[i]||0); vd.push(vs[i]||0); pd.push(pitch[i]||0);
+            sampledTs.push(timestamps[i]);
         }}
+        // Map flight events onto the chart x-axis (nearest downsampled point).
+        const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
+        const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':t;
+        const gap = sampledTs.length>1 ? Math.abs(sampledTs[1]-sampledTs[0]) : 30;
+        const eventMarks = [];
+        events.forEach(e => {{
+            const type = e.eventType||e.event_type;
+            const ets = e.timestamp;
+            if (!ets) return;
+            let epoch;
+            try {{ epoch = new Date(ets.replace(' ','T')+'Z').getTime()/1000; }} catch (_) {{ return; }}
+            if (!epoch || isNaN(epoch)) return;
+            let bi=-1, bd=Infinity;
+            for (let i=0;i<sampledTs.length;i++) {{ const dd=Math.abs(sampledTs[i]-epoch); if (dd<bd) {{ bd=dd; bi=i; }} }}
+            if (bi<0 || bd > gap*1.5 + 30) return; // event outside the charted time range
+            eventMarks.push({{index:bi, color:evColor(type), label:evLabel(type)}});
+        }});
+        const eventMarkerPlugin = {{
+            id:'eventMarkers',
+            afterDatasetsDraw(chart) {{
+                const ctx = chart.ctx, area = chart.chartArea, xs = chart.scales.x;
+                if (!area || !xs) return;
+                ctx.save();
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'center';
+                eventMarks.forEach(mm => {{
+                    const px = xs.getPixelForValue(mm.index);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([4,3]);
+                    ctx.moveTo(px, area.top);
+                    ctx.lineTo(px, area.bottom);
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = mm.color;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = mm.color;
+                    ctx.fillText(mm.label, px, area.top + 8);
+                }});
+                ctx.restore();
+            }}
+        }};
         const opts = () => ({{
             responsive:true, maintainAspectRatio:true,
             plugins:{{legend:{{display:false}},tooltip:{{mode:'index',intersect:false}}}},
@@ -2777,7 +2820,7 @@ function fmtDate(s) {{
             const el = document.createElement('div'); el.className='chart-card';
             el.innerHTML=`<div class="section-title">${{lbl}}</div><canvas id="${{id2}}"></canvas>`;
             document.getElementById('charts-mount').appendChild(el);
-            new Chart(document.getElementById(id2),{{type:'line',data:{{labels,datasets:[{{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}}]}},options:opts()}});
+            new Chart(document.getElementById(id2),{{type:'line',data:{{labels,datasets:[{{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}}]}},options:opts(),plugins:[eventMarkerPlugin]}});
         }};
         mk('ca','Altitude (ft)',ad,'#89b4fa');
         mk('ci','Airspeed (kt)',id,'#a6e3a1');
