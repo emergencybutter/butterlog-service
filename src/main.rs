@@ -2783,6 +2783,26 @@ function fmtDate(s) {{
             if (bi<0 || bd > gap*1.5 + 30) return; // event outside the charted time range
             eventMarks.push({{index:bi, color:evColor(type), label:evLabel(type)}});
         }});
+        // Map screenshots onto the chart x-axis; `lb` indexes into the lightbox url list.
+        const shotMarks = [];
+        scrns.forEach((s, i) => {{
+            let epoch = null;
+            if (typeof s.timestamp === 'number') epoch = s.timestamp;
+            else if (s.timestamp) {{ try {{ epoch = new Date(String(s.timestamp).replace(' ','T')+'Z').getTime()/1000; }} catch (_) {{ epoch = null; }} }}
+            if (!epoch || isNaN(epoch)) return;
+            let bi=-1, bd=Infinity;
+            for (let j=0;j<sampledTs.length;j++) {{ const dd=Math.abs(sampledTs[j]-epoch); if (dd<bd) {{ bd=dd; bi=j; }} }}
+            if (bi<0 || bd > gap*1.5 + 30) return;
+            shotMarks.push({{index:bi, lb:i}});
+        }});
+        // Pixel x of the nearest screenshot marker to a canvas x, or -1 if none within tolerance.
+        const shotHit = (chart, x, y) => {{
+            const xs = chart.scales.x, area = chart.chartArea;
+            if (!xs || !area || y < area.bottom - 22) return -1;
+            let best=-1, bestd=10;
+            shotMarks.forEach(m => {{ const dd=Math.abs(xs.getPixelForValue(m.index)-x); if (dd<bestd) {{ bestd=dd; best=m.lb; }} }});
+            return best;
+        }};
         const eventMarkerPlugin = {{
             id:'eventMarkers',
             afterDatasetsDraw(chart) {{
@@ -2805,6 +2825,21 @@ function fmtDate(s) {{
                     ctx.fillStyle = mm.color;
                     ctx.fillText(mm.label, px, area.top + 8);
                 }});
+                // Clickable screenshot markers along the bottom of the chart.
+                ctx.font = '12px sans-serif';
+                ctx.textBaseline = 'bottom';
+                ctx.strokeStyle = '#9399b2';
+                shotMarks.forEach(m => {{
+                    const px = xs.getPixelForValue(m.index);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([]);
+                    ctx.moveTo(px, area.bottom);
+                    ctx.lineTo(px, area.bottom - 12);
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.fillText('📷', px, area.bottom - 12);
+                }});
                 ctx.restore();
             }}
         }};
@@ -2814,7 +2849,14 @@ function fmtDate(s) {{
             scales:{{
                 x:{{ticks:{{color:'#6c7086',maxTicksLimit:6}},grid:{{color:'rgba(255,255,255,0.04)'}}}},
                 y:{{ticks:{{color:'#6c7086'}},grid:{{color:'rgba(255,255,255,0.04)'}}}},
-            }}
+            }},
+            onClick:(evt, els, chart) => {{
+                const lb = shotHit(chart, evt.x, evt.y);
+                if (lb >= 0 && typeof openLb === 'function') openLb(lb);
+            }},
+            onHover:(evt, els, chart) => {{
+                chart.canvas.style.cursor = shotHit(chart, evt.x, evt.y) >= 0 ? 'pointer' : 'default';
+            }},
         }});
         const mk = (id2, lbl, data, color) => {{
             const el = document.createElement('div'); el.className='chart-card';
