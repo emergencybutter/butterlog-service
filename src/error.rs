@@ -15,6 +15,13 @@ pub enum AppError {
     BadRequest(String),
     Forbidden(String),
     Storage(String),
+    Template(askama::Error),
+}
+
+impl From<askama::Error> for AppError {
+    fn from(err: askama::Error) -> Self {
+        Self::Template(err)
+    }
 }
 
 impl From<sqlx::Error> for AppError {
@@ -70,6 +77,13 @@ impl IntoResponse for AppError {
                     "Storage operation failed".to_string(),
                 )
             }
+            AppError::Template(ref err) => {
+                tracing::error!("Template rendering error: {:?}", err);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Page rendering failed".to_string(),
+                )
+            }
             AppError::NotFound(ref msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(ref msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Forbidden(ref msg) => (StatusCode::FORBIDDEN, msg.clone()),
@@ -94,6 +108,7 @@ impl std::fmt::Display for AppError {
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::Storage(msg) => write!(f, "Storage error: {}", msg),
+            AppError::Template(err) => write!(f, "Template error: {}", err),
         }
     }
 }

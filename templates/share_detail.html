@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ButterLog Flight Share</title>
+    <meta property="og:site_name" content="ButterLog">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0d0d16; --panel: rgba(30,30,46,0.5); --border: rgba(255,255,255,0.08);
+            --text: #cdd6f4; --muted: #a6adc8; --dim: #6c7086;
+            --purple: #cba6f7; --pink: #f5c2e7; --green: #a6e3a1; --blue: #89b4fa; --red: #f38ba8; --yellow: #f9e2af;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .page { max-width: 900px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+        .back { color: var(--dim); text-decoration: none; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 0.4rem; margin-bottom: 1.5rem; }
+        .back:hover { color: var(--purple); }
+        .route { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.4rem; }
+        .icao { font-size: 2.2rem; font-weight: 700; }
+        .arrow { font-size: 2rem; color: var(--purple); }
+        .aircraft { font-size: 1.1rem; color: var(--pink); font-weight: 500; margin-bottom: 0.25rem; }
+        .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem; }
+        .badge { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 8px; font-weight: 700; font-size: 0.8rem; margin-bottom: 1.5rem; }
+        .badge-butter { background: linear-gradient(135deg, #a6e3a1, #89b4fa); color: #11111b; }
+        .badge-smooth { background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }
+        .badge-firm { background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }
+        .badge-hard { background: linear-gradient(135deg, #f38ba8, #eba0ac); color: #11111b; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; text-align: center; }
+        .stat-label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }
+        .stat-value { font-size: 1.4rem; font-weight: 700; }
+        .landing-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; }
+        .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.5px; color: var(--pink); font-weight: 600; margin-bottom: 0.75rem; }
+        .landing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1rem; }
+        .li-label { color: var(--dim); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; margin-bottom: 0.2rem; }
+        .li-val { font-size: 1.3rem; font-weight: 700; }
+        #map { height: 400px; border-radius: 12px; margin-bottom: 2rem; border: 1px solid var(--border); }
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem; }
+        @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+        .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; }
+        .chart-card canvas { max-height: 200px; }
+        .gallery { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 0.5rem; scrollbar-width: thin; }
+        .gallery img { width: 160px; height: 100px; object-fit: cover; border-radius: 8px; flex-shrink: 0; border: 1px solid var(--border); cursor: pointer; transition: transform 0.2s; }
+        .gallery img:hover { transform: scale(1.04); }
+        .gallery-section { margin-bottom: 2rem; }
+        .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1000; align-items: center; justify-content: center; }
+        .lightbox.open { display: flex; }
+        .lightbox img { max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: 10px; }
+        .lb-close { position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: rgba(255,255,255,0.6); font-size: 1.5rem; cursor: pointer; padding: 0.5rem; }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+        <a href="/content" class="back" style="margin-bottom:0">← Flight History</a>
+        {% if is_owner %}<button onclick="deleteShare()" style="background:rgba(243,139,168,0.12);color:#f38ba8;border:1px solid rgba(243,139,168,0.3);border-radius:8px;padding:0.5rem 1rem;cursor:pointer;font-family:inherit;font-size:0.9rem" id="delete-btn">Delete Share</button>
+<script>
+async function deleteShare(){
+    if(!confirm('Delete this shared flight? This cannot be undone.'))return;
+    document.getElementById('delete-btn').textContent='Deleting...';
+    document.getElementById('delete-btn').disabled=true;
+    const res=await fetch('/api/v0/flights/share/{{ share_id }}',{method:'DELETE',credentials:'include'});
+    if(res.ok||res.status===204){window.location.href='/content';}
+    else{document.getElementById('delete-btn').textContent='Delete Share';document.getElementById('delete-btn').disabled=false;alert('Delete failed');}
+}
+</script>{% endif %}
+    </div>
+    <div id="header-mount"></div>
+    <div id="gallery-mount"></div>
+    <div id="map"></div>
+    <div class="charts" id="charts-mount"></div>
+</div>
+<div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
+    <button class="lb-close" onclick="closeLb()">✕</button>
+    <img id="lb-img" src="" alt="">
+</div>
+<script>
+const SHARE_DATA = {{ json_escaped|safe }};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function reconstructTs(deltas) {
+    if (!deltas || !deltas.length) return [];
+    const ts = [deltas[0]];
+    for (let i = 1; i < deltas.length; i++) ts.push(ts[i-1] + deltas[i]);
+    return ts;
+}
+function fmtDur(m) { const h = Math.floor(m/60); return h > 0 ? h+'h '+(m%60)+'m' : m+'m'; }
+function fmtDate(s) {
+    if (!s) return '';
+    try { return new Date(s.replace(' ','T')+'Z').toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'}); } catch { return s; }
+}
+(function() {
+    const d = SHARE_DATA;
+    const td = d.transposedData || d.transposed_data || {};
+    const sum = d.summary || {};
+    const scrns = d.screenshots || [];
+    const timestamps = reconstructTs(td.timestamps);
+    const lats = td.latitudes || [], lons = td.longitudes || [], alts = td.altitudes || [];
+    const ias = td.ias || [], vs = td.vspeed || [], pitch = td.pitch || [];
+    const dep = sum.startIcao || sum.departure || '?';
+    const arr = sum.endIcao || sum.arrival || '?';
+    const ac = sum.aircraftTitle || sum.airframe_name || '';
+    const dur = sum.durationMinutes || sum.duration_minutes || 0;
+    const maxAlt = (sum.maxAltitude || sum.max_altitude || 0).toFixed(0);
+    const maxGs = (sum.maxGroundSpeed || sum.max_ground_speed || 0).toFixed(0);
+    const fuel = (sum.fuelConsumed || sum.fuel_consumed || 0).toFixed(1);
+    const events = sum.events || [];
+    const lEvt = events.filter(e => (e.eventType||e.event_type) === 'landing').pop();
+    const lvs = lEvt && (lEvt.touchdownFpm || lEvt.touchdown_fpm);
+    let badgeHtml = '';
+    if (lvs != null) {
+        const a = Math.abs(lvs);
+        const [cls, lbl] = a < 150 ? ['butter','BUTTER'] : a < 250 ? ['smooth','SMOOTH'] : a < 350 ? ['firm','FIRM'] : ['hard','HARD'];
+        badgeHtml = `<div class="badge badge-${cls}">${lbl} — ${Math.round(a)} fpm</div>`;
+    }
+    const notesText = (sum.notes || '').trim();
+    const notesHtml = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${esc(notesText)}</div></div>` : '';
+    document.getElementById('header-mount').innerHTML = `
+        <div style="margin-bottom:1.5rem">
+            <div class="route"><span class="icao">${esc(dep)}</span><span class="arrow">→</span><span class="icao">${esc(arr)}</span></div>
+            <div class="aircraft">${esc(ac)}</div>
+            <div class="meta">${fmtDate(sum.startTime||sum.start_time)} · ${fmtDur(dur)}</div>
+            ${badgeHtml}
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Max Altitude</div><div class="stat-value">${maxAlt} ft</div></div>
+            <div class="stat-card"><div class="stat-label">Max Speed (GS)</div><div class="stat-value">${maxGs} kt</div></div>
+            <div class="stat-card"><div class="stat-label">Fuel Consumed</div><div class="stat-value">${fuel} gal</div></div>
+            <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${fmtDur(dur)}</div></div>
+        </div>
+        ${lEvt ? `<div class="landing-card"><div class="section-title">Landing Performance</div><div class="landing-grid">
+            ${lvs != null ? `<div><div class="li-label">Touchdown VS</div><div class="li-val">${Math.round(lvs)} fpm</div></div>` : ''}
+            ${(lEvt.landingG||lEvt.landing_g) != null ? `<div><div class="li-label">Landing G</div><div class="li-val">${(lEvt.landingG||lEvt.landing_g).toFixed(2)} G</div></div>` : ''}
+            ${(lEvt.offsetPercent||lEvt.offset_percent) != null ? `<div><div class="li-label">Offset</div><div class="li-val">${(lEvt.offsetPercent||lEvt.offset_percent).toFixed(1)}%</div></div>` : ''}
+            ${(lEvt.thresholdDistFt||lEvt.threshold_dist_ft) != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${Math.round(lEvt.thresholdDistFt||lEvt.threshold_dist_ft)} ft</div></div>` : ''}
+        </div></div>` : ''}
+        ${notesHtml}
+    `;
+    if (lats.length > 0) {
+        const map = L.map('map');
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'© OSM © CARTO',subdomains:'abcd',maxZoom:19}).addTo(map);
+        const coords = lats.map((la, i) => [la, lons[i]]);
+        const path = L.polyline(coords,{color:'#cba6f7',weight:2.5,opacity:0.9}).addTo(map);
+        map.fitBounds(path.getBounds().pad(0.12));
+        events.forEach(e => {
+            const type = e.eventType||e.event_type;
+            if (!e.latitude || !e.longitude) return;
+            const color = type==='takeoff'?'#a6e3a1':type==='landing'?'#f38ba8':'#89b4fa';
+            const label = type==='takeoff'?'Takeoff':type==='landing'?'Landing':type==='top_of_climb'?'TOC':'TOD';
+            L.circleMarker([e.latitude,e.longitude],{radius:7,color,fillColor:color,fillOpacity:0.9,weight:2}).bindTooltip(label).addTo(map);
+        });
+    } else { document.getElementById('map').style.display = 'none'; }
+    if (timestamps.length > 0) {
+        const step = Math.max(1, Math.floor(timestamps.length / 300));
+        const labels=[], ad=[], id=[], vd=[], pd=[], sampledTs=[];
+        for (let i=0; i<timestamps.length; i+=step) {
+            labels.push(new Date(timestamps[i]*1000).toISOString().slice(11,16));
+            ad.push(alts[i]||0); id.push(ias[i]||0); vd.push(vs[i]||0); pd.push(pitch[i]||0);
+            sampledTs.push(timestamps[i]);
+        }
+        // Map flight events onto the chart x-axis (nearest downsampled point).
+        const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
+        const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':t;
+        const gap = sampledTs.length>1 ? Math.abs(sampledTs[1]-sampledTs[0]) : 30;
+        const eventMarks = [];
+        events.forEach(e => {
+            const type = e.eventType||e.event_type;
+            const ets = e.timestamp;
+            if (!ets) return;
+            let epoch;
+            try { epoch = new Date(ets.replace(' ','T')+'Z').getTime()/1000; } catch (_) { return; }
+            if (!epoch || isNaN(epoch)) return;
+            let bi=-1, bd=Infinity;
+            for (let i=0;i<sampledTs.length;i++) { const dd=Math.abs(sampledTs[i]-epoch); if (dd<bd) { bd=dd; bi=i; } }
+            if (bi<0 || bd > gap*1.5 + 30) return; // event outside the charted time range
+            eventMarks.push({index:bi, color:evColor(type), label:evLabel(type)});
+        });
+        // Map screenshots onto the chart x-axis; `lb` indexes into the lightbox url list.
+        const shotMarks = [];
+        scrns.forEach((s, i) => {
+            let epoch = null;
+            if (typeof s.timestamp === 'number') epoch = s.timestamp;
+            else if (s.timestamp) { try { epoch = new Date(String(s.timestamp).replace(' ','T')+'Z').getTime()/1000; } catch (_) { epoch = null; } }
+            if (!epoch || isNaN(epoch)) return;
+            let bi=-1, bd=Infinity;
+            for (let j=0;j<sampledTs.length;j++) { const dd=Math.abs(sampledTs[j]-epoch); if (dd<bd) { bd=dd; bi=j; } }
+            if (bi<0 || bd > gap*1.5 + 30) return;
+            shotMarks.push({index:bi, lb:i});
+        });
+        // Pixel x of the nearest screenshot marker to a canvas x, or -1 if none within tolerance.
+        const shotHit = (chart, x, y) => {
+            const xs = chart.scales.x, area = chart.chartArea;
+            if (!xs || !area || y < area.bottom - 22) return -1;
+            let best=-1, bestd=10;
+            shotMarks.forEach(m => { const dd=Math.abs(xs.getPixelForValue(m.index)-x); if (dd<bestd) { bestd=dd; best=m.lb; } });
+            return best;
+        };
+        const eventMarkerPlugin = {
+            id:'eventMarkers',
+            afterDatasetsDraw(chart) {
+                const ctx = chart.ctx, area = chart.chartArea, xs = chart.scales.x;
+                if (!area || !xs) return;
+                ctx.save();
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'center';
+                eventMarks.forEach(mm => {
+                    const px = xs.getPixelForValue(mm.index);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([4,3]);
+                    ctx.moveTo(px, area.top);
+                    ctx.lineTo(px, area.bottom);
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = mm.color;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = mm.color;
+                    ctx.fillText(mm.label, px, area.top + 8);
+                });
+                // Clickable screenshot markers along the bottom of the chart.
+                ctx.font = '12px sans-serif';
+                ctx.textBaseline = 'bottom';
+                ctx.strokeStyle = '#9399b2';
+                shotMarks.forEach(m => {
+                    const px = xs.getPixelForValue(m.index);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([]);
+                    ctx.moveTo(px, area.bottom);
+                    ctx.lineTo(px, area.bottom - 12);
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.fillText('📷', px, area.bottom - 12);
+                });
+                ctx.restore();
+            }
+        };
+        const opts = () => ({
+            responsive:true, maintainAspectRatio:true,
+            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
+            scales:{
+                x:{ticks:{color:'#6c7086',maxTicksLimit:6},grid:{color:'rgba(255,255,255,0.04)'}},
+                y:{ticks:{color:'#6c7086'},grid:{color:'rgba(255,255,255,0.04)'}},
+            },
+            onClick:(evt, els, chart) => {
+                const lb = shotHit(chart, evt.x, evt.y);
+                if (lb >= 0 && typeof openLb === 'function') openLb(lb);
+            },
+            onHover:(evt, els, chart) => {
+                chart.canvas.style.cursor = shotHit(chart, evt.x, evt.y) >= 0 ? 'pointer' : 'default';
+            },
+        });
+        const mk = (id2, lbl, data, color) => {
+            const el = document.createElement('div'); el.className='chart-card';
+            el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas>`;
+            document.getElementById('charts-mount').appendChild(el);
+            new Chart(document.getElementById(id2),{type:'line',data:{labels,datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]});
+        };
+        mk('ca','Altitude (ft)',ad,'#89b4fa');
+        mk('ci','Airspeed (kt)',id,'#a6e3a1');
+        mk('cv','Vert Speed (fpm)',vd,'#f38ba8');
+        mk('cp','Pitch (°)',pd,'#f9e2af');
+    }
+    if (scrns.length > 0) {
+        const urls = scrns.map(s=>s.url);
+        window._lbUrls = urls;
+        const thumbs = urls.map((u,i)=>`<img src="${u}" loading="lazy" onclick="openLb(${i})" alt="">`).join('');
+        document.getElementById('gallery-mount').innerHTML=`<div class="gallery-section"><div class="section-title">Screenshots</div><div class="gallery">${thumbs}</div></div>`;
+    }
+})();
+function openLb(i){ document.getElementById('lb-img').src=window._lbUrls[i]; document.getElementById('lightbox').classList.add('open'); document.body.style.overflow='hidden'; }
+function closeLb(){ document.getElementById('lightbox').classList.remove('open'); document.body.style.overflow=''; }
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeLb();});
+</script>
+</body>
+</html>
