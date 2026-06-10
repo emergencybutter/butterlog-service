@@ -13,6 +13,9 @@ pub struct Config {
     pub r2_access_key_id: String,
     pub r2_secret_access_key: String,
     pub r2_public_url: String,
+    /// Public base URL of this service (no trailing slash), used when building
+    /// share/detail links. Overridable via PUBLIC_BASE_URL.
+    pub public_base_url: String,
     #[allow(dead_code)]
     pub predetermined_channels: Option<String>,
 }
@@ -61,6 +64,11 @@ impl Config {
 
         let predetermined_channels = env::var("PREDETERMINED_CHANNELS").ok();
 
+        let public_base_url = env::var("PUBLIC_BASE_URL")
+            .unwrap_or_else(|_| "https://butterlog.flyvoyager.net".to_string())
+            .trim_end_matches('/')
+            .to_string();
+
         Self {
             database_url,
             discord_client_id,
@@ -73,6 +81,7 @@ impl Config {
             r2_access_key_id,
             r2_secret_access_key,
             r2_public_url,
+            public_base_url,
             predetermined_channels,
         }
     }

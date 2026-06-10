@@ -15,6 +15,27 @@ use std::io::Read;
 /// Maximum allowed length (in characters) of a user-provided flight note.
 const MAX_NOTES_LEN: usize = 500;
 
+/// Maximum decompressed size of a flight-share JSON document. Caps gzip
+/// expansion so a small malicious upload cannot decompress into gigabytes.
+pub const MAX_SHARE_DECOMPRESSED: u64 = 32 * 1024 * 1024;
+
+/// Maximum accepted screenshot upload size (pre-decode, on the wire).
+pub const MAX_SCREENSHOT_UPLOAD: usize = 15 * 1024 * 1024;
+
+/// Decompress a gzip payload, refusing anything that expands past `max` bytes.
+pub fn decompress_gzip_capped(data: &[u8], max: u64) -> Result<String, String> {
+    let decoder = GzDecoder::new(data);
+    let mut out = String::new();
+    decoder
+        .take(max + 1)
+        .read_to_string(&mut out)
+        .map_err(|e| format!("Failed to decompress: {}", e))?;
+    if out.len() as u64 > max {
+        return Err(format!("Decompressed payload exceeds {} byte limit", max));
+    }
+    Ok(out)
+}
+
 /// Validate an optional notes value against the length limit.
 fn validate_notes(notes: &Option<String>) -> Result<(), AppError> {
     if let Some(text) = notes {
@@ -65,44 +86,69 @@ pub struct FlightResponse {
     pub peers: Option<Vec<String>>,
 }
 
-fn update_and_get_peers(
+/// Peer presence lives in the `multiplayer_peers` table (not process memory) so
+/// it works when the service runs as multiple instances. A peer is considered
+/// active when seen within the last 120 seconds.
+async fn update_and_get_peers(
     state: &crate::AppState,
     user_id: i64,
     multiplayer_enabled: Option<bool>,
     udp_address: Option<String>,
-) -> Option<Vec<String>> {
-    let mut peers_lock = state.peers.lock().ok()?;
-    let now = std::time::Instant::now();
-
-    // 1. Update or remove current peer
+) -> Result<Option<Vec<String>>, AppError> {
+    // 1. Update or remove the current peer's presence row
     if multiplayer_enabled.unwrap_or(false) {
         if let Some(ref addr) = udp_address {
             if !addr.trim().is_empty() {
-                peers_lock.insert(user_id, (addr.clone(), now));
+                sqlx::query(
+                    "INSERT INTO multiplayer_peers (user_id, udp_address, last_seen) \
+                     VALUES ($1, $2, CURRENT_TIMESTAMP) \
+                     ON CONFLICT (user_id) DO UPDATE SET \
+                         udp_address = EXCLUDED.udp_address, last_seen = EXCLUDED.last_seen"
+                )
+                .bind(user_id)
+                .bind(addr)
+                .execute(&state.db)
+                .await?;
             }
         }
     } else if let Some(false) = multiplayer_enabled {
-        peers_lock.remove(&user_id);
+        sqlx::query("DELETE FROM multiplayer_peers WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+        return Ok(None);
     }
 
-    // 2. Prune stale peers (older than 120s)
-    peers_lock.retain(|_, (_, last_seen)| {
-        now.duration_since(*last_seen) < std::time::Duration::from_secs(120)
-    });
+    if !multiplayer_enabled.unwrap_or(false) {
+        return Ok(None);
+    }
 
-    // 3. Collect other active peers
-    let mut other_peers = Vec::new();
-    for (&peer_user_id, (addr, _)) in peers_lock.iter() {
-        if peer_user_id != user_id {
-            other_peers.push(addr.clone());
+    // 2. Prune stale peers, then collect the other active ones
+    sqlx::query("DELETE FROM multiplayer_peers WHERE last_seen < CURRENT_TIMESTAMP - INTERVAL '120 seconds'")
+        .execute(&state.db)
+        .await?;
+
+    let other_peers: Vec<String> = sqlx::query_scalar(
+        "SELECT udp_address FROM multiplayer_peers WHERE user_id <> $1"
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Some(other_peers))
+}
+
+/// Fire-and-forget Discord synchronization for a flight.
+fn spawn_discord_sync(state: &crate::AppState, flight_id: i64) {
+    let db = state.db.clone();
+    let r2 = state.r2.clone();
+    let http = state.discord_http.clone();
+    let base_url = state.config.public_base_url.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::discord::sync_flight_discord(&db, &r2, &http, flight_id, &base_url).await {
+            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
         }
-    }
-
-    if multiplayer_enabled.unwrap_or(false) {
-        Some(other_peers)
-    } else {
-        None
-    }
+    });
 }
 
 #[derive(Deserialize)]
@@ -241,19 +287,11 @@ pub async fn create_flight_handler(
         statistics: row.3,
         screenshots: Vec::new(),
         notes: row.4,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address).await?,
     };
 
     // Trigger Discord Sync in background
-    let db_clone = state.db.clone();
-    let r2_clone = state.r2.clone();
-    let discord_http_clone = state.discord_http.clone();
-    let flight_id = response.id;
-    tokio::spawn(async move {
-        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
-            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
-        }
-    });
+    spawn_discord_sync(&state, response.id);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -291,14 +329,7 @@ pub async fn update_flight_handler(
     .await?;
 
     // Trigger Discord Sync in background
-    let db_clone = state.db.clone();
-    let r2_clone = state.r2.clone();
-    let discord_http_clone = state.discord_http.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
-            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
-        }
-    });
+    spawn_discord_sync(&state, flight_id);
 
     let response = FlightResponse {
         id: flight_id,
@@ -308,7 +339,7 @@ pub async fn update_flight_handler(
         statistics,
         screenshots,
         notes,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address),
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address).await?,
     };
 
     Ok((StatusCode::OK, Json(response)))
@@ -410,10 +441,8 @@ pub async fn upload_screenshot_handler(
     let raw_bytes = field_bytes
         .ok_or_else(|| AppError::BadRequest("No screenshot field found".to_string()))?;
 
-    // Refuse upload if file is larger than 100MB
-    if raw_bytes.len() > 100 * 1024 * 1024 {
-        return Err(AppError::BadRequest("File size exceeds 100MB limit".to_string()));
-    }
+    // The on-the-wire size is enforced by the per-route DefaultBodyLimit
+    // (MAX_SCREENSHOT_UPLOAD) configured in main.rs.
 
     // Verify format is WebP
     let format = image::guess_format(&raw_bytes).map_err(|e| {
@@ -423,9 +452,16 @@ pub async fn upload_screenshot_handler(
         return Err(AppError::BadRequest("Only WebP images are allowed".to_string()));
     }
 
-    // Load and verify dimensions (max width and height of 1600px)
-    let img = image::load_from_memory(&raw_bytes).map_err(|e| {
-        AppError::BadRequest(format!("Invalid image data: {}", e))
+    // Decode with dimension/memory limits enforced *during* decode so an
+    // oversized or decompression-bomb image fails before allocating.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1600);
+    limits.max_image_height = Some(1600);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&raw_bytes));
+    reader.set_format(image::ImageFormat::WebP);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| {
+        AppError::BadRequest(format!("Invalid image data (must be WebP, max 1600px): {}", e))
     })?;
     if img.width() > 1600 || img.height() > 1600 {
         return Err(AppError::BadRequest("Image dimensions exceed 1600px limit".to_string()));
@@ -452,14 +488,7 @@ pub async fn upload_screenshot_handler(
     .await?;
 
     // Trigger Discord Sync in background
-    let db_clone = state.db.clone();
-    let r2_clone = state.r2.clone();
-    let discord_http_clone = state.discord_http.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
-            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
-        }
-    });
+    spawn_discord_sync(&state, flight_id);
 
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash, "url": url }))))
 }
@@ -488,37 +517,19 @@ pub async fn delete_screenshot_handler(
         .execute(&state.db)
         .await?;
 
-    // Check if any other flight references this hash
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM screenshots WHERE hash = $1")
-        .bind(&hash)
-        .fetch_one(&state.db)
-        .await?;
-
-    if count == 0 {
-        let key = if let Some(url_str) = url {
-            if url_str.ends_with(".webp") {
-                format!("screenshots/{}/{}.webp", flight_id, hash)
-            } else {
-                format!("screenshots/{}/{}.jpg", flight_id, hash)
-            }
-        } else {
-            format!("screenshots/{}/{}.webp", flight_id, hash)
-        };
-
-        // Delete from R2
-        state.r2.delete_object(&key).await
-            .map_err(AppError::Storage)?;
-    }
+    // R2 keys are namespaced per flight (screenshots/{flight_id}/{hash}), so
+    // this flight's object is never shared with other flights — always delete it.
+    let key = match url {
+        Some(url_str) if !url_str.ends_with(".webp") => {
+            format!("screenshots/{}/{}.jpg", flight_id, hash)
+        }
+        _ => format!("screenshots/{}/{}.webp", flight_id, hash),
+    };
+    state.r2.delete_object(&key).await
+        .map_err(AppError::Storage)?;
 
     // Trigger Discord Sync in background
-    let db_clone = state.db.clone();
-    let r2_clone = state.r2.clone();
-    let discord_http_clone = state.discord_http.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
-            tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
-        }
-    });
+    spawn_discord_sync(&state, flight_id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -534,11 +545,10 @@ pub async fn upload_flight_share_handler(
         return Err(AppError::BadRequest("Empty body".to_string()));
     }
 
-    // Decompress only to validate and extract remote_flight_id for the DB record
-    let mut decoder = GzDecoder::new(body.as_ref());
-    let mut json_str = String::new();
-    decoder.read_to_string(&mut json_str)
-        .map_err(|e| AppError::BadRequest(format!("Failed to decompress: {}", e)))?;
+    // Decompress only to validate and extract remote_flight_id for the DB record.
+    // Capped to guard against gzip decompression bombs.
+    let json_str = decompress_gzip_capped(body.as_ref(), MAX_SHARE_DECOMPRESSED)
+        .map_err(AppError::BadRequest)?;
 
     let share: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON: {}", e)))?;
@@ -565,17 +575,10 @@ pub async fn upload_flight_share_handler(
 
     // Update Discord notification with share link if a message exists for this flight
     if let Some(flight_id) = remote_flight_id {
-        let db_clone = state.db.clone();
-        let r2_clone = state.r2.clone();
-        let discord_http_clone = state.discord_http.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::discord::sync_flight_discord(&db_clone, &r2_clone, &discord_http_clone, flight_id).await {
-                tracing::warn!("Failed to update Discord notification after share: {:?}", e);
-            }
-        });
+        spawn_discord_sync(&state, flight_id);
     }
 
-    let share_url = format!("https://butterlog.flyvoyager.net/content/flights/share/{}", share_id);
+    let share_url = format!("{}/content/flights/share/{}", state.config.public_base_url, share_id);
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
 }
 
@@ -654,10 +657,8 @@ pub async fn get_flight_share_json_handler(
         .await
         .map_err(AppError::Storage)?;
 
-    let mut decoder = GzDecoder::new(compressed.as_slice());
-    let mut json_str = String::new();
-    decoder.read_to_string(&mut json_str)
-        .map_err(|e| AppError::Storage(format!("Decompression failed: {}", e)))?;
+    let json_str = decompress_gzip_capped(compressed.as_slice(), MAX_SHARE_DECOMPRESSED)
+        .map_err(AppError::Storage)?;
 
     Ok((
         [
@@ -796,7 +797,9 @@ pub async fn multiplayer_ping_handler(
         user_id,
         Some(has_udp),
         payload.udp_address,
-    ).unwrap_or_default();
+    )
+    .await?
+    .unwrap_or_default();
 
     Ok((StatusCode::OK, Json(MultiplayerPingResponse { peers })))
 }

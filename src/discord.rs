@@ -43,11 +43,17 @@ pub async fn start_discord_bot(token: &str) -> Result<Arc<serenity::http::Http>,
         }
     });
 
-    // Wait for the bot to be ready
+    // Wait for the bot to be ready, but never hang startup forever (e.g. on a
+    // revoked token) — Cloud Run would kill the instance without a useful log.
     tracing::info!("Waiting for Discord bot to be ready...");
-    while !is_ready.load(Ordering::Relaxed) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
+    let wait = async {
+        while !is_ready.load(Ordering::Relaxed) {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), wait)
+        .await
+        .map_err(|_| "Discord bot did not become ready within 30s (bad token or gateway issue?)")?;
     tracing::info!("Discord bot is ready!");
 
     Ok(http_client)
@@ -389,15 +395,29 @@ pub async fn maybe_update_user_notification_channels(
     Ok(())
 }
 
+/// All the flight + user state needed to render and throttle a Discord sync.
+#[derive(sqlx::FromRow)]
+struct FlightSyncRow {
+    user_id: i64,
+    statistics: Value,
+    discord_id: String,
+    username: String,
+    global_name: Option<String>,
+    avatar: Option<String>,
+    discord_screenshot_sig: Option<String>,
+    notes: Option<String>,
+}
+
 pub async fn sync_flight_discord(
     db: &PgPool,
     r2: &R2Client,
     http: &serenity::http::Http,
     flight_id: i64,
+    base_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch flight info, user info, and the Discord sync state used for throttling.
-    let row: Option<(i64, i64, String, Option<String>, Value, String, String, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT f.id, f.user_id, f.departure, f.arrival, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_last_synced_at, f.discord_screenshot_sig, f.notes \
+    let row: Option<FlightSyncRow> = sqlx::query_as(
+        "SELECT f.user_id, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_screenshot_sig, f.notes \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
          WHERE f.id = $1"
@@ -406,10 +426,14 @@ pub async fn sync_flight_discord(
     .fetch_optional(db)
     .await?;
 
-    let (_, user_id, _departure, _arrival, statistics, discord_id, username, global_name, avatar, last_synced_at, stored_sig, notes) = match row {
+    let row = match row {
         Some(r) => r,
         None => return Ok(()),
     };
+    let user_id = row.user_id;
+    let statistics = row.statistics;
+    let stored_sig = row.discord_screenshot_sig;
+    let notes = row.notes;
 
     // Update user notification channels before notifying
     if let Err(e) = maybe_update_user_notification_channels(db, http, user_id).await {
@@ -417,11 +441,22 @@ pub async fn sync_flight_discord(
     }
 
     let user_info = DiscordUserInfo {
-        discord_id,
-        username,
-        global_name,
-        avatar,
+        discord_id: row.discord_id,
+        username: row.username,
+        global_name: row.global_name,
+        avatar: row.avatar,
     };
+
+    // Expire stale 'pending' claims left behind by a crashed sync so the
+    // channel does not get stuck without a message forever.
+    sqlx::query(
+        "DELETE FROM flight_discord_messages \
+         WHERE flight_id = $1 AND discord_message_id = 'pending' \
+           AND created_at < NOW() - INTERVAL '5 minutes'"
+    )
+    .bind(flight_id)
+    .execute(db)
+    .await?;
 
     // 2. Fetch the target channels registered by this user
     let channels: Vec<String> = sqlx::query_scalar(
@@ -462,14 +497,22 @@ pub async fn sync_flight_discord(
     let download_needed = screenshots_changed || need_send;
     // Push first posts, new channels, landings, and screenshot changes immediately; otherwise
     // throttle telemetry-only updates to at most once per minute to spare R2 + Discord.
+    // The throttle check-and-claim is a single conditional UPDATE so concurrent
+    // syncs (other tasks or other instances) cannot both pass the window.
     let force = download_needed || is_landed;
-    if !force {
-        if let Some(last) = last_synced_at {
-            if chrono::Utc::now().signed_duration_since(last).num_seconds() < 60 {
-                tracing::debug!("Skipping Discord sync for flight {} (throttled, <60s since last)", flight_id);
-                return Ok(());
-            }
-        }
+    let claimed: Option<i64> = sqlx::query_scalar(
+        "UPDATE flights SET discord_last_synced_at = NOW() \
+         WHERE id = $1 AND ($2 OR discord_last_synced_at IS NULL \
+               OR discord_last_synced_at < NOW() - INTERVAL '60 seconds') \
+         RETURNING id"
+    )
+    .bind(flight_id)
+    .bind(force)
+    .fetch_optional(db)
+    .await?;
+    if claimed.is_none() {
+        tracing::debug!("Skipping Discord sync for flight {} (throttled, <60s since last)", flight_id);
+        return Ok(());
     }
 
     // 6. Look up share URL for this flight (if shared)
@@ -480,7 +523,7 @@ pub async fn sync_flight_discord(
     .fetch_optional(db)
     .await
     .unwrap_or(None)
-    .map(|sid: String| format!("https://butterlog.flyvoyager.net/content/flights/share/{}", sid));
+    .map(|sid: String| format!("{}/content/flights/share/{}", base_url, sid));
 
     // 7. Assemble the primary embed. Every embed in the message must share one
     // url so Discord merges the screenshot images into the primary embed's
@@ -488,9 +531,9 @@ pub async fn sync_flight_discord(
     // to the flight's public detail page so the title still links somewhere
     // meaningful when the flight hasn't been shared.
     let gallery_url = share_url.unwrap_or_else(|| {
-        format!("https://butterlog.flyvoyager.net/content/flights/{}", flight_id)
+        format!("{}/content/flights/{}", base_url, flight_id)
     });
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, flight_id, &gallery_url, notes.as_deref())?;
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref())?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
     // changed or a brand-new message must be sent; otherwise reuse the already-attached files
@@ -538,6 +581,8 @@ pub async fn sync_flight_discord(
         };
 
         if let Some(msg_id_str) = existing_msgs.get(channel_str) {
+            // A 'pending' placeholder (non-numeric) means another sync is
+            // mid-send for this channel; leave it alone.
             let msg_id_val = match msg_id_str.parse::<u64>() {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -561,7 +606,28 @@ pub async fn sync_flight_discord(
                 Err(e) => tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e),
             }
         } else {
-            // Send new message
+            // Claim the (flight, channel) slot with a placeholder row before
+            // sending. The unique index makes this race-safe: if another sync
+            // (or another instance) claimed it first, rows_affected is 0 and
+            // we skip instead of posting a duplicate message.
+            let claim = sqlx::query(
+                "INSERT INTO flight_discord_messages (flight_id, discord_message_id, discord_channel_id) \
+                 VALUES ($1, 'pending', $2) \
+                 ON CONFLICT (flight_id, discord_channel_id) DO NOTHING"
+            )
+            .bind(flight_id)
+            .bind(channel_str)
+            .execute(db)
+            .await;
+            match claim {
+                Ok(res) if res.rows_affected() == 1 => {}
+                Ok(_) => continue, // someone else owns this channel slot
+                Err(e) => {
+                    tracing::error!("Failed to claim Discord message slot for flight {} channel {}: {:?}", flight_id, channel_str, e);
+                    continue;
+                }
+            }
+
             let builder = CreateMessage::new()
                 .embeds(all_embeds.clone())
                 .files(attachments.clone());
@@ -570,25 +636,36 @@ pub async fn sync_flight_discord(
             match channel_id.send_message(http, builder).await {
                 Ok(msg) => {
                     tracing::info!("[Outgoing Response] Sent message {} successfully", msg.id);
-                    let msg_id_str = msg.id.to_string();
                     let _ = sqlx::query(
-                        "INSERT INTO flight_discord_messages (flight_id, discord_message_id, discord_channel_id) \
-                         VALUES ($1, $2, $3)"
+                        "UPDATE flight_discord_messages SET discord_message_id = $1 \
+                         WHERE flight_id = $2 AND discord_channel_id = $3"
                     )
+                    .bind(msg.id.to_string())
                     .bind(flight_id)
-                    .bind(&msg_id_str)
                     .bind(channel_str)
                     .execute(db)
                     .await;
                 }
-                Err(e) => tracing::error!("Failed to send Discord message in channel {}: {:?}", channel_id, e),
+                Err(e) => {
+                    tracing::error!("Failed to send Discord message in channel {}: {:?}", channel_id, e);
+                    // Release the claim so a later sync can retry.
+                    let _ = sqlx::query(
+                        "DELETE FROM flight_discord_messages \
+                         WHERE flight_id = $1 AND discord_channel_id = $2 AND discord_message_id = 'pending'"
+                    )
+                    .bind(flight_id)
+                    .bind(channel_str)
+                    .execute(db)
+                    .await;
+                }
             }
         }
     }
 
-    // 10. Record sync state for throttling + change detection.
+    // 10. Record the screenshot signature for change detection (the throttle
+    // timestamp was already claimed atomically above).
     let _ = sqlx::query(
-        "UPDATE flights SET discord_last_synced_at = NOW(), discord_screenshot_sig = $1 WHERE id = $2"
+        "UPDATE flights SET discord_screenshot_sig = $1 WHERE id = $2"
     )
     .bind(&screenshot_sig)
     .bind(flight_id)
@@ -607,7 +684,7 @@ struct LocalField {
 fn assemble_embeds(
     statistics: &Value,
     user_info: &DiscordUserInfo,
-    flight_id: i64,
+    base_url: &str,
     gallery_url: &str,
     notes: Option<&str>,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
@@ -789,14 +866,14 @@ fn assemble_embeds(
     // in each viewer's local timezone.
     let now = chrono::Utc::now();
     let footer = CreateEmbedFooter::new(format!("ButterLog • Updated {}", now.format("%H%MZ")))
-        .icon_url("https://butterlog.flyvoyager.net/apple-touch-icon.png");
+        .icon_url(format!("{}/apple-touch-icon.png", base_url));
 
     // The shared url is what lets Discord group the screenshot image embeds into
     // this embed's gallery; when the flight is shared it doubles as the title link.
     let primary_embed = CreateEmbed::new()
         .title(title)
         .url(gallery_url)
-        .thumbnail("https://butterlog.flyvoyager.net/apple-touch-icon.png")
+        .thumbnail(format!("{}/apple-touch-icon.png", base_url))
         .color(color)
         .author(author)
         .description(description)
@@ -902,4 +979,52 @@ pub async fn get_bot_guilds_and_channels(
         });
     }
     Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_timestamp_handles_rfc3339_and_log_format() {
+        // RFC3339
+        let out = format_timestamp_to_discord("2026-06-09T14:30:00Z");
+        assert!(out.starts_with("1430Z"), "got: {}", out);
+        assert!(out.contains("<t:"));
+
+        // App log format (UTC, no timezone)
+        let out = format_timestamp_to_discord("2026-06-09 14:30:00.123");
+        assert!(out.starts_with("1430Z"), "got: {}", out);
+
+        // Unparseable input is passed through untouched
+        assert_eq!(format_timestamp_to_discord("not a date"), "not a date");
+    }
+
+    #[test]
+    fn telemetry_formatting_by_category() {
+        let snapshot = serde_json::json!({
+            "IAS": 123.456,
+            "VSpd": "-700.5",
+            "AfcsOn": 1.0,
+            "E1 RPM": 2400.0,
+            "Unknown": 1.0
+        });
+
+        let normal = get_formatted_fields_for_category(&snapshot, "normal");
+        assert!(normal.contains("**Indicated Airspeed**: 123.46 kts"));
+        assert!(normal.contains("**Vertical Speed**: -700.50 fpm"));
+        assert!(!normal.contains("RPM"));
+
+        let instruments = get_formatted_fields_for_category(&snapshot, "instruments");
+        assert!(instruments.contains("**Autopilot**: On"));
+
+        let engine = get_formatted_fields_for_category(&snapshot, "engine");
+        assert!(engine.contains("**Engine 1 RPM**: 2400.00 rpm"));
+    }
+
+    #[test]
+    fn telemetry_skips_null_and_non_numeric() {
+        let snapshot = serde_json::json!({ "IAS": null, "TAS": {} });
+        assert_eq!(get_formatted_fields_for_category(&snapshot, "normal"), "");
+    }
 }

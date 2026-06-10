@@ -26,7 +26,6 @@ pub struct AppState {
     http_client: reqwest::Client,
     r2: r2::R2Client,
     discord_http: std::sync::Arc<serenity::http::Http>,
-    pub peers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<i64, (String, std::time::Instant)>>>,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client: reqwest::Client::new(),
         r2: r2_client,
         discord_http,
-        peers: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Build the router with trace logging
@@ -109,7 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/v0/users/:webhook_token/flights/:id/screenshots",
-            post(handlers::upload_screenshot_handler),
+            post(handlers::upload_screenshot_handler)
+                // Screenshot uploads may exceed axum's 2MB default body limit;
+                // this is the real (intentional) upload cap.
+                .layer(axum::extract::DefaultBodyLimit::max(handlers::MAX_SCREENSHOT_UPLOAD)),
         )
         .route(
             "/api/v0/users/:webhook_token/flights/:id/screenshots/:hash",
@@ -140,9 +141,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("ButterLog service starting on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // Cloud Run delivers SIGTERM before stopping an instance; finish in-flight
+    // requests instead of dropping them.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("Shutdown signal received, draining connections...");
 }
 
 /// Redacts the secret webhook-token segment from `/api/v0/users/<token>/...` paths so it
@@ -248,22 +273,59 @@ async fn home_handler() -> impl IntoResponse {
     "#)
 }
 
+/// OAuth `state` is "{nonce}" or "{nonce}.{port}" — the nonce ties the callback
+/// to the browser that started the flow (CSRF protection); the optional port is
+/// the desktop app's loopback listener.
 async fn login_handler(
     State(state): State<AppState>,
     Query(query): Query<LoginQuery>,
 ) -> impl IntoResponse {
-    let state_param = query.port.map(|p| p.to_string());
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let state_param = match query.port {
+        Some(p) => format!("{}.{}", nonce, p),
+        None => nonce.clone(),
+    };
     let auth_url = auth::get_login_url(
         &state.config.discord_client_id,
         &state.config.discord_redirect_uri,
-        state_param.as_deref(),
+        Some(&state_param),
     );
-    Redirect::temporary(&auth_url)
+    let mut response = Redirect::temporary(&auth_url).into_response();
+    let cookie_val = format!(
+        "oauth_state={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600",
+        nonce
+    );
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&cookie_val).unwrap(),
+    );
+    response
+}
+
+/// Reads a cookie value from the request headers.
+fn get_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for cookie in cookie_header.split(';') {
+        let mut parts = cookie.trim().splitn(2, '=');
+        if parts.next() == Some(name) {
+            return parts.next().map(|v| v.to_string());
+        }
+    }
+    None
+}
+
+fn session_cookie(api_token: &str) -> axum::http::HeaderValue {
+    let cookie_val = format!(
+        "token={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000",
+        api_token
+    );
+    axum::http::HeaderValue::from_str(&cookie_val).unwrap()
 }
 
 async fn callback_handler(
     State(state): State<AppState>,
     Query(params): Query<CallbackQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     if let Some(err) = params.error {
         return Err(AppError::Auth(format!("Discord OAuth error: {}", err)));
@@ -272,6 +334,20 @@ async fn callback_handler(
     let code = params.code.ok_or_else(|| {
         AppError::Auth("Missing code parameter in OAuth callback".to_string())
     })?;
+
+    // Verify the OAuth state nonce against the cookie set at login (CSRF check),
+    // and extract the optional loopback port suffix.
+    let state_val = params.state.as_deref().unwrap_or("");
+    let (nonce, port) = match state_val.split_once('.') {
+        Some((n, p)) => (n, p.parse::<u16>().ok()),
+        None => (state_val, None),
+    };
+    let cookie_nonce = get_cookie(&headers, "oauth_state");
+    if nonce.is_empty() || cookie_nonce.as_deref() != Some(nonce) {
+        return Err(AppError::Auth(
+            "OAuth state mismatch. Please restart the login flow.".to_string(),
+        ));
+    }
 
     // Exchange auth code for access token
     let access_token = auth::exchange_code(
@@ -289,25 +365,17 @@ async fn callback_handler(
     // Insert or update user info in DB and get api_token
     let api_token = auth::save_or_update_user(&state.db, &discord_user).await?;
 
-    // Check if we need to redirect back to the local app's loopback listener
-    if let Some(ref state_val) = params.state {
-        if let Ok(port) = state_val.parse::<u16>() {
-            let redirect_url = format!("http://127.0.0.1:{}?token={}", port, api_token);
-            let mut response = Redirect::temporary(&redirect_url).into_response();
-            let cookie_val = format!("token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000", api_token);
-            response.headers_mut().insert(
-                axum::http::header::SET_COOKIE,
-                axum::http::HeaderValue::from_str(&cookie_val).unwrap()
-            );
-            return Ok(response);
+    // Redirect back to the local app's loopback listener when a port was given
+    let mut response = match port {
+        Some(p) => {
+            let redirect_url = format!("http://127.0.0.1:{}?token={}", p, api_token);
+            Redirect::temporary(&redirect_url).into_response()
         }
-    }
-
-    let mut response = Redirect::temporary("/content").into_response();
-    let cookie_val = format!("token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000", api_token);
+        None => Redirect::temporary("/content").into_response(),
+    };
     response.headers_mut().insert(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&cookie_val).unwrap()
+        session_cookie(&api_token),
     );
     Ok(response)
 }
@@ -393,12 +461,13 @@ async fn settings_handler(
                 for (chan_id, chan_name) in &guild.channels {
                     let is_checked = allowlisted_ids.contains(chan_id);
                     let checked_attr = if is_checked { "checked" } else { "" };
-                    
-                    // Escape channel name for javascript string parameters and HTML safety
+
+                    // Channel/guild names come from Discord and are user-controlled:
+                    // HTML-escape everywhere, plus JS-string escaping for the onclick arg.
+                    let chan_name = esc(chan_name);
                     let escaped_name = chan_name
                         .replace('\\', "\\\\")
-                        .replace('\'', "\\'")
-                        .replace('"', "&quot;");
+                        .replace('\'', "\\'");
 
                     channels_html.push_str(&format!(
                         r#"
@@ -431,7 +500,7 @@ async fn settings_handler(
                     </div>
                 </div>
                 "#,
-                guild.name, channels_html
+                esc(&guild.name), channels_html
             ));
         }
     }
@@ -493,7 +562,7 @@ async fn settings_handler(
                         <span class="badge notified-badge">Notified</span>
                     </div>
                     "#,
-                    chan_name, chan_id
+                    esc(chan_name), chan_id
                 ));
             }
 
@@ -509,7 +578,7 @@ async fn settings_handler(
                     </div>
                 </div>
                 "#,
-                guild_name, chans_html
+                esc(&guild_name), chans_html
             ));
         }
     }
@@ -1042,21 +1111,7 @@ async fn flight_detail_handler(
     let simulator = esc(stats.get("simulator").and_then(|v| v.as_str()).unwrap_or(""));
     let date_str = created_at.format("%B %d, %Y, %H:%M UTC").to_string();
 
-    let mut landing_badge = String::new();
-    if let Some(landing) = stats.get("landing_snapshot") {
-        if let Some(vspd) = landing.get("VSpd").and_then(|v| v.as_f64()) {
-            let gforce_str = landing.get("NormAc").and_then(|v| v.as_f64())
-                .map(|g| format!(" / {:.2}G", g)).unwrap_or_default();
-            let (class, label) = if vspd >= -150.0 { ("butter", "BUTTER") }
-                else if vspd >= -250.0 { ("smooth", "SMOOTH") }
-                else if vspd >= -350.0 { ("firm", "FIRM") }
-                else { ("hard", "HARD") };
-            landing_badge = format!(
-                r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
-                class, label, vspd.abs(), gforce_str
-            );
-        }
-    }
+    let landing_badge = landing_badge_html(&stats).unwrap_or_default();
 
     let gallery_html = if !screenshots.is_empty() {
         let urls_json = serde_json::to_string(&screenshots).unwrap_or_default();
@@ -1215,6 +1270,34 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Classify a touchdown vertical speed (fpm, negative = descending) into a
+/// badge CSS class and label.
+fn landing_rating(vspd: f64) -> (&'static str, &'static str) {
+    if vspd >= -150.0 {
+        ("butter", "BUTTER")
+    } else if vspd >= -250.0 {
+        ("smooth", "SMOOTH")
+    } else if vspd >= -350.0 {
+        ("firm", "FIRM")
+    } else {
+        ("hard", "HARD")
+    }
+}
+
+/// Landing badge HTML from a flight's statistics JSON; None when the flight
+/// has no landing snapshot (still airborne).
+fn landing_badge_html(stats: &serde_json::Value) -> Option<String> {
+    let landing = stats.get("landing_snapshot")?;
+    let vspd = landing.get("VSpd").and_then(|v| v.as_f64())?;
+    let gforce_str = landing.get("NormAc").and_then(|v| v.as_f64())
+        .map(|g| format!(" / {:.2}G", g)).unwrap_or_default();
+    let (class, label) = landing_rating(vspd);
+    Some(format!(
+        r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
+        class, label, vspd.abs(), gforce_str
+    ))
+}
+
 async fn content_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1332,32 +1415,11 @@ async fn render_flights_page(
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown Simulator"));
 
-            let mut landing_badge = String::new();
-            if let Some(landing) = stats.get("landing_snapshot") {
-                if let Some(vspd) = landing.get("VSpd").and_then(|v| v.as_f64()) {
-                    let gforce_str = landing.get("NormAc")
-                        .and_then(|v| v.as_f64())
-                        .map(|g| format!(" / {:.2}G", g))
-                        .unwrap_or_default();
-
-                    let (class, label) = if vspd >= -150.0 {
-                        ("butter", "BUTTER")
-                    } else if vspd >= -250.0 {
-                        ("smooth", "SMOOTH")
-                    } else if vspd >= -350.0 {
-                        ("firm", "FIRM")
-                    } else {
-                        ("hard", "HARD")
-                    };
-
-                    landing_badge = format!(
-                        r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
-                        class, label, vspd.abs(), gforce_str
-                    );
-                }
+            let landing_badge = if stats.get("landing_snapshot").is_some() {
+                landing_badge_html(&stats).unwrap_or_default()
             } else {
-                landing_badge = r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string();
-            }
+                r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string()
+            };
 
             // Build screenshot gallery HTML
             let gallery_html = if !flight_screenshots.is_empty() {
@@ -1886,9 +1948,10 @@ struct MapAircraft {
     updated_ago_secs: i64,
 }
 
+/// Intentionally public (no auth): the live map shows every active flight's
+/// position to anyone, mirroring the public /content flight history.
 async fn map_data_handler(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let active_flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>)> = sqlx::query_as(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at, u.username, u.global_name \
@@ -1954,10 +2017,7 @@ async fn map_data_handler(
     Ok(axum::Json(aircrafts))
 }
 
-async fn map_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, AppError> {
+async fn map_handler() -> Result<Response, AppError> {
     let html_content = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2557,9 +2617,6 @@ async fn flight_share_detail_handler(
     axum::extract::Path(share_id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    use flate2::read::GzDecoder;
-    use std::io::Read;
-
     let row: Option<(String, Option<i64>)> = sqlx::query_as(
         "SELECT r2_key, user_id FROM flight_shares WHERE id = $1"
     )
@@ -2584,12 +2641,13 @@ async fn flight_share_detail_handler(
         }
     };
 
-    let mut decoder = GzDecoder::new(compressed.as_slice());
-    let mut json_str = String::new();
-    if let Err(e) = decoder.read_to_string(&mut json_str) {
-        tracing::error!("Failed to decompress share {}: {}", share_id, e);
-        return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to decompress share data</h1>".to_string())).into_response());
-    }
+    let json_str = match handlers::decompress_gzip_capped(compressed.as_slice(), handlers::MAX_SHARE_DECOMPRESSED) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to decompress share {}: {}", share_id, e);
+            return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html("<h1>Failed to decompress share data</h1>".to_string())).into_response());
+        }
+    };
 
     let json_escaped = json_str.replace('\\', "\\\\").replace("</", "<\\/");
 
@@ -2889,4 +2947,66 @@ document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeLb();}});
         axum::http::HeaderValue::from_static("*"),
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_path_hides_webhook_token() {
+        assert_eq!(
+            redact_path("/api/v0/users/abc123def/flights/42"),
+            "/api/v0/users/***/flights/42"
+        );
+        assert_eq!(redact_path("/api/v0/users/abc123def"), "/api/v0/users/***");
+        assert_eq!(redact_path("/content/flights/7"), "/content/flights/7");
+        assert_eq!(redact_path("/"), "/");
+    }
+
+    #[test]
+    fn esc_escapes_html_metacharacters() {
+        assert_eq!(
+            esc(r#"<script>alert("x") & 'y'</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot;) &amp; 'y'&lt;/script&gt;"
+        );
+        assert_eq!(esc("plain text"), "plain text");
+    }
+
+    #[test]
+    fn landing_rating_thresholds() {
+        assert_eq!(landing_rating(-50.0).1, "BUTTER");
+        assert_eq!(landing_rating(-150.0).1, "BUTTER");
+        assert_eq!(landing_rating(-151.0).1, "SMOOTH");
+        assert_eq!(landing_rating(-250.0).1, "SMOOTH");
+        assert_eq!(landing_rating(-300.0).1, "FIRM");
+        assert_eq!(landing_rating(-350.0).1, "FIRM");
+        assert_eq!(landing_rating(-500.0).1, "HARD");
+    }
+
+    #[test]
+    fn landing_badge_html_renders_or_skips() {
+        let landed = serde_json::json!({
+            "landing_snapshot": { "VSpd": -121.0, "NormAc": 1.25 }
+        });
+        let html = landing_badge_html(&landed).expect("badge for landed flight");
+        assert!(html.contains("badge-butter"));
+        assert!(html.contains("121 fpm"));
+        assert!(html.contains("1.25G"));
+
+        let airborne = serde_json::json!({ "current_snapshot": {} });
+        assert!(landing_badge_html(&airborne).is_none());
+    }
+
+    #[test]
+    fn get_cookie_parses_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("a=1; oauth_state=n0nce; token=t=with=equals"),
+        );
+        assert_eq!(get_cookie(&headers, "oauth_state").as_deref(), Some("n0nce"));
+        assert_eq!(get_cookie(&headers, "token").as_deref(), Some("t=with=equals"));
+        assert_eq!(get_cookie(&headers, "missing"), None);
+    }
 }
