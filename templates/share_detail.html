@@ -156,10 +156,13 @@ function fmtDate(s) {
     } else { document.getElementById('map').style.display = 'none'; }
     if (timestamps.length > 0) {
         const step = Math.max(1, Math.floor(timestamps.length / 300));
-        const labels=[], ad=[], id=[], vd=[], pd=[], sampledTs=[];
+        const ad=[], id=[], vd=[], pd=[], sampledTs=[];
+        // Use elapsed seconds as the x value so the axis stays linear in time
+        // even when the underlying log is sampled non-uniformly.
+        const t0 = timestamps[0];
         for (let i=0; i<timestamps.length; i+=step) {
-            labels.push(new Date(timestamps[i]*1000).toISOString().slice(11,16));
-            ad.push(alts[i]||0); id.push(ias[i]||0); vd.push(vs[i]||0); pd.push(pitch[i]||0);
+            const x = timestamps[i] - t0;
+            ad.push({x, y:alts[i]||0}); id.push({x, y:ias[i]||0}); vd.push({x, y:vs[i]||0}); pd.push({x, y:pitch[i]||0});
             sampledTs.push(timestamps[i]);
         }
         // Map flight events onto the chart x-axis (nearest downsampled point).
@@ -177,7 +180,7 @@ function fmtDate(s) {
             let bi=-1, bd=Infinity;
             for (let i=0;i<sampledTs.length;i++) { const dd=Math.abs(sampledTs[i]-epoch); if (dd<bd) { bd=dd; bi=i; } }
             if (bi<0 || bd > gap*1.5 + 30) return; // event outside the charted time range
-            eventMarks.push({index:bi, color:evColor(type), label:evLabel(type)});
+            eventMarks.push({x:epoch-t0, color:evColor(type), label:evLabel(type)});
         });
         // Map screenshots onto the chart x-axis; `lb` indexes into the lightbox url list.
         const shotMarks = [];
@@ -189,14 +192,14 @@ function fmtDate(s) {
             let bi=-1, bd=Infinity;
             for (let j=0;j<sampledTs.length;j++) { const dd=Math.abs(sampledTs[j]-epoch); if (dd<bd) { bd=dd; bi=j; } }
             if (bi<0 || bd > gap*1.5 + 30) return;
-            shotMarks.push({index:bi, lb:i});
+            shotMarks.push({x:epoch-t0, lb:i});
         });
         // Pixel x of the nearest screenshot marker to a canvas x, or -1 if none within tolerance.
         const shotHit = (chart, x, y) => {
             const xs = chart.scales.x, area = chart.chartArea;
             if (!xs || !area || y < area.bottom - 22) return -1;
             let best=-1, bestd=10;
-            shotMarks.forEach(m => { const dd=Math.abs(xs.getPixelForValue(m.index)-x); if (dd<bestd) { bestd=dd; best=m.lb; } });
+            shotMarks.forEach(m => { const dd=Math.abs(xs.getPixelForValue(m.x)-x); if (dd<bestd) { bestd=dd; best=m.lb; } });
             return best;
         };
         const eventMarkerPlugin = {
@@ -208,7 +211,7 @@ function fmtDate(s) {
                 ctx.font = '9px sans-serif';
                 ctx.textAlign = 'center';
                 eventMarks.forEach(mm => {
-                    const px = xs.getPixelForValue(mm.index);
+                    const px = xs.getPixelForValue(mm.x);
                     if (px==null || isNaN(px)) return;
                     ctx.beginPath();
                     ctx.setLineDash([4,3]);
@@ -226,7 +229,7 @@ function fmtDate(s) {
                 ctx.textBaseline = 'bottom';
                 ctx.strokeStyle = '#9399b2';
                 shotMarks.forEach(m => {
-                    const px = xs.getPixelForValue(m.index);
+                    const px = xs.getPixelForValue(m.x);
                     if (px==null || isNaN(px)) return;
                     ctx.beginPath();
                     ctx.setLineDash([]);
@@ -241,9 +244,9 @@ function fmtDate(s) {
         };
         const opts = () => ({
             responsive:true, maintainAspectRatio:true,
-            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
+            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:(items)=>items.length?new Date((t0+items[0].parsed.x)*1000).toISOString().slice(11,16):''}}},
             scales:{
-                x:{ticks:{color:'#6c7086',maxTicksLimit:6},grid:{color:'rgba(255,255,255,0.04)'}},
+                x:{type:'linear',ticks:{color:'#6c7086',maxTicksLimit:6,callback:(v)=>new Date((t0+v)*1000).toISOString().slice(11,16)},grid:{color:'rgba(255,255,255,0.04)'}},
                 y:{ticks:{color:'#6c7086'},grid:{color:'rgba(255,255,255,0.04)'}},
             },
             onClick:(evt, els, chart) => {
@@ -258,7 +261,7 @@ function fmtDate(s) {
             const el = document.createElement('div'); el.className='chart-card';
             el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas>`;
             document.getElementById('charts-mount').appendChild(el);
-            new Chart(document.getElementById(id2),{type:'line',data:{labels,datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]});
+            new Chart(document.getElementById(id2),{type:'line',data:{datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]});
         };
         mk('ca','Altitude (ft)',ad,'#89b4fa');
         mk('ci','Airspeed (kt)',id,'#a6e3a1');
