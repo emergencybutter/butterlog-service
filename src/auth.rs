@@ -93,33 +93,83 @@ pub async fn fetch_discord_user(
     Ok(user)
 }
 
-/// Inserts or updates the user info in PostgreSQL and returns their API token
+/// 256-bit token from a CSPRNG (uuid v4 is backed by getrandom).
+pub fn generate_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// SHA-256 hex digest used to store and look up tokens. Tokens are
+/// high-entropy random values, so no salt is needed.
+pub fn hash_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+/// Inserts or updates the user info in PostgreSQL and returns a freshly issued
+/// API token. Only the token's hash is stored; each login mints a new token
+/// (multiple tokens per user stay valid, so a web login does not invalidate
+/// the desktop app's saved token). Tokens idle for 180 days are pruned.
 pub async fn save_or_update_user(
     db_pool: &PgPool,
     user: &DiscordUser,
 ) -> Result<String, AppError> {
-    // 256-bit token from a CSPRNG (uuid v4 is backed by getrandom). Only used for new
-    // users; existing rows keep their token via ON CONFLICT (it is not overwritten on login).
-    let new_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-
-    let api_token: String = sqlx::query_scalar(
-        "INSERT INTO users (discord_id, username, global_name, avatar, api_token, last_login) \
-         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) \
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (discord_id, username, global_name, avatar, last_login) \
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) \
          ON CONFLICT (discord_id) \
          DO UPDATE SET \
              username = EXCLUDED.username, \
              global_name = EXCLUDED.global_name, \
              avatar = EXCLUDED.avatar, \
              last_login = EXCLUDED.last_login \
-         RETURNING api_token"
+         RETURNING id"
     )
     .bind(&user.id)
     .bind(&user.username)
     .bind(&user.global_name)
     .bind(&user.avatar)
-    .bind(&new_token)
     .fetch_one(db_pool)
     .await?;
 
-    Ok(api_token)
+    let token = generate_token();
+    sqlx::query("INSERT INTO api_tokens (token_hash, user_id) VALUES ($1, $2)")
+        .bind(hash_token(&token))
+        .bind(user_id)
+        .execute(db_pool)
+        .await?;
+
+    sqlx::query(
+        "DELETE FROM api_tokens WHERE user_id = $1 \
+         AND COALESCE(last_used_at, created_at) < NOW() - INTERVAL '180 days'"
+    )
+    .bind(user_id)
+    .execute(db_pool)
+    .await?;
+
+    Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_token_is_deterministic_sha256_hex() {
+        // Lookups depend on this exact encoding matching the SQL backfill:
+        // encode(sha256(convert_to(token, 'UTF8')), 'hex')
+        assert_eq!(
+            hash_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(hash_token("abc"), hash_token("abc"));
+        assert_ne!(hash_token("abc"), hash_token("abd"));
+    }
+
+    #[test]
+    fn generated_tokens_are_unique_and_long() {
+        let a = generate_token();
+        let b = generate_token();
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, b);
+    }
 }

@@ -158,16 +158,20 @@ pub struct AddChannelRequest {
     pub channel_id: String,
 }
 
+/// Resolve a raw API token to a user id. Tokens are stored hashed; the lookup
+/// also stamps `last_used_at` so idle tokens can be pruned.
 async fn authenticate_user(
     db_pool: &PgPool,
-    webhook_token: &str,
+    raw_token: &str,
 ) -> Result<i64, AppError> {
-    let user_id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE api_token = $1")
-        .bind(webhook_token)
-        .fetch_optional(db_pool)
-        .await?;
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "UPDATE api_tokens SET last_used_at = NOW() WHERE token_hash = $1 RETURNING user_id"
+    )
+    .bind(crate::auth::hash_token(raw_token))
+    .fetch_optional(db_pool)
+    .await?;
 
-    user_id.ok_or_else(|| AppError::Auth("Invalid webhook token".to_string()))
+    user_id.ok_or_else(|| AppError::Auth("Invalid token".to_string()))
 }
 
 /// Returns whether the given flight exists and is owned by the given user.
@@ -215,12 +219,7 @@ pub async fn get_user_id_from_session(
 
     let token_str = token.ok_or_else(|| AppError::Auth("Unauthorized".to_string()))?;
 
-    let user_id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE api_token = $1")
-        .bind(&token_str)
-        .fetch_optional(db_pool)
-        .await?;
-
-    user_id.ok_or_else(|| AppError::Auth("Invalid session token".to_string()))
+    authenticate_user(db_pool, &token_str).await
 }
 
 pub async fn get_discord_channels_handler(
@@ -261,12 +260,31 @@ pub async fn delete_discord_channel_handler(
     ))
 }
 
+/// Legacy route with the token embedded in the path. Prefer the header-
+/// authenticated `/api/v0/flights` routes; these remain for old clients.
 pub async fn create_flight_handler(
     State(state): State<AppState>,
     Path(webhook_token): Path<String>,
     Json(payload): Json<CreateFlightRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    create_flight_core(state, user_id, payload).await
+}
+
+pub async fn create_flight_bearer_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateFlightRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    create_flight_core(state, user_id, payload).await
+}
+
+async fn create_flight_core(
+    state: AppState,
+    user_id: i64,
+    payload: CreateFlightRequest,
+) -> Result<(StatusCode, Json<FlightResponse>), AppError> {
     validate_notes(&payload.notes)?;
 
     let row: (i64, String, Option<String>, serde_json::Value, Option<String>) = sqlx::query_as(
@@ -302,6 +320,25 @@ pub async fn update_flight_handler(
     Json(payload): Json<UpdateFlightRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    update_flight_core(state, user_id, flight_id, payload).await
+}
+
+pub async fn update_flight_bearer_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateFlightRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    update_flight_core(state, user_id, flight_id, payload).await
+}
+
+async fn update_flight_core(
+    state: AppState,
+    user_id: i64,
+    flight_id: i64,
+    payload: UpdateFlightRequest,
+) -> Result<(StatusCode, Json<FlightResponse>), AppError> {
     validate_notes(&payload.notes)?;
 
     if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
@@ -352,7 +389,25 @@ pub async fn update_flight_notes_handler(
     Json(payload): Json<UpdateNotesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    update_flight_notes_core(state, user_id, flight_id, payload).await
+}
 
+pub async fn update_flight_notes_bearer_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateNotesRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    update_flight_notes_core(state, user_id, flight_id, payload).await
+}
+
+async fn update_flight_notes_core(
+    state: AppState,
+    user_id: i64,
+    flight_id: i64,
+    payload: UpdateNotesRequest,
+) -> Result<StatusCode, AppError> {
     if payload.notes.chars().count() > MAX_NOTES_LEN {
         return Err(AppError::BadRequest(format!(
             "Notes must be {} characters or fewer",
@@ -380,7 +435,23 @@ pub async fn get_flight_handler(
     Path((webhook_token, flight_id)): Path<(String, i64)>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    get_flight_core(state, user_id, flight_id).await
+}
 
+pub async fn get_flight_bearer_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    get_flight_core(state, user_id, flight_id).await
+}
+
+async fn get_flight_core(
+    state: AppState,
+    user_id: i64,
+    flight_id: i64,
+) -> Result<(StatusCode, Json<FlightResponse>), AppError> {
     let flight_row: Option<(String, Option<String>, serde_json::Value, Option<String>)> = sqlx::query_as(
         "SELECT departure, arrival, statistics, notes FROM flights WHERE id = $1 AND user_id = $2"
     )
@@ -416,10 +487,28 @@ pub async fn get_flight_handler(
 pub async fn upload_screenshot_handler(
     State(state): State<AppState>,
     Path((webhook_token, flight_id)): Path<(String, i64)>,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    upload_screenshot_core(state, user_id, flight_id, multipart).await
+}
 
+pub async fn upload_screenshot_bearer_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    upload_screenshot_core(state, user_id, flight_id, multipart).await
+}
+
+async fn upload_screenshot_core(
+    state: AppState,
+    user_id: i64,
+    flight_id: i64,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
         return Err(AppError::NotFound("Flight not found".to_string()));
     }
@@ -498,7 +587,24 @@ pub async fn delete_screenshot_handler(
     Path((webhook_token, flight_id, hash)): Path<(String, i64, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    delete_screenshot_core(state, user_id, flight_id, hash).await
+}
 
+pub async fn delete_screenshot_bearer_handler(
+    State(state): State<AppState>,
+    Path((flight_id, hash)): Path<(i64, String)>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    delete_screenshot_core(state, user_id, flight_id, hash).await
+}
+
+async fn delete_screenshot_core(
+    state: AppState,
+    user_id: i64,
+    flight_id: i64,
+    hash: String,
+) -> Result<StatusCode, AppError> {
     if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
         return Err(AppError::NotFound("Flight not found".to_string()));
     }
@@ -540,7 +646,23 @@ pub async fn upload_flight_share_handler(
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    upload_flight_share_core(state, user_id, body).await
+}
 
+pub async fn upload_flight_share_bearer_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    upload_flight_share_core(state, user_id, body).await
+}
+
+async fn upload_flight_share_core(
+    state: AppState,
+    user_id: i64,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     if body.is_empty() {
         return Err(AppError::BadRequest("Empty body".to_string()));
     }
@@ -789,7 +911,23 @@ pub async fn multiplayer_ping_handler(
     Json(payload): Json<MultiplayerPingRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = authenticate_user(&state.db, &webhook_token).await?;
+    multiplayer_ping_core(state, user_id, payload).await
+}
 
+pub async fn multiplayer_ping_bearer_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<MultiplayerPingRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    multiplayer_ping_core(state, user_id, payload).await
+}
+
+async fn multiplayer_ping_core(
+    state: AppState,
+    user_id: i64,
+    payload: MultiplayerPingRequest,
+) -> Result<(StatusCode, Json<MultiplayerPingResponse>), AppError> {
     let has_udp = payload.udp_address.as_ref().map(|a| !a.trim().is_empty()).unwrap_or(false);
 
     let peers = update_and_get_peers(

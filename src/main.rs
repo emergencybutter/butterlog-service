@@ -98,6 +98,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/admin/allowlist-channel/:channel_id",
             delete(handlers::delete_allowlist_channel_handler),
         )
+        // Header-authenticated API (Authorization: Bearer <token>). The
+        // /users/:webhook_token/... routes below are the legacy path-token
+        // form, kept for old clients.
+        .route("/api/v0/flights", post(handlers::create_flight_bearer_handler))
+        .route(
+            "/api/v0/flights/:id",
+            put(handlers::update_flight_bearer_handler).get(handlers::get_flight_bearer_handler),
+        )
+        .route(
+            "/api/v0/flights/:id/notes",
+            put(handlers::update_flight_notes_bearer_handler),
+        )
+        .route(
+            "/api/v0/flights/:id/screenshots",
+            post(handlers::upload_screenshot_bearer_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(handlers::MAX_SCREENSHOT_UPLOAD)),
+        )
+        .route(
+            "/api/v0/flights/:id/screenshots/:hash",
+            delete(handlers::delete_screenshot_bearer_handler),
+        )
+        .route(
+            "/api/v0/flights/share",
+            post(handlers::upload_flight_share_bearer_handler),
+        )
+        .route(
+            "/api/v0/multiplayer/ping",
+            post(handlers::multiplayer_ping_bearer_handler),
+        )
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
         .route(
             "/api/v0/users/:webhook_token/flights/:id",
@@ -883,5 +912,22 @@ mod tests {
         assert_eq!(get_cookie(&headers, "oauth_state").as_deref(), Some("n0nce"));
         assert_eq!(get_cookie(&headers, "token").as_deref(), Some("t=with=equals"));
         assert_eq!(get_cookie(&headers, "missing"), None);
+    }
+
+    /// The header-auth routes share the /api/v0/flights prefix with static
+    /// segments (share) next to :id params; axum panics at router build time
+    /// on conflicts, so building the same shape here catches that in CI.
+    #[test]
+    fn flight_route_shapes_do_not_conflict() {
+        use axum::routing::{delete, get, post, put};
+        let _router: axum::Router = axum::Router::new()
+            .route("/api/v0/flights", post(|| async {}))
+            .route("/api/v0/flights/:id", put(|| async {}).get(|| async {}))
+            .route("/api/v0/flights/:id/notes", put(|| async {}))
+            .route("/api/v0/flights/:id/screenshots", post(|| async {}))
+            .route("/api/v0/flights/:id/screenshots/:hash", delete(|| async {}))
+            .route("/api/v0/flights/share", post(|| async {}))
+            .route("/api/v0/flights/share/:share_id", get(|| async {}).delete(|| async {}))
+            .route("/api/v0/multiplayer/ping", post(|| async {}));
     }
 }

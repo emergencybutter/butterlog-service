@@ -9,10 +9,17 @@ You can assume these base urls are proxied to the webservice:
 
 ## Authentication
 
-In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/api/v0/auth/login`. At this point the use would follow the auth workflow normally and the client gets back some authentication token.
+In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/api/v0/auth/login`. At this point the use would follow the auth workflow normally and the client gets back some authentication token. Each login issues a fresh token; previously issued tokens stay valid (tokens idle for 180 days are pruned). Only a SHA-256 hash of the token is stored server-side.
 
-Each user is given a webhookToken. Each user uses this base url:
-`https://butterlog.flyvoyager.net/api/v0/users/:webhookToken`
+**Preferred: header authentication.** Send the token in the `Authorization` header and use the base url `https://butterlog.flyvoyager.net/api/v0`:
+
+```
+Authorization: Bearer <token>
+```
+
+**Legacy: path-token authentication (deprecated).** Old clients embed the token in the URL and use the base url `https://butterlog.flyvoyager.net/api/v0/users/:webhookToken`. These routes keep working, but tokens in URLs end up in proxy/infrastructure logs -- new integrations should use the header form.
+
+All endpoints below exist under both base urls with identical request/response shapes.
 
 
 ## Endpoints
