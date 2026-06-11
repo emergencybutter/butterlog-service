@@ -6,26 +6,31 @@
             <title>ButterLog Notification Settings</title>
             <meta name="description" content="Manage your Discord notification channels for ButterLog flight telemetry.">
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
-                
+                @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
                 :root {
-                    --bg-gradient: radial-gradient(circle at 50% 0%, #1e1e3f 0%, #0d0d16 100%);
-                    --panel-bg: rgba(30, 30, 46, 0.45);
-                    --border-color: rgba(255, 255, 255, 0.08);
-                    --text-primary: #cdd6f4;
-                    --text-secondary: #a6adc8;
-                    --text-muted: #6c7086;
-                    --primary-color: #cba6f7;
-                    --primary-hover: #b4befe;
-                    --accent-pink: #f5c2e7;
-                    --accent-green: #a6e3a1;
-                    --accent-red: #f38ba8;
-                    --card-bg: rgba(17, 17, 27, 0.35);
+                    --bg-gradient: radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255,176,0,0.06), transparent 60%), #0a0c0d;
+                    --panel-bg: #101314;
+                    --border-color: rgba(225, 232, 220, 0.10);
+                    --text-primary: #eef1ea;
+                    --text-secondary: #b0bab6;
+                    --text-muted: #7a8682;
+                    --primary-color: #ffb000;
+                    --primary-hover: #ffc23d;
+                    --accent-pink: #36e3c6;
+                    --accent-green: #5ad17e;
+                    --accent-red: #ff7a8a;
+                    --card-bg: #14181a;
+                    --font-display: 'Bricolage Grotesque', sans-serif;
+                    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
                 }
 
+                h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+
                 body {
-                    font-family: 'Outfit', sans-serif;
+                    font-family: 'Hanken Grotesk', sans-serif;
                     background: var(--bg-gradient);
+                    background-attachment: fixed;
                     color: var(--text-primary);
                     min-height: 100vh;
                     margin: 0;
@@ -41,10 +46,8 @@
                     max-width: 700px;
                     width: 100%;
                     background: var(--panel-bg);
-                    backdrop-filter: blur(20px);
-                    -webkit-backdrop-filter: blur(20px);
                     border: 1px solid var(--border-color);
-                    border-radius: 28px;
+                    border-radius: 6px;
                     padding: 3rem;
                     box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
                     box-sizing: border-box;
@@ -152,9 +155,9 @@
                 }
 
                 .admin-badge {
-                    background: rgba(203, 166, 247, 0.15);
+                    background: rgba(255, 176, 0, 0.15);
                     color: var(--primary-color);
-                    border: 1px solid rgba(203, 166, 247, 0.3);
+                    border: 1px solid rgba(255, 176, 0, 0.3);
                 }
 
                 .notified-badge {
@@ -250,7 +253,7 @@
 
                 .nav-tab.active {
                     color: var(--primary-color);
-                    background: rgba(203, 166, 247, 0.1);
+                    background: rgba(255, 176, 0, 0.1);
                 }
 
                 .no-channels-fallback p {
@@ -331,7 +334,7 @@
 
                 input[type="text"]:focus {
                     border-color: var(--primary-color);
-                    box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.15);
+                    box-shadow: 0 0 0 3px rgba(255, 176, 0, 0.15);
                 }
 
                 button {

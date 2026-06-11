@@ -6,28 +6,34 @@
             <title>ButterLog Flight Log</title>
             <meta name="description" content="View your latest telemetry logs on ButterLog.">
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
-                
+                @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
                 :root {
-                    --bg-gradient: radial-gradient(circle at 50% 0%, #1e1e3f 0%, #0d0d16 100%);
-                    --panel-bg: rgba(30, 30, 46, 0.45);
-                    --border-color: rgba(255, 255, 255, 0.08);
-                    --text-primary: #cdd6f4;
-                    --text-secondary: #a6adc8;
-                    --text-muted: #6c7086;
-                    --primary-color: #cba6f7;
-                    --primary-hover: #b4befe;
-                    --accent-pink: #f5c2e7;
-                    --accent-green: #a6e3a1;
-                    --accent-red: #f38ba8;
-                    --accent-orange: #fab387;
-                    --accent-yellow: #f9e2af;
-                    --card-bg: rgba(17, 17, 27, 0.35);
+                    --bg-gradient: radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255, 176, 0, 0.06), transparent 60%), #0a0c0d;
+                    --panel-bg: #101314;
+                    --border-color: rgba(225, 232, 220, 0.10);
+                    --text-primary: #eef1ea;
+                    --text-secondary: #b0bab6;
+                    --text-muted: #7a8682;
+                    --primary-color: #ffb000;
+                    --primary-hover: #ffc23d;
+                    --accent-pink: #36e3c6;
+                    --accent-green: #5ad17e;
+                    --accent-red: #ff7a8a;
+                    --accent-orange: #ff8a3d;
+                    --accent-yellow: #ffc23d;
+                    --card-bg: #14181a;
+                    --font-display: 'Bricolage Grotesque', sans-serif;
+                    --font-body: 'Hanken Grotesk', sans-serif;
+                    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
                 }
 
+                h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+
                 body {
-                    font-family: 'Outfit', sans-serif;
+                    font-family: var(--font-body);
                     background: var(--bg-gradient);
+                    background-attachment: fixed;
                     color: var(--text-primary);
                     min-height: 100vh;
                     margin: 0;
@@ -43,12 +49,10 @@
                     max-width: 750px;
                     width: 100%;
                     background: var(--panel-bg);
-                    backdrop-filter: blur(20px);
-                    -webkit-backdrop-filter: blur(20px);
                     border: 1px solid var(--border-color);
-                    border-radius: 28px;
+                    border-radius: 6px;
                     padding: 3rem;
-                    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+                    box-shadow: 0 40px 80px -40px rgba(0, 0, 0, 0.9);
                     box-sizing: border-box;
                     animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
                 }
@@ -74,10 +78,12 @@
                 }
 
                 .subtitle {
-                    color: var(--text-secondary);
-                    font-size: 1.1rem;
+                    color: var(--primary-hover);
+                    font-family: var(--font-mono);
+                    font-size: 0.75rem;
+                    letter-spacing: 0.22em;
+                    text-transform: uppercase;
                     margin: 0;
-                    font-weight: 300;
                 }
 
                 .nav-tabs {
@@ -106,7 +112,7 @@
 
                 .nav-tab.active {
                     color: var(--primary-color);
-                    background: rgba(203, 166, 247, 0.1);
+                    background: rgba(255, 176, 0, 0.1);
                 }
 
                 .flight-list {
@@ -124,7 +130,7 @@
                 .flight-card {
                     background: var(--card-bg);
                     border: 1px solid var(--border-color);
-                    border-radius: 20px;
+                    border-radius: 6px;
                     padding: 1.5rem 2rem;
                     display: flex;
                     flex-direction: column;
@@ -134,7 +140,7 @@
 
                 .flight-card:hover {
                     transform: translateY(-4px);
-                    border-color: rgba(203, 166, 247, 0.3);
+                    border-color: rgba(255, 176, 0, 0.3);
                 }
 
                 .flight-top {
@@ -176,7 +182,7 @@
 
                 .screenshot-thumb:hover {
                     transform: scale(1.04);
-                    border-color: rgba(203, 166, 247, 0.5);
+                    border-color: rgba(255, 176, 0, 0.5);
                 }
 
                 .lightbox {
@@ -321,12 +327,15 @@
                 }
 
                 .badge {
-                    padding: 0.6rem 1.2rem;
-                    border-radius: 12px;
+                    padding: 0.55rem 1rem;
+                    border-radius: 4px;
+                    font-family: var(--font-mono);
                     font-weight: 700;
-                    font-size: 0.85rem;
+                    font-size: 0.78rem;
+                    letter-spacing: 0.06em;
+                    text-transform: uppercase;
                     text-align: center;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
                     line-height: 1.2;
                 }
 
@@ -337,8 +346,8 @@
                 }
 
                 .badge-butter {
-                    background: linear-gradient(135deg, #a6e3a1, #89b4fa);
-                    color: #11111b;
+                    background: linear-gradient(135deg, #a6e3a1, #36e3c6);
+                    color: #0a0c0d;
                 }
 
                 .badge-smooth {
