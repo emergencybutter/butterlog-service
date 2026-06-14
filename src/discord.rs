@@ -774,6 +774,12 @@ fn assemble_embeds(
         flight_info_val.push_str(&format!(" ({})", resolved_icao));
     }
 
+    // Operating airline identified from the title/livery; may be absent.
+    let resolved_airline = statistics.get("resolved_airline").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !resolved_airline.is_empty() {
+        flight_info_val.push_str(&format!("\nOperated by {}", resolved_airline));
+    }
+
     // Simulator brand and version details from root of statistics
     let simulator = statistics.get("simulator").and_then(|v| v.as_str())
         .or_else(|| max_entries.and_then(|m| m.get("Simulator")).and_then(|v| v.as_str()));
