@@ -757,6 +757,17 @@ fn assemble_embeds(
     let airframe_name = statistics.get("airframe_name").and_then(|v| v.as_str()).unwrap_or("Unknown Aircraft");
     let mut flight_info_val = format!("Flying {}", airframe_name);
 
+    // Livery (MSFS LIVERY NAME / X-Plane acf_livery_path); may be absent or empty.
+    // X-Plane sends a path, so show only its final segment for readability.
+    let livery = statistics.get("livery").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !livery.is_empty() {
+        let livery_display = livery
+            .rsplit(|c| c == '/' || c == '\\')
+            .find(|s| !s.is_empty())
+            .unwrap_or(livery);
+        flight_info_val.push_str(&format!(" — {}", livery_display));
+    }
+
     // Simulator brand and version details from root of statistics
     let simulator = statistics.get("simulator").and_then(|v| v.as_str())
         .or_else(|| max_entries.and_then(|m| m.get("Simulator")).and_then(|v| v.as_str()));
