@@ -768,6 +768,12 @@ fn assemble_embeds(
         flight_info_val.push_str(&format!(" — {}", livery_display));
     }
 
+    // ICAO type resolved from the title/livery by the client's word index; may be absent.
+    let resolved_icao = statistics.get("resolved_icao").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !resolved_icao.is_empty() {
+        flight_info_val.push_str(&format!(" ({})", resolved_icao));
+    }
+
     // Simulator brand and version details from root of statistics
     let simulator = statistics.get("simulator").and_then(|v| v.as_str())
         .or_else(|| max_entries.and_then(|m| m.get("Simulator")).and_then(|v| v.as_str()));
