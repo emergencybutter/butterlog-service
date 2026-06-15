@@ -511,6 +511,8 @@ async fn flight_detail_handler(
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown Aircraft")
             .to_string(),
+        resolved_icao: stats.get("resolved_icao").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        resolved_airline: stats.get("resolved_airline").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         simulator: stats.get("simulator").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         date_str: created_at.format("%B %d, %Y, %H:%M UTC").to_string(),
         landing_badge: landing_badge_html(&stats).unwrap_or_default(),
@@ -687,6 +689,8 @@ async fn render_flights_page(
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown Aircraft")
                     .to_string(),
+                resolved_icao: stats.get("resolved_icao").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                resolved_airline: stats.get("resolved_airline").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 simulator: stats
                     .get("simulator")
                     .and_then(|v| v.as_str())

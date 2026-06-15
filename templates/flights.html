@@ -420,6 +420,9 @@
                             </div>
                             <div class="flight-meta">
                                 <div class="airframe">{{ flight.airframe }}</div>
+                                {% if !flight.resolved_icao.is_empty() || !flight.resolved_airline.is_empty() %}
+                                <div class="details">Deduced:{% if !flight.resolved_icao.is_empty() %} {{ flight.resolved_icao }}{% endif %}{% if !flight.resolved_icao.is_empty() && !flight.resolved_airline.is_empty() %} ·{% endif %}{% if !flight.resolved_airline.is_empty() %} {{ flight.resolved_airline }}{% endif %}</div>
+                                {% endif %}
                                 <div class="details">{{ flight.simulator }}</div>
                                 <div class="date">{{ flight.date_str }}</div>
                             </div>

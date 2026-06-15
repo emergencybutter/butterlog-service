@@ -19,6 +19,10 @@ pub struct FlightDetailPage {
     pub arr_display: String,
     pub pilot: String,
     pub airframe: String,
+    /// ICAO type designator deduced from the title/livery; empty hides the line.
+    pub resolved_icao: String,
+    /// Operating airline deduced from the title/livery; empty hides the line.
+    pub resolved_airline: String,
     pub simulator: String,
     pub date_str: String,
     /// Pre-rendered badge HTML (server-controlled), empty when still airborne.
@@ -49,6 +53,10 @@ pub struct FlightCard {
     pub dep: String,
     pub arr: String,
     pub airframe: String,
+    /// ICAO type designator deduced from the title/livery; empty hides the line.
+    pub resolved_icao: String,
+    /// Operating airline deduced from the title/livery; empty hides the line.
+    pub resolved_airline: String,
     pub simulator: String,
     pub date_str: String,
     /// Pre-rendered badge HTML (landing rating or ONGOING).
@@ -117,6 +125,8 @@ mod tests {
             arr_display: "KLAX".into(),
             pilot: "<script>alert(1)</script>".into(),
             airframe: "Cessna \"172\"".into(),
+            resolved_icao: "C172".into(),
+            resolved_airline: String::new(),
             simulator: "MSFS".into(),
             date_str: "June 09, 2026, 12:00 UTC".into(),
             landing_badge: r#"<div class="badge badge-butter">BUTTER</div>"#.into(),
@@ -132,6 +142,8 @@ mod tests {
         assert!(html.contains(r#"<div class="badge badge-butter">BUTTER</div>"#));
         assert!(html.contains("&lt;b&gt;not bold&lt;/b&gt;"));
         assert!(html.contains(r#"openLightbox(["https://cdn.example/s/1.webp"], 0)"#));
+        // Deduced type shows; the empty airline line is omitted.
+        assert!(html.contains("C172"));
     }
 
     #[test]
@@ -149,6 +161,8 @@ mod tests {
                 dep: "EGLL".into(),
                 arr: "In Flight".into(),
                 airframe: "A320".into(),
+                resolved_icao: "A320".into(),
+                resolved_airline: "British Airways".into(),
                 simulator: "X-Plane".into(),
                 date_str: "June 09, 2026, 12:00 UTC".into(),
                 landing_badge: r#"<div class="badge badge-ongoing">ONGOING</div>"#.into(),
@@ -159,6 +173,8 @@ mod tests {
         let html = page.render().unwrap();
         assert!(html.contains(r#"href="/content/flight/user/7""#));
         assert!(html.contains("ONGOING"));
+        // Deduced type and airline render on the card.
+        assert!(html.contains("British Airways"));
         // Unshared flights render as a non-link card
         assert!(html.contains(r#"<div class="flight-card-link" style="cursor:default">"#));
 

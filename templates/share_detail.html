@@ -111,6 +111,11 @@ function fmtDate(s) {
     const dep = sum.startIcao || sum.departure || '?';
     const arr = sum.endIcao || sum.arrival || '?';
     const ac = sum.aircraftTitle || sum.airframe_name || '';
+    const rIcao = (sum.resolvedIcao || sum.resolved_icao || '').trim();
+    const rAirline = (sum.resolvedAirline || sum.resolved_airline || '').trim();
+    const deducedHtml = (rIcao || rAirline)
+        ? `<div class="meta">Deduced: ${esc([rIcao, rAirline].filter(Boolean).join(' · '))}</div>`
+        : '';
     const dur = sum.durationMinutes || sum.duration_minutes || 0;
     const maxAlt = (sum.maxAltitude || sum.max_altitude || 0).toFixed(0);
     const maxGs = (sum.maxGroundSpeed || sum.max_ground_speed || 0).toFixed(0);
@@ -130,6 +135,7 @@ function fmtDate(s) {
         <div style="margin-bottom:1.5rem">
             <div class="route"><span class="icao">${esc(dep)}</span><span class="arrow">→</span><span class="icao">${esc(arr)}</span></div>
             <div class="aircraft">${esc(ac)}</div>
+            ${deducedHtml}
             <div class="meta">${fmtDate(sum.startTime||sum.start_time)} · ${fmtDur(dur)}</div>
             ${badgeHtml}
         </div>
