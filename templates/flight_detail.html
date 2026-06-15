@@ -78,6 +78,9 @@
             <span class="icao">{{ arr_display }}</span>
         </div>
         <div class="airframe">{{ airframe }}</div>
+        {% if !resolved_icao.is_empty() || !resolved_airline.is_empty() %}
+        <div class="meta">Deduced:{% if !resolved_icao.is_empty() %} {{ resolved_icao }}{% endif %}{% if !resolved_icao.is_empty() && !resolved_airline.is_empty() %} ·{% endif %}{% if !resolved_airline.is_empty() %} {{ resolved_airline }}{% endif %}</div>
+        {% endif %}
         <div class="meta">{{ simulator }} • {{ date_str }}</div>
         <div class="pilot">Flown by {{ pilot }}</div>
         {{ landing_badge|safe }}
