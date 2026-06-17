@@ -55,6 +55,10 @@ pub struct CreateFlightRequest {
     pub statistics: serde_json::Value,
     pub multiplayer_enabled: Option<bool>,
     pub udp_address: Option<String>,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
     pub notes: Option<String>,
 }
 
@@ -64,6 +68,10 @@ pub struct UpdateFlightRequest {
     pub statistics: serde_json::Value,
     pub multiplayer_enabled: Option<bool>,
     pub udp_address: Option<String>,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
     pub notes: Option<String>,
 }
 
@@ -95,24 +103,30 @@ async fn update_and_get_peers(
     multiplayer_enabled: Option<bool>,
     udp_address: Option<String>,
     local_udp_address: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
 ) -> Result<Option<Vec<PeerDetail>>, AppError> {
     // 1. Update or remove the current peer's presence row
     if multiplayer_enabled.unwrap_or(false) {
         if let Some(ref addr) = udp_address {
             if !addr.trim().is_empty() {
-                // COALESCE keeps a previously published local address when a caller
-                // (e.g. flight create/update) doesn't supply one.
+                // COALESCE keeps a previously published local address / position
+                // when a caller (e.g. flight create/update) doesn't supply one.
                 sqlx::query(
-                    "INSERT INTO multiplayer_peers (user_id, udp_address, local_udp_address, last_seen) \
-                     VALUES ($1, $2, $3, CURRENT_TIMESTAMP) \
+                    "INSERT INTO multiplayer_peers (user_id, udp_address, local_udp_address, latitude, longitude, last_seen) \
+                     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) \
                      ON CONFLICT (user_id) DO UPDATE SET \
                          udp_address = EXCLUDED.udp_address, \
                          local_udp_address = COALESCE(EXCLUDED.local_udp_address, multiplayer_peers.local_udp_address), \
+                         latitude = COALESCE(EXCLUDED.latitude, multiplayer_peers.latitude), \
+                         longitude = COALESCE(EXCLUDED.longitude, multiplayer_peers.longitude), \
                          last_seen = EXCLUDED.last_seen"
                 )
                 .bind(user_id)
                 .bind(addr)
                 .bind(local_udp_address.as_deref().filter(|a| !a.trim().is_empty()))
+                .bind(latitude)
+                .bind(longitude)
                 .execute(&state.db)
                 .await?;
             }
@@ -129,21 +143,42 @@ async fn update_and_get_peers(
         return Ok(None);
     }
 
-    // 2. Prune stale peers, then collect the other active ones
+    // 2. Prune stale peers.
     sqlx::query("DELETE FROM multiplayer_peers WHERE last_seen < CURRENT_TIMESTAMP - INTERVAL '120 seconds'")
         .execute(&state.db)
         .await?;
 
+    // 3. Without the caller's position we can't tell who is nearby, so return no
+    //    peers rather than the whole world (which would re-introduce the N^2
+    //    fan-out for position-less callers).
+    let (lat, lon) = match (latitude, longitude) {
+        (Some(lat), Some(lon)) => (lat, lon),
+        _ => return Ok(Some(Vec::new())),
+    };
+
+    // Bounding box around the caller. Square over-includes corners slightly; the
+    // client's own 20 nm gate trims them. Use a margin over that gate so peers
+    // don't pop in/out at the edge between pings.
+    const RADIUS_NM: f64 = 30.0;
+    let lat_delta = RADIUS_NM / 60.0;
+    let lon_delta = RADIUS_NM / (60.0 * lat.to_radians().cos().abs().max(0.01)); // guard poles
+
     // Join the owning user so the client can label each peer by name (the debug
-    // window shows usernames rather than raw UDP addresses). Prefer the Discord
-    // global_name, falling back to username.
+    // window shows usernames rather than raw UDP addresses). Peers with no known
+    // position (older clients) are kept; the client still distance-gates them.
     let other_peers: Vec<PeerDetail> = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT mp.udp_address, mp.local_udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
          FROM multiplayer_peers mp \
          JOIN users u ON u.id = mp.user_id \
-         WHERE mp.user_id <> $1"
+         WHERE mp.user_id <> $1 \
+           AND ( mp.latitude IS NULL \
+              OR ( mp.latitude BETWEEN $2 AND $3 AND mp.longitude BETWEEN $4 AND $5 ) )"
     )
     .bind(user_id)
+    .bind(lat - lat_delta)
+    .bind(lat + lat_delta)
+    .bind(lon - lon_delta)
+    .bind(lon + lon_delta)
     .fetch_all(&state.db)
     .await?
     .into_iter()
@@ -320,7 +355,7 @@ async fn create_flight_core(
         statistics: row.3,
         screenshots: Vec::new(),
         notes: row.4,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None)
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None, payload.latitude, payload.longitude)
             .await?
             .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
@@ -393,7 +428,7 @@ async fn update_flight_core(
         statistics,
         screenshots,
         notes,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None)
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None, payload.latitude, payload.longitude)
             .await?
             .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
@@ -920,6 +955,12 @@ pub struct MultiplayerPingRequest {
     /// LAN address for peers behind the same NAT (optional; older clients omit it).
     #[serde(default)]
     pub local_udp_address: Option<String>,
+    /// Caller's current position, used to return only nearby peers. When absent
+    /// (no fix), the service returns no peers.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
 }
 
 /// A peer's reachable address(es) plus the name to label it with in the UI.
@@ -970,6 +1011,8 @@ async fn multiplayer_ping_core(
         Some(has_udp),
         payload.udp_address,
         payload.local_udp_address,
+        payload.latitude,
+        payload.longitude,
     )
     .await?
     .unwrap_or_default();
