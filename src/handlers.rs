@@ -94,19 +94,25 @@ async fn update_and_get_peers(
     user_id: i64,
     multiplayer_enabled: Option<bool>,
     udp_address: Option<String>,
+    local_udp_address: Option<String>,
 ) -> Result<Option<Vec<PeerDetail>>, AppError> {
     // 1. Update or remove the current peer's presence row
     if multiplayer_enabled.unwrap_or(false) {
         if let Some(ref addr) = udp_address {
             if !addr.trim().is_empty() {
+                // COALESCE keeps a previously published local address when a caller
+                // (e.g. flight create/update) doesn't supply one.
                 sqlx::query(
-                    "INSERT INTO multiplayer_peers (user_id, udp_address, last_seen) \
-                     VALUES ($1, $2, CURRENT_TIMESTAMP) \
+                    "INSERT INTO multiplayer_peers (user_id, udp_address, local_udp_address, last_seen) \
+                     VALUES ($1, $2, $3, CURRENT_TIMESTAMP) \
                      ON CONFLICT (user_id) DO UPDATE SET \
-                         udp_address = EXCLUDED.udp_address, last_seen = EXCLUDED.last_seen"
+                         udp_address = EXCLUDED.udp_address, \
+                         local_udp_address = COALESCE(EXCLUDED.local_udp_address, multiplayer_peers.local_udp_address), \
+                         last_seen = EXCLUDED.last_seen"
                 )
                 .bind(user_id)
                 .bind(addr)
+                .bind(local_udp_address.as_deref().filter(|a| !a.trim().is_empty()))
                 .execute(&state.db)
                 .await?;
             }
@@ -131,8 +137,8 @@ async fn update_and_get_peers(
     // Join the owning user so the client can label each peer by name (the debug
     // window shows usernames rather than raw UDP addresses). Prefer the Discord
     // global_name, falling back to username.
-    let other_peers: Vec<PeerDetail> = sqlx::query_as::<_, (String, String)>(
-        "SELECT mp.udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
+    let other_peers: Vec<PeerDetail> = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT mp.udp_address, mp.local_udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
          FROM multiplayer_peers mp \
          JOIN users u ON u.id = mp.user_id \
          WHERE mp.user_id <> $1"
@@ -141,7 +147,7 @@ async fn update_and_get_peers(
     .fetch_all(&state.db)
     .await?
     .into_iter()
-    .map(|(udp_address, username)| PeerDetail { udp_address, username })
+    .map(|(udp_address, local_udp_address, username)| PeerDetail { udp_address, local_udp_address, username })
     .collect();
 
     Ok(Some(other_peers))
@@ -314,7 +320,7 @@ async fn create_flight_core(
         statistics: row.3,
         screenshots: Vec::new(),
         notes: row.4,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address)
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None)
             .await?
             .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
@@ -387,7 +393,7 @@ async fn update_flight_core(
         statistics,
         screenshots,
         notes,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address)
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address, None)
             .await?
             .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
@@ -911,12 +917,17 @@ pub async fn delete_allowlist_channel_handler(
 #[derive(Deserialize)]
 pub struct MultiplayerPingRequest {
     pub udp_address: Option<String>,
+    /// LAN address for peers behind the same NAT (optional; older clients omit it).
+    #[serde(default)]
+    pub local_udp_address: Option<String>,
 }
 
-/// A peer's reachable address plus the name to label it with in the UI.
+/// A peer's reachable address(es) plus the name to label it with in the UI.
 #[derive(Serialize)]
 pub struct PeerDetail {
     pub udp_address: String,
+    /// LAN address, used by clients behind the same NAT (may be null).
+    pub local_udp_address: Option<String>,
     pub username: String,
 }
 
@@ -958,6 +969,7 @@ async fn multiplayer_ping_core(
         user_id,
         Some(has_udp),
         payload.udp_address,
+        payload.local_udp_address,
     )
     .await?
     .unwrap_or_default();
