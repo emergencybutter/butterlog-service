@@ -94,7 +94,7 @@ async fn update_and_get_peers(
     user_id: i64,
     multiplayer_enabled: Option<bool>,
     udp_address: Option<String>,
-) -> Result<Option<Vec<String>>, AppError> {
+) -> Result<Option<Vec<PeerDetail>>, AppError> {
     // 1. Update or remove the current peer's presence row
     if multiplayer_enabled.unwrap_or(false) {
         if let Some(ref addr) = udp_address {
@@ -128,12 +128,21 @@ async fn update_and_get_peers(
         .execute(&state.db)
         .await?;
 
-    let other_peers: Vec<String> = sqlx::query_scalar(
-        "SELECT udp_address FROM multiplayer_peers WHERE user_id <> $1"
+    // Join the owning user so the client can label each peer by name (the debug
+    // window shows usernames rather than raw UDP addresses). Prefer the Discord
+    // global_name, falling back to username.
+    let other_peers: Vec<PeerDetail> = sqlx::query_as::<_, (String, String)>(
+        "SELECT mp.udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
+         FROM multiplayer_peers mp \
+         JOIN users u ON u.id = mp.user_id \
+         WHERE mp.user_id <> $1"
     )
     .bind(user_id)
     .fetch_all(&state.db)
-    .await?;
+    .await?
+    .into_iter()
+    .map(|(udp_address, username)| PeerDetail { udp_address, username })
+    .collect();
 
     Ok(Some(other_peers))
 }
@@ -305,7 +314,9 @@ async fn create_flight_core(
         statistics: row.3,
         screenshots: Vec::new(),
         notes: row.4,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address).await?,
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address)
+            .await?
+            .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
 
     // Trigger Discord Sync in background
@@ -376,7 +387,9 @@ async fn update_flight_core(
         statistics,
         screenshots,
         notes,
-        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address).await?,
+        peers: update_and_get_peers(&state, user_id, payload.multiplayer_enabled, payload.udp_address)
+            .await?
+            .map(|peers| peers.into_iter().map(|p| p.udp_address).collect()),
     };
 
     Ok((StatusCode::OK, Json(response)))
@@ -900,9 +913,19 @@ pub struct MultiplayerPingRequest {
     pub udp_address: Option<String>,
 }
 
+/// A peer's reachable address plus the name to label it with in the UI.
+#[derive(Serialize)]
+pub struct PeerDetail {
+    pub udp_address: String,
+    pub username: String,
+}
+
 #[derive(Serialize)]
 pub struct MultiplayerPingResponse {
+    /// Bare addresses, kept for older clients (e.g. the traffic simulator).
     pub peers: Vec<String>,
+    /// Address + username pairs for clients that label peers by name.
+    pub peer_details: Vec<PeerDetail>,
 }
 
 pub async fn multiplayer_ping_handler(
@@ -930,7 +953,7 @@ async fn multiplayer_ping_core(
 ) -> Result<(StatusCode, Json<MultiplayerPingResponse>), AppError> {
     let has_udp = payload.udp_address.as_ref().map(|a| !a.trim().is_empty()).unwrap_or(false);
 
-    let peers = update_and_get_peers(
+    let peer_details = update_and_get_peers(
         &state,
         user_id,
         Some(has_udp),
@@ -939,5 +962,7 @@ async fn multiplayer_ping_core(
     .await?
     .unwrap_or_default();
 
-    Ok((StatusCode::OK, Json(MultiplayerPingResponse { peers })))
+    let peers = peer_details.iter().map(|p| p.udp_address.clone()).collect();
+
+    Ok((StatusCode::OK, Json(MultiplayerPingResponse { peers, peer_details })))
 }
