@@ -148,42 +148,57 @@ async fn update_and_get_peers(
         .execute(&state.db)
         .await?;
 
-    // 3. Without the caller's position we can't tell who is nearby, so return no
-    //    peers rather than the whole world (which would re-introduce the N^2
-    //    fan-out for position-less callers).
-    let (lat, lon) = match (latitude, longitude) {
-        (Some(lat), Some(lon)) => (lat, lon),
-        _ => return Ok(Some(Vec::new())),
+    // 3. Collect the other active peers, joining the owning user so the client can
+    //    label each peer by name (the debug window shows usernames, not raw UDP
+    //    addresses). With a position we scope to a bounding box around the caller;
+    //    peers with no known position (older clients) are kept and the client
+    //    distance-gates them.
+    //
+    // TODO: remove the no-position fallback below. Once every client sends a
+    //       position, a caller that sends none should get no peers (it can't be
+    //       near anyone), instead of the whole world.
+    let rows = match (latitude, longitude) {
+        (Some(lat), Some(lon)) => {
+            // Bounding box around the caller. Square over-includes corners slightly;
+            // the client's own 100 nm gate trims them. Margin over that gate so peers
+            // don't pop in/out at the edge between pings.
+            const RADIUS_NM: f64 = 120.0;
+            let lat_delta = RADIUS_NM / 60.0;
+            let lon_delta = RADIUS_NM / (60.0 * lat.to_radians().cos().abs().max(0.01)); // guard poles
+            sqlx::query_as::<_, (String, Option<String>, String)>(
+                "SELECT mp.udp_address, mp.local_udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
+                 FROM multiplayer_peers mp \
+                 JOIN users u ON u.id = mp.user_id \
+                 WHERE mp.user_id <> $1 \
+                   AND ( mp.latitude IS NULL \
+                      OR ( mp.latitude BETWEEN $2 AND $3 AND mp.longitude BETWEEN $4 AND $5 ) )"
+            )
+            .bind(user_id)
+            .bind(lat - lat_delta)
+            .bind(lat + lat_delta)
+            .bind(lon - lon_delta)
+            .bind(lon + lon_delta)
+            .fetch_all(&state.db)
+            .await?
+        }
+        // No caller position: return all active peers for now (see TODO above).
+        _ => {
+            sqlx::query_as::<_, (String, Option<String>, String)>(
+                "SELECT mp.udp_address, mp.local_udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
+                 FROM multiplayer_peers mp \
+                 JOIN users u ON u.id = mp.user_id \
+                 WHERE mp.user_id <> $1"
+            )
+            .bind(user_id)
+            .fetch_all(&state.db)
+            .await?
+        }
     };
 
-    // Bounding box around the caller. Square over-includes corners slightly; the
-    // client's own 100 nm gate trims them. Use a margin over that gate so peers
-    // don't pop in/out at the edge between pings.
-    const RADIUS_NM: f64 = 120.0;
-    let lat_delta = RADIUS_NM / 60.0;
-    let lon_delta = RADIUS_NM / (60.0 * lat.to_radians().cos().abs().max(0.01)); // guard poles
-
-    // Join the owning user so the client can label each peer by name (the debug
-    // window shows usernames rather than raw UDP addresses). Peers with no known
-    // position (older clients) are kept; the client still distance-gates them.
-    let other_peers: Vec<PeerDetail> = sqlx::query_as::<_, (String, Option<String>, String)>(
-        "SELECT mp.udp_address, mp.local_udp_address, COALESCE(NULLIF(u.global_name, ''), u.username) \
-         FROM multiplayer_peers mp \
-         JOIN users u ON u.id = mp.user_id \
-         WHERE mp.user_id <> $1 \
-           AND ( mp.latitude IS NULL \
-              OR ( mp.latitude BETWEEN $2 AND $3 AND mp.longitude BETWEEN $4 AND $5 ) )"
-    )
-    .bind(user_id)
-    .bind(lat - lat_delta)
-    .bind(lat + lat_delta)
-    .bind(lon - lon_delta)
-    .bind(lon + lon_delta)
-    .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .map(|(udp_address, local_udp_address, username)| PeerDetail { udp_address, local_udp_address, username })
-    .collect();
+    let other_peers: Vec<PeerDetail> = rows
+        .into_iter()
+        .map(|(udp_address, local_udp_address, username)| PeerDetail { udp_address, local_udp_address, username })
+        .collect();
 
     Ok(Some(other_peers))
 }
