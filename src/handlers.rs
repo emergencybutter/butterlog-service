@@ -157,9 +157,9 @@ async fn update_and_get_peers(
     };
 
     // Bounding box around the caller. Square over-includes corners slightly; the
-    // client's own 20 nm gate trims them. Use a margin over that gate so peers
+    // client's own 100 nm gate trims them. Use a margin over that gate so peers
     // don't pop in/out at the edge between pings.
-    const RADIUS_NM: f64 = 30.0;
+    const RADIUS_NM: f64 = 120.0;
     let lat_delta = RADIUS_NM / 60.0;
     let lon_delta = RADIUS_NM / (60.0 * lat.to_radians().cos().abs().max(0.01)); // guard poles
 
