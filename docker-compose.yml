@@ -1,0 +1,16 @@
+# Run butterlog-service on the host where the Postgres DB lives (vya/db.flyvoyager.net).
+# nginx fronts butterlog.flyvoyager.net and proxies /map /content /api/v0/ to 127.0.0.1:8086.
+# Secrets live in /etc/butterlog/service.env (chmod 600), DB reached over the docker bridge.
+#
+#   docker compose up -d --build
+#
+services:
+  butterlog-service:
+    build: .
+    image: butterlog-service:local
+    restart: unless-stopped
+    env_file: /etc/butterlog/service.env
+    ports:
+      - "127.0.0.1:8086:8080"            # nginx-only; not publicly exposed
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
