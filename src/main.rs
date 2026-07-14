@@ -80,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content/settings", get(settings_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
+        .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(
@@ -802,6 +803,38 @@ async fn map_data_handler(
     Ok(axum::Json(aircrafts))
 }
 
+async fn user_current_flight_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let flight_row: Option<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, departure, arrival, statistics, created_at, updated_at \
+         FROM flights \
+         WHERE user_id = $1 AND updated_at > NOW() - INTERVAL '5 minutes' \
+         ORDER BY updated_at DESC \
+         LIMIT 1"
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    match flight_row {
+        Some((id, departure, arrival, statistics, created_at, updated_at)) => {
+            Ok(axum::Json(serde_json::json!({
+                "id": id,
+                "departure": departure,
+                "arrival": arrival,
+                "statistics": statistics,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })))
+        }
+        None => {
+            Ok(axum::Json(serde_json::json!({})))
+        }
+    }
+}
+
 async fn map_handler() -> Result<Response, AppError> {
     Ok(Html(templates::MapPage.render()?).into_response())
 }
@@ -932,6 +965,7 @@ mod tests {
             .route("/api/v0/flights/:id/screenshots/:hash", delete(|| async {}))
             .route("/api/v0/flights/share", post(|| async {}))
             .route("/api/v0/flights/share/:share_id", get(|| async {}).delete(|| async {}))
-            .route("/api/v0/multiplayer/ping", post(|| async {}));
+            .route("/api/v0/multiplayer/ping", post(|| async {}))
+            .route("/api/v0/user/:user_id/current", get(|| async {}));
     }
 }

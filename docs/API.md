@@ -182,6 +182,27 @@ Returns every flight updated in the last 5 minutes, for the live map. Intentiona
     }
     ```
 
+#### User Current Flight Telemetry (public)
+`GET /api/v0/user/:user_id/current`
+
+Exposes an object containing telemetry for the user's active flight (updated in the last 5 minutes), or an empty object `{}` if they are not currently flying.
+
+*   **Path Parameters:**
+    *   `user_id` (number): The database ID of the user.
+*   **Response:** `200 OK` with either:
+    *   An empty object `{}` if not currently flying.
+    *   A JSON object containing:
+        ```json
+        {
+          "id": 123,
+          "departure": "KLAX",
+          "arrival": "KSFO",
+          "statistics": { ... },
+          "created_at": "ISO8601 Date String",
+          "updated_at": "ISO8601 Date String"
+        }
+        ```
+
 ---
 
 ### Discord Notification Settings
