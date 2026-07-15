@@ -734,6 +734,43 @@ struct MapAircraft {
     updated_ago_secs: i64,
 }
 
+/// Live position pulled out of a flight's `statistics.current_snapshot`.
+/// The sim plugin sends capitalized keys (`Latitude`, `Longitude`, `HDG`,
+/// `GndSpd`, `AltMSL`); older clients sent lowercase ones, so both are
+/// accepted. `None` means the flight has no usable position yet (no
+/// snapshot, or a snapshot missing lat/lon).
+#[derive(Serialize, Clone, Copy)]
+struct LivePosition {
+    latitude: f64,
+    longitude: f64,
+    /// MSL altitude, feet.
+    altitude: f64,
+    /// True heading, degrees.
+    heading: f64,
+    /// Ground speed, knots.
+    speed: f64,
+}
+
+fn extract_live_position(statistics: &serde_json::Value) -> Option<LivePosition> {
+    let snapshot = statistics.get("current_snapshot")?;
+    let num = |keys: &[&str]| keys.iter().find_map(|k| snapshot.get(*k).and_then(|v| v.as_f64()));
+    Some(LivePosition {
+        latitude: num(&["Latitude", "latitude"])?,
+        longitude: num(&["Longitude", "longitude"])?,
+        altitude: num(&["AltMSL", "gps_altitude_msl", "AltB"]).unwrap_or(0.0),
+        heading: num(&["HDG", "heading"]).unwrap_or(0.0),
+        speed: num(&["GndSpd", "ground_speed"]).unwrap_or(0.0),
+    })
+}
+
+fn aircraft_type_of(statistics: &serde_json::Value) -> String {
+    statistics
+        .get("airframe_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
 /// Intentionally public (no auth): the live map shows every active flight's
 /// position to anyone, mirroring the public /content flight history.
 async fn map_data_handler(
@@ -753,62 +790,50 @@ async fn map_data_handler(
 
     for flight in active_flights {
         let statistics = flight.3;
-        if let Some(snapshot) = statistics.get("current_snapshot") {
-            let lat = snapshot.get("Latitude").and_then(|v| v.as_f64())
-                .or_else(|| snapshot.get("latitude").and_then(|v| v.as_f64()));
-            let lon = snapshot.get("Longitude").and_then(|v| v.as_f64())
-                .or_else(|| snapshot.get("longitude").and_then(|v| v.as_f64()));
-
-            if let (Some(latitude), Some(longitude)) = (lat, lon) {
-                let altitude = snapshot.get("AltMSL").and_then(|v| v.as_f64())
-                    .or_else(|| snapshot.get("gps_altitude_msl").and_then(|v| v.as_f64()))
-                    .or_else(|| snapshot.get("AltB").and_then(|v| v.as_f64()))
-                    .unwrap_or(0.0);
-
-                let heading = snapshot.get("HDG").and_then(|v| v.as_f64())
-                    .or_else(|| snapshot.get("heading").and_then(|v| v.as_f64()))
-                    .unwrap_or(0.0);
-
-                let speed = snapshot.get("GndSpd").and_then(|v| v.as_f64())
-                    .or_else(|| snapshot.get("ground_speed").and_then(|v| v.as_f64()))
-                    .unwrap_or(0.0);
-
-                let pilot_name = flight.6.unwrap_or(flight.5);
-                let departure = flight.1;
-                let arrival = flight.2.unwrap_or_else(|| "In Flight".to_string());
-                let aircraft_type = statistics.get("airframe_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-
-                let updated_ago_secs = now.signed_duration_since(flight.4).num_seconds();
-
-                aircrafts.push(MapAircraft {
-                    flight_id: flight.0,
-                    pilot_name,
-                    departure,
-                    arrival,
-                    aircraft_type,
-                    latitude,
-                    longitude,
-                    altitude,
-                    heading,
-                    speed,
-                    updated_ago_secs,
-                });
-            }
+        if let Some(pos) = extract_live_position(&statistics) {
+            aircrafts.push(MapAircraft {
+                flight_id: flight.0,
+                pilot_name: flight.6.unwrap_or(flight.5),
+                departure: flight.1,
+                arrival: flight.2.unwrap_or_else(|| "In Flight".to_string()),
+                aircraft_type: aircraft_type_of(&statistics),
+                latitude: pos.latitude,
+                longitude: pos.longitude,
+                altitude: pos.altitude,
+                heading: pos.heading,
+                speed: pos.speed,
+                updated_ago_secs: now.signed_duration_since(flight.4).num_seconds(),
+            });
         }
     }
 
     Ok(axum::Json(aircrafts))
 }
 
+/// The current-flight telemetry contract consumed by freeflight's live map
+/// (services/ff-api proxies this per-user). A clean, typed extraction of the
+/// live position rather than the raw flight row — see `docs/API.md`.
+#[derive(Serialize)]
+struct CurrentFlight {
+    flight_id: i64,
+    departure: String,
+    /// `None` while still en route (no arrival filed yet).
+    arrival: Option<String>,
+    aircraft_type: String,
+    /// `None` until the flight reports a usable position.
+    position: Option<LivePosition>,
+    /// Seconds since the flight last reported — clients fade a stale
+    /// position rather than showing it as live.
+    updated_ago_secs: i64,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 async fn user_current_flight_handler(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let flight_row: Option<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT id, departure, arrival, statistics, created_at, updated_at \
+    let flight_row: Option<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, departure, arrival, statistics, updated_at \
          FROM flights \
          WHERE user_id = $1 AND updated_at > NOW() - INTERVAL '5 minutes' \
          ORDER BY updated_at DESC \
@@ -818,21 +843,19 @@ async fn user_current_flight_handler(
     .fetch_optional(&state.db)
     .await?;
 
-    match flight_row {
-        Some((id, departure, arrival, statistics, created_at, updated_at)) => {
-            Ok(axum::Json(serde_json::json!({
-                "id": id,
-                "departure": departure,
-                "arrival": arrival,
-                "statistics": statistics,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            })))
-        }
-        None => {
-            Ok(axum::Json(serde_json::json!({})))
-        }
-    }
+    let now = chrono::Utc::now();
+    // `None` (JSON `null`) when the user isn't currently flying.
+    let current = flight_row.map(|(id, departure, arrival, statistics, updated_at)| CurrentFlight {
+        flight_id: id,
+        departure,
+        arrival,
+        aircraft_type: aircraft_type_of(&statistics),
+        position: extract_live_position(&statistics),
+        updated_ago_secs: now.signed_duration_since(updated_at).num_seconds(),
+        updated_at,
+    });
+
+    Ok(axum::Json(current))
 }
 
 async fn map_handler() -> Result<Response, AppError> {
@@ -893,6 +916,41 @@ async fn flight_share_detail_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_live_position_reads_capitalized_snapshot_keys() {
+        let stats = serde_json::json!({
+            "current_snapshot": {
+                "Latitude": 34.05, "Longitude": -118.24,
+                "AltMSL": 12500.0, "HDG": 271.3, "GndSpd": 289.0
+            }
+        });
+        let p = extract_live_position(&stats).expect("position");
+        assert_eq!(p.latitude, 34.05);
+        assert_eq!(p.longitude, -118.24);
+        assert_eq!(p.altitude, 12500.0);
+        assert_eq!(p.heading, 271.3);
+        assert_eq!(p.speed, 289.0);
+    }
+
+    #[test]
+    fn extract_live_position_accepts_lowercase_and_defaults_missing() {
+        // Older clients sent lowercase lat/lon; a snapshot with only a fix
+        // still yields a position, with the other fields defaulted to 0.
+        let stats = serde_json::json!({ "current_snapshot": { "latitude": 1.0, "longitude": 2.0 } });
+        let p = extract_live_position(&stats).expect("position");
+        assert_eq!((p.latitude, p.longitude), (1.0, 2.0));
+        assert_eq!((p.altitude, p.heading, p.speed), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn extract_live_position_is_none_without_snapshot_or_latlon() {
+        assert!(extract_live_position(&serde_json::json!({})).is_none());
+        assert!(
+            extract_live_position(&serde_json::json!({ "current_snapshot": { "AltMSL": 100.0 } }))
+                .is_none()
+        );
+    }
 
     #[test]
     fn redact_path_hides_webhook_token() {

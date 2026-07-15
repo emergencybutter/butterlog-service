@@ -185,23 +185,31 @@ Returns every flight updated in the last 5 minutes, for the live map. Intentiona
 #### User Current Flight Telemetry (public)
 `GET /api/v0/user/:user_id/current`
 
-Exposes an object containing telemetry for the user's active flight (updated in the last 5 minutes), or an empty object `{}` if they are not currently flying.
+Exposes a clean, typed snapshot of the user's active flight (updated in the last 5 minutes), or `null` if they are not currently flying. The live position is extracted from the flight's `current_snapshot` server-side, so clients don't parse the raw statistics blob.
 
 *   **Path Parameters:**
     *   `user_id` (number): The database ID of the user.
 *   **Response:** `200 OK` with either:
-    *   An empty object `{}` if not currently flying.
+    *   `null` if not currently flying.
     *   A JSON object containing:
         ```json
         {
-          "id": 123,
+          "flight_id": 123,
           "departure": "KLAX",
           "arrival": "KSFO",
-          "statistics": { ... },
-          "created_at": "ISO8601 Date String",
+          "aircraft_type": "Boeing 737-800",
+          "position": {
+            "latitude": 34.05,
+            "longitude": -118.24,
+            "altitude": 12500.0,
+            "heading": 271.3,
+            "speed": 289.0
+          },
+          "updated_ago_secs": 3,
           "updated_at": "ISO8601 Date String"
         }
         ```
+    *   `arrival` is `null` while still en route; `position` is `null` until the flight reports a usable location. `altitude` is MSL feet, `heading` is degrees true, `speed` is ground speed in knots. `updated_ago_secs` lets a client fade a stale position rather than show it as live.
 
 ---
 
