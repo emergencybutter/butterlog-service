@@ -211,6 +211,15 @@ Exposes a clean, typed snapshot of the user's active flight (updated in the last
         ```
     *   `arrival` is `null` while still en route; `position` is `null` until the flight reports a usable location. `altitude` is MSL feet, `heading` is degrees true, `speed` is ground speed in knots. `updated_ago_secs` lets a client fade a stale position rather than show it as live.
 
+#### User Current Flight Telemetry by Discord ID (public)
+`GET /api/v0/user/by-discord/:discord_id/current`
+
+Identical response to the numeric-id endpoint above, but keyed by the pilot's Discord user id (`users.discord_id`) instead of the internal numeric id. Lets a client that already knows who's signed in (e.g. freeflight, which authenticates with Discord) show a pilot's live flight without them looking up a Butterlog id.
+
+*   **Path Parameters:**
+    *   `discord_id` (string): The pilot's Discord user id (snowflake).
+*   **Response:** `200 OK` with the same object as above, or `null` if that Discord user has no active flight (or isn't a known Butterlog user).
+
 ---
 
 ### Discord Notification Settings

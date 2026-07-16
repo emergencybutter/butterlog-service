@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
+        .route("/api/v0/user/by-discord/:discord_id/current", get(user_current_flight_by_discord_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(
@@ -828,11 +829,28 @@ struct CurrentFlight {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The columns both current-flight lookups select, in order.
+type CurrentFlightRow = (i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>);
+
+fn build_current_flight(row: CurrentFlightRow, now: chrono::DateTime<chrono::Utc>) -> CurrentFlight {
+    let (id, departure, arrival, statistics, updated_at) = row;
+    CurrentFlight {
+        flight_id: id,
+        departure,
+        arrival,
+        aircraft_type: aircraft_type_of(&statistics),
+        position: extract_live_position(&statistics),
+        updated_ago_secs: now.signed_duration_since(updated_at).num_seconds(),
+        updated_at,
+    }
+}
+
+/// Current flight by Butterlog's internal numeric user id.
 async fn user_current_flight_handler(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let flight_row: Option<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+    let flight_row: Option<CurrentFlightRow> = sqlx::query_as(
         "SELECT id, departure, arrival, statistics, updated_at \
          FROM flights \
          WHERE user_id = $1 AND updated_at > NOW() - INTERVAL '5 minutes' \
@@ -845,17 +863,31 @@ async fn user_current_flight_handler(
 
     let now = chrono::Utc::now();
     // `None` (JSON `null`) when the user isn't currently flying.
-    let current = flight_row.map(|(id, departure, arrival, statistics, updated_at)| CurrentFlight {
-        flight_id: id,
-        departure,
-        arrival,
-        aircraft_type: aircraft_type_of(&statistics),
-        position: extract_live_position(&statistics),
-        updated_ago_secs: now.signed_duration_since(updated_at).num_seconds(),
-        updated_at,
-    });
+    Ok(axum::Json(flight_row.map(|row| build_current_flight(row, now))))
+}
 
-    Ok(axum::Json(current))
+/// Current flight by the pilot's Discord id — lets a client that already
+/// knows who's signed in (freeflight authenticates with Discord, and
+/// `users.discord_id` is that same id) show a pilot's live flight without
+/// them looking up their numeric Butterlog id.
+async fn user_current_flight_by_discord_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(discord_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let flight_row: Option<CurrentFlightRow> = sqlx::query_as(
+        "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at \
+         FROM flights f \
+         JOIN users u ON f.user_id = u.id \
+         WHERE u.discord_id = $1 AND f.updated_at > NOW() - INTERVAL '5 minutes' \
+         ORDER BY f.updated_at DESC \
+         LIMIT 1"
+    )
+    .bind(discord_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let now = chrono::Utc::now();
+    Ok(axum::Json(flight_row.map(|row| build_current_flight(row, now))))
 }
 
 async fn map_handler() -> Result<Response, AppError> {
