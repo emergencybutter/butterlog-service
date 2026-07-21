@@ -55,14 +55,16 @@
         .m3d-play { left: 12px; top: 12px; display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
         .m3d-play button { background: none; border: none; color: var(--text); cursor: pointer; font-size: 0.95rem; line-height: 1; padding: 0 0.2rem; }
         .m3d-play input[type=range] { width: 150px; accent-color: var(--purple); cursor: pointer; }
-        .m3d-controls { right: 12px; top: 12px; padding: 0; overflow: hidden; }
+        .m3d-controls { right: 12px; top: 12px; padding: 0; overflow: hidden; display: flex; align-items: stretch; }
         .m3d-controls button { background: none; border: none; color: var(--text); cursor: pointer; font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.5rem 0.8rem; }
         .m3d-controls button:hover { color: var(--purple); }
+        .m3d-tilt { display: flex; align-items: center; gap: 0.45rem; padding: 0.4rem 0.7rem; border-right: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+        .m3d-tilt input[type=range] { width: 84px; accent-color: var(--purple); cursor: pointer; }
         .m3d-legend { left: 12px; bottom: 12px; padding: 0.5rem 0.7rem; font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
         .m3d-legend .bar { width: 130px; height: 8px; border-radius: 4px; margin-top: 0.35rem; background: linear-gradient(90deg, #36e3c6, #ffb000); }
         .m3d-legend .ends { display: flex; justify-content: space-between; margin-top: 0.25rem; color: var(--dim); }
         .m3d-hint { right: 12px; bottom: 12px; padding: 0.35rem 0.6rem; font-family: var(--font-mono); font-size: 0.6rem; color: var(--dim); letter-spacing: 0.03em; }
-        @media (max-width: 600px) { .m3d-hint { display: none; } .m3d-play input[type=range] { width: 100px; } }
+        @media (max-width: 600px) { .m3d-hint { display: none; } .m3d-play input[type=range] { width: 90px; } .m3d-tilt input[type=range] { width: 54px; } }
         .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem; }
         @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
         .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; }
@@ -104,8 +106,11 @@ async function deleteShare(){
                 <button id="m3d-play" title="Play flight">▶</button>
                 <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
             </div>
-            <div class="m3d-panel m3d-controls"><button id="m3d-reset">Reset view</button></div>
-            <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div></div>
+            <div class="m3d-panel m3d-controls">
+                <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="58" aria-label="Camera tilt angle"></label>
+                <button id="m3d-reset">Reset view</button>
+            </div>
+            <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
             <div class="m3d-panel m3d-hint">drag to pan · scroll to zoom · ctrl-drag to tilt</div>
         </div>
     </div>
@@ -328,23 +333,37 @@ function fmtDate(s) {
     if (lats.length < 2) return;
     const M = 0.3048; // feet → metres (MSL, matches terrain elevation)
 
-    // Downsample to keep the geometry light on long flights.
     const N = lats.length, cap = 800, step = Math.max(1, Math.floor(N / cap));
+
+    // True-scale altitude is only a few pixels tall against a whole flight, so the
+    // climb is invisible. Scale height up — terrain AND track by the same factor,
+    // to keep the above-ground relationship honest — until it reads at a glance.
+    // Adaptive: aim for the peak to stand ~18% of the flight's ground span tall.
+    let maxAltFt = 0, minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+    for (let i = 0; i < N; i++) {
+        if (altsFt[i] > maxAltFt) maxAltFt = altsFt[i];
+        if (lons[i] < minLng) minLng = lons[i]; if (lons[i] > maxLng) maxLng = lons[i];
+        if (lats[i] < minLat) minLat = lats[i]; if (lats[i] > maxLat) maxLat = lats[i];
+    }
+    const wM = (maxLng - minLng) * 111320 * Math.cos((minLat + maxLat) / 2 * Math.PI / 180);
+    const hM = (maxLat - minLat) * 111320, diagM = Math.hypot(wM, hM) || 1;
+    const maxAltM = maxAltFt * M;
+    const EXAG = Math.max(1, Math.min(8, maxAltM > 0 ? (0.18 * diagM) / maxAltM : 1));
+    const Z = M * EXAG; // feet → exaggerated metres
+
+    // Downsample to keep the geometry light on long flights.
     const pts = [];
-    for (let i = 0; i < N; i += step) pts.push([lons[i], lats[i], (altsFt[i] || 0) * M]);
+    for (let i = 0; i < N; i += step) pts.push([lons[i], lats[i], (altsFt[i] || 0) * Z]);
     const last = N - 1;
     if (pts[pts.length - 1][0] !== lons[last] || pts[pts.length - 1][1] !== lats[last])
-        pts.push([lons[last], lats[last], (altsFt[last] || 0) * M]);
-
-    let maxAltFt = 0;
-    for (let i = 0; i < N; i++) if (altsFt[i] > maxAltFt) maxAltFt = altsFt[i];
+        pts.push([lons[last], lats[last], (altsFt[last] || 0) * Z]);
     // Altitude → colour: teal (low) to amber (high), matching the site palette.
     const altColor = ft => {
         const x = Math.max(0, Math.min(1, maxAltFt ? ft / maxAltFt : 0));
         return [Math.round(54 + 201 * x), Math.round(227 - 51 * x), Math.round(198 - 198 * x)];
     };
     const segs = [];
-    for (let i = 0; i < pts.length - 1; i++) segs.push({ path: [pts[i], pts[i + 1]], color: altColor(pts[i][2] / M) });
+    for (let i = 0; i < pts.length - 1; i++) segs.push({ path: [pts[i], pts[i + 1]], color: altColor(pts[i][2] / Z) });
     // Faint vertical "curtain" dropping from the track to the ground to convey height.
     const drops = [], dstep = Math.max(1, Math.floor(pts.length / 60));
     for (let i = 0; i < pts.length; i += dstep) drops.push({ path: [pts[i], [pts[i][0], pts[i][1], 0]] });
@@ -354,12 +373,10 @@ function fmtDate(s) {
     const evColor = t => t === 'takeoff' ? [90, 209, 126] : t === 'landing' ? [255, 122, 138] : [54, 227, 198];
     const evPts = events.filter(e => e.latitude && e.longitude).map(e => {
         const type = e.eventType || e.event_type;
-        return { position: [e.longitude, e.latitude, (e.altitude || 0) * M], color: evColor(type), label: evLabel(type) };
+        return { position: [e.longitude, e.latitude, (e.altitude || 0) * Z], color: evColor(type), label: evLabel(type) };
     });
 
-    // Fit the horizontal extent, then tilt the camera and look along the route.
-    let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
-    for (const p of pts) { minLng = Math.min(minLng, p[0]); maxLng = Math.max(maxLng, p[0]); minLat = Math.min(minLat, p[1]); maxLat = Math.max(maxLat, p[1]); }
+    // Fit the horizontal extent (bounds already computed above), tilt, look along route.
     const section = document.getElementById('map3d-section');
     section.style.display = ''; // size the container before measuring / creating Deck
     const el = document.getElementById('map3d');
@@ -375,7 +392,7 @@ function fmtDate(s) {
 
     const terrain = new deck.TerrainLayer({
         id: 'terrain', minZoom: 0, maxZoom: 14,
-        elevationDecoder: { rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768 },
+        elevationDecoder: { rScaler: 256 * EXAG, gScaler: EXAG, bScaler: EXAG / 256, offset: -32768 * EXAG },
         elevationData: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
         texture: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         operation: 'terrain+draw',
@@ -397,8 +414,18 @@ function fmtDate(s) {
         ];
     };
 
-    const deckgl = new deck.Deck({ canvas: 'deck3d', initialViewState: initView, controller: { dragRotate: true, inertia: true }, layers: [...statics, ...marker(0)] });
+    // Track the live view so the tilt slider can change pitch without losing pan/zoom.
+    let curView = { ...initView };
+    const pitchSlider = document.getElementById('m3d-pitch');
+    const deckgl = new deck.Deck({
+        canvas: 'deck3d', initialViewState: initView,
+        controller: { dragRotate: true, inertia: true },
+        onViewStateChange: ({ viewState }) => { curView = viewState; pitchSlider.value = Math.round(viewState.pitch); },
+        layers: [...statics, ...marker(0)],
+    });
+    pitchSlider.oninput = () => { curView = { ...curView, pitch: +pitchSlider.value }; deckgl.setProps({ initialViewState: curView }); };
     document.getElementById('m3d-maxalt').textContent = Math.round(maxAltFt).toLocaleString() + ' ft';
+    document.getElementById('m3d-exag').textContent = EXAG > 1.05 ? 'vertical ×' + EXAG.toFixed(1) + ' (exaggerated)' : '';
 
     // Playback controls.
     const playBtn = document.getElementById('m3d-play'), scrub = document.getElementById('m3d-scrub');
@@ -422,7 +449,7 @@ function fmtDate(s) {
         if (playing) { lastTs = 0; requestAnimationFrame(tick); }
     };
     scrub.oninput = () => { playing = false; playBtn.textContent = progress >= 1 ? '↻' : '▶'; progress = scrub.value / 1000; render(); };
-    document.getElementById('m3d-reset').onclick = () => deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } });
+    document.getElementById('m3d-reset').onclick = () => { curView = { ...initView }; pitchSlider.value = 58; deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } }); };
 })();
 function openLb(i){ document.getElementById('lb-img').src=window._lbUrls[i]; document.getElementById('lightbox').classList.add('open'); document.body.style.overflow='hidden'; }
 function closeLb(){ document.getElementById('lightbox').classList.remove('open'); document.body.style.overflow=''; }
