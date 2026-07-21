@@ -1,16 +1,20 @@
-# Run butterlog-service on the host where the Postgres DB lives (vya/db.flyvoyager.net).
-# nginx fronts butterlog.flyvoyager.net and proxies /map /content /api/v0/ to 127.0.0.1:8086.
-# Secrets live in /etc/butterlog/service.env (chmod 600), DB reached over the docker bridge.
+# Reference copy of the compose file deployed on vya2.flyvoyager.net at
+# /containers/butterlog-service/docker-compose.yml. Deploys go through
+# tools/service.ps1, which builds the image locally, ships it via
+# `docker save | docker load`, writes this file + .env on the box, and runs
+# `docker compose up -d`. There is NO on-box build (no `build:` here).
 #
-#   docker compose up -d --build
-#
+# vya2net is an external docker network shared with postgres18 (the DB) and
+# nginx (which proxies butterlog.flyvoyager.net -> butterlog-service:8080).
+# See tools/deploy-service.md for the full runbook.
 services:
   butterlog-service:
-    build: .
     image: butterlog-service:local
+    container_name: butterlog-service
     restart: unless-stopped
-    env_file: /etc/butterlog/service.env
-    ports:
-      - "127.0.0.1:8086:8080"            # nginx-only; not publicly exposed
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    env_file: .env
+    networks:
+      - vya2net
+networks:
+  vya2net:
+    external: true
