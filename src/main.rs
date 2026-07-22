@@ -15,6 +15,7 @@ mod auth;
 mod r2;
 mod handlers;
 mod discord;
+mod telemetry;
 mod templates;
 
 use crate::config::Config;
@@ -504,6 +505,31 @@ async fn flight_detail_handler(
     .fetch_all(&state.db)
     .await?;
 
+    // Touchdown + peak telemetry from the same JSON the Discord embed reads.
+    let stat_items = |snapshot: Option<&serde_json::Value>, category: &str| {
+        snapshot
+            .map(|s| telemetry::labeled_values(s, category))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(label, value)| templates::StatItem { label: label.to_string(), value })
+            .collect::<Vec<_>>()
+    };
+    let touchdown_stats = stat_items(stats.get("landing_snapshot"), "landing");
+    let peak_stats = stat_items(stats.get("max_entries"), "normal");
+
+    // Link to the public 3D share page when this flight has been shared. The
+    // `remote_flight_id` column stores the local flights.id (see discord sync).
+    let share_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(flight_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    let share_href = share_id
+        .map(|id| format!("/content/flights/share/{}", id))
+        .unwrap_or_default();
+
     let page = templates::FlightDetailPage {
         dep,
         arr_display: arr.unwrap_or_else(|| "In Flight".to_string()),
@@ -521,6 +547,9 @@ async fn flight_detail_handler(
         notes: notes.as_deref().map(str::trim).unwrap_or("").to_string(),
         urls_json: serde_json::to_string(&screenshots).unwrap_or_default(),
         screenshots,
+        touchdown_stats,
+        peak_stats,
+        share_href,
     };
 
     Ok(Html(page.render()?).into_response())

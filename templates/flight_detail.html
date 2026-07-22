@@ -44,6 +44,25 @@
                         text-transform: uppercase; margin-bottom: 0.5rem; }
         .notes-body { color: var(--text-primary); font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap;
                        word-wrap: break-word; }
+        .share-link { display: inline-flex; align-items: center; gap: 0.4rem; margin-bottom: 1.5rem;
+                       padding: 0.6rem 1rem; border-radius: 8px; text-decoration: none;
+                       background: linear-gradient(135deg, rgba(255,176,0,0.16), rgba(54,227,198,0.12));
+                       border: 1px solid var(--border-color); color: var(--primary-color);
+                       font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.05em;
+                       text-transform: uppercase; transition: border-color 0.2s; }
+        .share-link:hover { border-color: var(--primary-color); }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem; }
+        @media (max-width: 520px) { .stats-grid { grid-template-columns: 1fr; } }
+        .stats-card { background: var(--card-bg); border: 1px solid var(--border-color);
+                       border-radius: 14px; padding: 1rem 1.25rem; }
+        .stats-title { color: var(--text-muted); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em;
+                        text-transform: uppercase; margin-bottom: 0.5rem; }
+        .stat-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.3rem 0;
+                     font-size: 0.9rem; border-top: 1px solid var(--border-color); }
+        .stat-row:first-of-type { border-top: none; }
+        .stat-row .k { color: var(--text-secondary); }
+        .stat-row .v { color: var(--text-primary); font-family: var(--font-mono); font-weight: 500;
+                        white-space: nowrap; }
         .badge-butter { background: linear-gradient(135deg, #a6e3a1, #36e3c6); color: #0a0c0d; }
         .badge-smooth { background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }
         .badge-firm { background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }
@@ -84,6 +103,23 @@
         <div class="meta">{{ simulator }} • {{ date_str }}</div>
         <div class="pilot">Flown by {{ pilot }}</div>
         {{ landing_badge|safe }}
+        {% if !share_href.is_empty() %}<div><a href="{{ share_href }}" class="share-link">View 3D flight path →</a></div>{% endif %}
+        {% if !touchdown_stats.is_empty() || !peak_stats.is_empty() %}
+        <div class="stats-grid">
+            {% if !touchdown_stats.is_empty() %}
+            <div class="stats-card">
+                <div class="stats-title">Touchdown</div>
+                {% for s in touchdown_stats %}<div class="stat-row"><span class="k">{{ s.label }}</span><span class="v">{{ s.value }}</span></div>{% endfor %}
+            </div>
+            {% endif %}
+            {% if !peak_stats.is_empty() %}
+            <div class="stats-card">
+                <div class="stats-title">Peak</div>
+                {% for s in peak_stats %}<div class="stat-row"><span class="k">{{ s.label }}</span><span class="v">{{ s.value }}</span></div>{% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
         {% if !notes.is_empty() %}<div class="notes-section"><div class="notes-label">Notes</div><div class="notes-body">{{ notes }}</div></div>{% endif %}
         {% if !screenshots.is_empty() %}<div class="screenshot-gallery">{% for url in screenshots %}<img class="screenshot-thumb" src="{{ url }}" alt="Screenshot {{ loop.index }}" loading="lazy" onclick='openLightbox({{ urls_json|safe }}, {{ loop.index0 }})'>{% endfor %}</div>{% endif %}
     </div>

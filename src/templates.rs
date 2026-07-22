@@ -32,6 +32,18 @@ pub struct FlightDetailPage {
     pub screenshots: Vec<String>,
     /// JSON array of screenshot URLs for the lightbox onclick handler.
     pub urls_json: String,
+    /// Touchdown telemetry (from `landing_snapshot`); empty hides the card.
+    pub touchdown_stats: Vec<StatItem>,
+    /// Peak-of-flight telemetry (from `max_entries`); empty hides the card.
+    pub peak_stats: Vec<StatItem>,
+    /// Relative link to this flight's public 3D share page; empty when unshared.
+    pub share_href: String,
+}
+
+/// A single label/value row in a flight-detail stats card.
+pub struct StatItem {
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Template)]
@@ -133,6 +145,9 @@ mod tests {
             notes: "line1\n<b>not bold</b>".into(),
             screenshots: vec!["https://cdn.example/s/1.webp".into()],
             urls_json: r#"["https://cdn.example/s/1.webp"]"#.into(),
+            touchdown_stats: vec![StatItem { label: "Vertical Speed".into(), value: "-121.00 fpm".into() }],
+            peak_stats: vec![StatItem { label: "Indicated Airspeed".into(), value: "142.00 kts".into() }],
+            share_href: "/content/flights/share/abc123".into(),
         };
         let html = page.render().unwrap();
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -144,6 +159,10 @@ mod tests {
         assert!(html.contains(r#"openLightbox(["https://cdn.example/s/1.webp"], 0)"#));
         // Deduced type shows; the empty airline line is omitted.
         assert!(html.contains("C172"));
+        // Stats cards and the 3D share link render.
+        assert!(html.contains("Vertical Speed") && html.contains("-121.00 fpm"));
+        assert!(html.contains("142.00 kts"));
+        assert!(html.contains(r#"href="/content/flights/share/abc123""#));
     }
 
     #[test]
