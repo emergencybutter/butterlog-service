@@ -83,6 +83,22 @@ pub fn format_value(field: &TelemetryField, value: &Value) -> Option<String> {
     }
 }
 
+/// `(friendly_name, formatted_value)` pairs for the given keys, in the order
+/// provided, skipping any that are absent or unrenderable in `snapshot`. Used to
+/// show a curated subset rather than a whole category.
+pub fn labeled_values_for_keys(snapshot: &Value, keys: &[&str]) -> Vec<(&'static str, String)> {
+    keys.iter()
+        .filter_map(|k| {
+            let field = TELEMETRY_FIELDS.iter().find(|f| f.key == *k)?;
+            let val = snapshot.get(field.key)?;
+            if val.is_null() {
+                return None;
+            }
+            Some((field.friendly_name, format_value(field, val)?))
+        })
+        .collect()
+}
+
 /// `(friendly_name, formatted_value)` pairs for every field in `category` that is
 /// present and non-null in `snapshot`, in table order.
 pub fn labeled_values(snapshot: &Value, category: &str) -> Vec<(&'static str, String)> {

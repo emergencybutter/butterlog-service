@@ -506,16 +506,27 @@ async fn flight_detail_handler(
     .await?;
 
     // Touchdown + peak telemetry from the same JSON the Discord embed reads.
-    let stat_items = |snapshot: Option<&serde_json::Value>, category: &str| {
-        snapshot
-            .map(|s| telemetry::labeled_values(s, category))
-            .unwrap_or_default()
+    // Touchdown shows the whole landing category; Peak is curated to the headline
+    // figures (the full max set reads as a wall of numbers on the web layout).
+    let to_items = |pairs: Vec<(&'static str, String)>| -> Vec<templates::StatItem> {
+        pairs
             .into_iter()
             .map(|(label, value)| templates::StatItem { label: label.to_string(), value })
-            .collect::<Vec<_>>()
+            .collect()
     };
-    let touchdown_stats = stat_items(stats.get("landing_snapshot"), "landing");
-    let peak_stats = stat_items(stats.get("max_entries"), "normal");
+    const PEAK_KEYS: &[&str] = &["AltB", "IAS", "GndSpd", "VSpd", "NormAc"];
+    let touchdown_stats = to_items(
+        stats
+            .get("landing_snapshot")
+            .map(|s| telemetry::labeled_values(s, "landing"))
+            .unwrap_or_default(),
+    );
+    let peak_stats = to_items(
+        stats
+            .get("max_entries")
+            .map(|s| telemetry::labeled_values_for_keys(s, PEAK_KEYS))
+            .unwrap_or_default(),
+    );
 
     // Link to the public 3D share page when this flight has been shared. The
     // `remote_flight_id` column stores the local flights.id (see discord sync).
