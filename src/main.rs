@@ -79,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content", get(content_handler))
         .route("/content/flight/user/:user_id", get(content_user_handler))
         .route("/content/settings", get(settings_handler))
+        .route("/content/stats", get(stats_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
@@ -903,6 +904,14 @@ struct AircraftAgg {
 async fn aircraft_stats_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
+    Ok(axum::Json(aggregate_aircraft_stats(&state.db).await?))
+}
+
+/// Shared aggregation behind both the JSON endpoint and the `/content/stats`
+/// page. See `aircraft_stats_handler` for the field semantics.
+async fn aggregate_aircraft_stats(
+    db: &sqlx::PgPool,
+) -> Result<AircraftStatsResponse, AppError> {
     // Project just the sub-fields we need out of the JSONB blob so we never
     // haul whole snapshot arrays across the wire. Coordinates come back as text
     // and are parsed in Rust to sidestep casting non-numeric JSON in SQL.
@@ -931,7 +940,7 @@ async fn aircraft_stats_handler(
          WHERE statistics->>'resolved_icao' IS NOT NULL \
            AND TRIM(statistics->>'resolved_icao') <> ''",
     )
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await?;
 
     let parse_time = |s: &Option<String>| -> Option<chrono::DateTime<chrono::FixedOffset>> {
@@ -993,11 +1002,84 @@ async fn aircraft_stats_handler(
             .then_with(|| a.icao.cmp(&b.icao))
     });
 
-    Ok(axum::Json(AircraftStatsResponse {
+    Ok(AircraftStatsResponse {
         by_flights,
         by_time,
         by_distance: stats,
-    }))
+    })
+}
+
+/// Whole number with thousands separators, e.g. `9877` -> `9,877`.
+fn group_thousands(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let first = s.len() % 3;
+    for (i, ch) in s.chars().enumerate() {
+        if i != 0 && (i - first) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Turn a ranked `AircraftStat` list into display rows: bars are sized against
+/// the leader's `metric`, and each row's caption carries the two off-axis
+/// figures. `metric` selects which value drives the bar for this list.
+fn to_stat_rows(
+    stats: &[AircraftStat],
+    metric: impl Fn(&AircraftStat) -> f64,
+    value: impl Fn(&AircraftStat) -> String,
+    sub: impl Fn(&AircraftStat) -> String,
+) -> Vec<templates::StatRow> {
+    let top = stats.first().map(&metric).filter(|&m| m > 0.0);
+    stats
+        .iter()
+        .enumerate()
+        .map(|(i, s)| templates::StatRow {
+            rank: i + 1,
+            icao: s.icao.clone(),
+            value: value(s),
+            sub: sub(s),
+            pct: top
+                .map(|t| ((metric(s) / t) * 100.0).round().clamp(0.0, 100.0) as u32)
+                .unwrap_or(0),
+        })
+        .collect()
+}
+
+/// Public aircraft-usage leaderboard page (`/content/stats`): the same three
+/// rankings as `GET /api/v0/stats/aircraft`, rendered as bar charts.
+async fn stats_handler(State(state): State<AppState>) -> Result<Response, AppError> {
+    let s = aggregate_aircraft_stats(&state.db).await?;
+
+    let hours = |a: &AircraftStat| format!("{:.1} h", a.total_hours);
+    let dist = |a: &AircraftStat| format!("{} nm", group_thousands(a.total_distance_nm.round() as i64));
+    let count = |a: &AircraftStat| {
+        format!("{} flight{}", a.flights, if a.flights == 1 { "" } else { "s" })
+    };
+
+    let page = templates::StatsPage {
+        by_flights: to_stat_rows(
+            &s.by_flights,
+            |a| a.flights as f64,
+            &count,
+            |a| format!("{} · {}", hours(a), dist(a)),
+        ),
+        by_time: to_stat_rows(
+            &s.by_time,
+            |a| a.total_seconds as f64,
+            &hours,
+            |a| format!("{} · {}", count(a), dist(a)),
+        ),
+        by_distance: to_stat_rows(
+            &s.by_distance,
+            |a| a.total_distance_nm,
+            &dist,
+            |a| format!("{} · {}", count(a), hours(a)),
+        ),
+    };
+    Ok(Html(page.render()?).into_response())
 }
 
 /// The current-flight telemetry contract consumed by freeflight's live map

@@ -78,6 +78,31 @@ pub struct FlightCard {
 }
 
 #[derive(Template)]
+#[template(path = "stats.html")]
+pub struct StatsPage {
+    /// Aircraft ranked by number of logged flights.
+    pub by_flights: Vec<StatRow>,
+    /// Aircraft ranked by total flown time.
+    pub by_time: Vec<StatRow>,
+    /// Aircraft ranked by total great-circle distance.
+    pub by_distance: Vec<StatRow>,
+}
+
+/// One row of an aircraft leaderboard, pre-formatted for display.
+pub struct StatRow {
+    /// 1-based placing within its list.
+    pub rank: usize,
+    /// ICAO type designator (e.g. `A320`).
+    pub icao: String,
+    /// Headline metric for this list, formatted (e.g. `9,877 nm`).
+    pub value: String,
+    /// The other two metrics, formatted as a single caption line.
+    pub sub: String,
+    /// Bar width as a whole percent of the list leader (0–100).
+    pub pct: u32,
+}
+
+#[derive(Template)]
 #[template(path = "settings.html")]
 pub struct SettingsPage {
     /// Guilds where the logged-in user is an administrator.
