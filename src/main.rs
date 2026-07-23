@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content/settings", get(settings_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
+        .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
         .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
         .route("/api/v0/user/by-discord/:discord_id/current", get(user_current_flight_by_discord_handler))
         .route("/api/v0/auth/login", get(login_handler))
@@ -849,6 +850,154 @@ async fn map_data_handler(
     }
 
     Ok(axum::Json(aircrafts))
+}
+
+/// Great-circle distance between two lat/lon points, in nautical miles.
+fn haversine_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_RADIUS_NM: f64 = 3440.065;
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_NM * a.sqrt().asin()
+}
+
+/// One row of the aircraft leaderboard: aggregate totals for a single ICAO
+/// type designator (e.g. `A320`). All three headline metrics ride along on
+/// every entry so a client can rank by whichever it wants.
+#[derive(Serialize, Clone)]
+struct AircraftStat {
+    icao: String,
+    /// Number of logged flights in this type.
+    flights: i64,
+    /// Total flown time, seconds (sum over flights where it could be derived).
+    total_seconds: i64,
+    /// Same, expressed as hours (one decimal) for convenience.
+    total_hours: f64,
+    /// Total great-circle distance takeoff→landing, nautical miles.
+    total_distance_nm: f64,
+}
+
+/// The aircraft-usage leaderboard: the same aircraft ranked three ways.
+#[derive(Serialize)]
+struct AircraftStatsResponse {
+    by_flights: Vec<AircraftStat>,
+    by_time: Vec<AircraftStat>,
+    by_distance: Vec<AircraftStat>,
+}
+
+/// Per-ICAO accumulator; finalised into `AircraftStat`.
+#[derive(Default)]
+struct AircraftAgg {
+    flights: i64,
+    total_seconds: i64,
+    total_distance_nm: f64,
+}
+
+/// Public aircraft-usage stats, aggregated by resolved ICAO type designator.
+/// Reads only fields the service already stores in each flight's `statistics`:
+/// `resolved_icao`, the takeoff/landing timestamps (duration), and the
+/// takeoff/landing snapshot positions (great-circle distance). Flights missing
+/// a piece still count toward the flight tally; they just don't add time or
+/// distance. Public like the live map — no per-user data is exposed.
+async fn aircraft_stats_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    // Project just the sub-fields we need out of the JSONB blob so we never
+    // haul whole snapshot arrays across the wire. Coordinates come back as text
+    // and are parsed in Rust to sidestep casting non-numeric JSON in SQL.
+    let rows: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT \
+            TRIM(statistics->>'resolved_icao') AS icao, \
+            statistics->>'takeoff_time' AS takeoff_time, \
+            statistics->>'landing_time' AS landing_time, \
+            statistics->>'start_time' AS start_time, \
+            statistics->>'end_time' AS end_time, \
+            statistics->'takeoff_snapshot'->>'Latitude' AS to_lat, \
+            statistics->'takeoff_snapshot'->>'Longitude' AS to_lon, \
+            statistics->'landing_snapshot'->>'Latitude' AS ld_lat, \
+            statistics->'landing_snapshot'->>'Longitude' AS ld_lon \
+         FROM flights \
+         WHERE statistics->>'resolved_icao' IS NOT NULL \
+           AND TRIM(statistics->>'resolved_icao') <> ''",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let parse_time = |s: &Option<String>| -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        s.as_deref()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+    };
+    let parse_coord = |s: &Option<String>| -> Option<f64> {
+        s.as_deref().and_then(|v| v.parse::<f64>().ok())
+    };
+
+    let mut aggs: std::collections::HashMap<String, AircraftAgg> = std::collections::HashMap::new();
+    for (icao, takeoff, landing, start, end, to_lat, to_lon, ld_lat, ld_lon) in rows {
+        let agg = aggs.entry(icao).or_default();
+        agg.flights += 1;
+
+        // Duration: prefer takeoff→landing, fall back to start→end. Only
+        // positive spans count (clock skew / bad rows shouldn't subtract).
+        let span = parse_time(&landing)
+            .zip(parse_time(&takeoff))
+            .or_else(|| parse_time(&end).zip(parse_time(&start)))
+            .map(|(b, a)| (b - a).num_seconds())
+            .filter(|&s| s > 0);
+        if let Some(secs) = span {
+            agg.total_seconds += secs;
+        }
+
+        // Distance: great-circle between the two snapshot fixes when we have
+        // both. Missing/partial snapshots simply add nothing.
+        if let (Some(la1), Some(lo1), Some(la2), Some(lo2)) = (
+            parse_coord(&to_lat),
+            parse_coord(&to_lon),
+            parse_coord(&ld_lat),
+            parse_coord(&ld_lon),
+        ) {
+            agg.total_distance_nm += haversine_nm(la1, lo1, la2, lo2);
+        }
+    }
+
+    let mut stats: Vec<AircraftStat> = aggs
+        .into_iter()
+        .map(|(icao, a)| AircraftStat {
+            icao,
+            flights: a.flights,
+            total_seconds: a.total_seconds,
+            total_hours: (a.total_seconds as f64 / 360.0).round() / 10.0,
+            total_distance_nm: (a.total_distance_nm * 10.0).round() / 10.0,
+        })
+        .collect();
+
+    let mut by_flights = stats.clone();
+    by_flights.sort_by(|a, b| b.flights.cmp(&a.flights).then_with(|| a.icao.cmp(&b.icao)));
+    let mut by_time = stats.clone();
+    by_time.sort_by(|a, b| b.total_seconds.cmp(&a.total_seconds).then_with(|| a.icao.cmp(&b.icao)));
+    stats.sort_by(|a, b| {
+        b.total_distance_nm
+            .partial_cmp(&a.total_distance_nm)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.icao.cmp(&b.icao))
+    });
+
+    Ok(axum::Json(AircraftStatsResponse {
+        by_flights,
+        by_time,
+        by_distance: stats,
+    }))
 }
 
 /// The current-flight telemetry contract consumed by freeflight's live map

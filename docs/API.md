@@ -182,6 +182,21 @@ Returns every flight updated in the last 5 minutes, for the live map. Intentiona
     }
     ```
 
+#### Aircraft Usage Stats (public)
+`GET /api/v0/stats/aircraft`
+
+Aircraft-usage leaderboard aggregated across all flights, grouped by resolved ICAO type designator (e.g. `A320`). The same set of aircraft is returned ranked three ways; every entry carries all three metrics so a client can sort by whichever it likes. Derived entirely from each flight's `statistics`: flight count, total flown time (`landing_time − takeoff_time`, falling back to `end_time − start_time`), and total great-circle distance between the takeoff and landing snapshot positions. Flights missing a timestamp or snapshot still count toward `flights`; they simply add no time or distance. Intentionally unauthenticated, like the live map.
+
+*   **Response:** `200 OK`
+    ```json
+    {
+      "by_flights":  [ { "icao": "A320", "flights": 42, "total_seconds": 151200, "total_hours": 42.0, "total_distance_nm": 9876.5 } ],
+      "by_time":     [ { "icao": "A320", "flights": 42, "total_seconds": 151200, "total_hours": 42.0, "total_distance_nm": 9876.5 } ],
+      "by_distance": [ { "icao": "A320", "flights": 42, "total_seconds": 151200, "total_hours": 42.0, "total_distance_nm": 9876.5 } ]
+    }
+    ```
+    `by_flights` is sorted by `flights` desc, `by_time` by `total_seconds` desc, `by_distance` by `total_distance_nm` desc (ties broken by ICAO).
+
 #### User Current Flight Telemetry (public)
 `GET /api/v0/user/:user_id/current`
 
