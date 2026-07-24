@@ -7,22 +7,15 @@
     <meta property="og:title" content="{{ dep }} → {{ arr_display }}">
     <meta property="og:description" content="{{ airframe }} • {{ pilot }} • {{ date_str }}">
     <meta property="og:site_name" content="ButterLog">
+    {% include "_theme_head.html" %}
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
-        :root {
-            --bg-gradient: radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255,176,0,0.06), transparent 60%), #0a0c0d;
-            --panel-bg: #101314;
-            --border-color: rgba(225, 232, 220, 0.10);
-            --text-primary: #eef1ea; --text-secondary: #b0bab6; --text-muted: #7a8682;
-            --primary-color: #ffb000; --accent-pink: #36e3c6; --card-bg: #14181a;
-            --font-display: 'Bricolage Grotesque', sans-serif; --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-        }
-        body { font-family: 'Hanken Grotesk', sans-serif; background: var(--bg-gradient); background-attachment: fixed; color: var(--text-primary);
+        * { box-sizing: border-box; }
+        body { font-family: 'Hanken Grotesk', sans-serif; background: var(--bg); color: var(--text-primary);
                 min-height: 100vh; margin: 0; display: flex; flex-direction: column; align-items: center;
-                justify-content: flex-start; padding: 3rem 1rem; box-sizing: border-box; }
+                justify-content: flex-start; padding: 3rem 1rem; }
         .container { max-width: 750px; width: 100%; background: var(--panel-bg);
-                      border: 1px solid var(--border-color); border-radius: 6px; padding: 3rem;
-                      box-shadow: 0 40px 80px -40px rgba(0,0,0,0.9); box-sizing: border-box; }
+                      border: 1px solid var(--border-color); border-radius: var(--radius); padding: 3rem;
+                      box-shadow: var(--shadow); }
         .icao { font-family: var(--font-display); letter-spacing: -0.02em; }
         .back { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem !important; }
         .back { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; display: inline-flex;
@@ -38,23 +31,23 @@
                   font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase;
                   font-size: 0.78rem; text-align: center; margin-bottom: 1.5rem; }
         .badge-detail { font-size: 0.75rem; font-weight: 400; opacity: 0.9; }
-        .notes-section { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 14px;
+        .notes-section { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius);
                           padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; }
         .notes-label { color: var(--text-muted); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
                         text-transform: uppercase; margin-bottom: 0.5rem; }
         .notes-body { color: var(--text-primary); font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap;
                        word-wrap: break-word; }
         .share-link { display: inline-flex; align-items: center; gap: 0.4rem; margin-bottom: 1.5rem;
-                       padding: 0.6rem 1rem; border-radius: 8px; text-decoration: none;
-                       background: linear-gradient(135deg, rgba(255,176,0,0.16), rgba(54,227,198,0.12));
-                       border: 1px solid var(--border-color); color: var(--primary-color);
+                       padding: 0.6rem 1rem; border-radius: var(--radius); text-decoration: none;
+                       background: var(--accent-weak);
+                       border: 1px solid var(--border-color); color: var(--accent-text);
                        font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.05em;
-                       text-transform: uppercase; transition: border-color 0.2s; }
-        .share-link:hover { border-color: var(--primary-color); }
+                       text-transform: uppercase; transition: border-color var(--t); }
+        .share-link:hover { border-color: var(--accent); }
         .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem; }
         @media (max-width: 520px) { .stats-grid { grid-template-columns: 1fr; } }
         .stats-card { background: var(--card-bg); border: 1px solid var(--border-color);
-                       border-radius: 14px; padding: 1rem 1.25rem; }
+                       border-radius: var(--radius); padding: 1rem 1.25rem; }
         .stats-title { color: var(--text-muted); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em;
                         text-transform: uppercase; margin-bottom: 0.5rem; }
         .stat-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.3rem 0;
@@ -63,14 +56,11 @@
         .stat-row .k { color: var(--text-secondary); }
         .stat-row .v { color: var(--text-primary); font-family: var(--font-mono); font-weight: 500;
                         white-space: nowrap; }
-        .badge-butter { background: linear-gradient(135deg, #a6e3a1, #36e3c6); color: #0a0c0d; }
-        .badge-smooth { background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }
-        .badge-firm { background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }
-        .badge-hard { background: linear-gradient(135deg, #f38ba8, #eba0ac); color: #11111b; }
+        /* landing-grade badge colors are defined in _theme_head.html */
         .screenshot-gallery { display: flex; gap: 8px; overflow-x: auto; padding-top: 1rem;
                                 border-top: 1px solid var(--border-color); scrollbar-width: thin; }
-        .screenshot-thumb { width: 140px; height: 88px; object-fit: cover; border-radius: 8px; cursor: pointer;
-                              flex-shrink: 0; border: 1px solid var(--border-color); transition: transform 0.2s; }
+        .screenshot-thumb { width: 140px; height: 88px; object-fit: cover; border-radius: var(--radius-sm); cursor: pointer;
+                              flex-shrink: 0; border: 1px solid var(--border-color); transition: transform var(--t); }
         .screenshot-thumb:hover { transform: scale(1.04); }
         .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1000;
                      align-items: center; justify-content: center; flex-direction: column; gap: 1rem; }
@@ -131,6 +121,7 @@
         <button class="lb-btn lb-next" id="lb-next" onclick="lbNav(1)">›</button>
         <div id="lb-counter" class="lightbox-counter"></div>
     </div>
+    {% include "_theme_toggle.html" %}
     <script>
         var lbImages = [], lbIdx = 0;
         function openLightbox(urls, idx) { lbImages = urls; lbIdx = idx; updateLb(); document.getElementById('lightbox').classList.add('open'); document.body.style.overflow = 'hidden'; }

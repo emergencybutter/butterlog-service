@@ -5,33 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ButterLog Aircraft Stats</title>
     <meta name="description" content="Most-flown aircraft on ButterLog, ranked by flights, time, and distance.">
+    {% include "_theme_head.html" %}
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
-
-        :root {
-            --bg-gradient: radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255, 176, 0, 0.06), transparent 60%), #0a0c0d;
-            --panel-bg: #101314;
-            --border-color: rgba(225, 232, 220, 0.10);
-            --text-primary: #eef1ea;
-            --text-secondary: #b0bab6;
-            --text-muted: #7a8682;
-            --primary-color: #ffb000;
-            --primary-hover: #ffc23d;
-            --accent-teal: #36e3c6;
-            --accent-green: #5ad17e;
-            --card-bg: #14181a;
-            --font-display: 'Bricolage Grotesque', sans-serif;
-            --font-body: 'Hanken Grotesk', sans-serif;
-            --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-        }
-
         * { box-sizing: border-box; }
         h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
 
         body {
             font-family: var(--font-body);
-            background: var(--bg-gradient);
-            background-attachment: fixed;
+            background: var(--bg);
             color: var(--text-primary);
             min-height: 100vh;
             margin: 0;
@@ -46,31 +27,23 @@
             width: 100%;
             background: var(--panel-bg);
             border: 1px solid var(--border-color);
-            border-radius: 6px;
+            border-radius: var(--radius);
             padding: 3rem;
-            box-shadow: 0 40px 80px -40px rgba(0, 0, 0, 0.9);
-            animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(15px); }
-            to { opacity: 1; transform: translateY(0); }
+            box-shadow: var(--shadow);
         }
 
         .header { text-align: center; margin-bottom: 2.5rem; }
 
         h1 {
             font-size: 2.5rem;
-            font-weight: 700;
+            font-weight: 800;
             margin: 0 0 0.5rem 0;
-            background: linear-gradient(90deg, var(--primary-color), var(--primary-hover));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: -0.5px;
+            color: var(--text);
+            letter-spacing: -0.02em;
         }
 
         .subtitle {
-            color: var(--primary-hover);
+            color: var(--teal-text);
             font-family: var(--font-mono);
             font-size: 0.75rem;
             letter-spacing: 0.22em;
@@ -94,11 +67,11 @@
             font-weight: 500;
             font-size: 1rem;
             padding: 0.5rem 1rem;
-            border-radius: 8px;
-            transition: all 0.2s;
+            border-radius: var(--radius);
+            transition: color var(--t), background-color var(--t);
         }
-        .nav-tab:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.05); }
-        .nav-tab.active { color: var(--primary-color); background: rgba(255, 176, 0, 0.1); }
+        .nav-tab:hover { color: var(--text-primary); background: var(--surface-2); }
+        .nav-tab.active { color: var(--accent-text); background: var(--accent-weak); }
 
         .boards {
             display: grid;
@@ -110,7 +83,7 @@
         .board {
             background: var(--card-bg);
             border: 1px solid var(--border-color);
-            border-radius: 6px;
+            border-radius: var(--radius);
             padding: 1.75rem 1.5rem;
         }
 
@@ -144,7 +117,7 @@
             color: var(--text-muted);
             min-width: 1.5rem;
         }
-        .srow:nth-child(1) .rank { color: var(--primary-color); }
+        .srow:nth-child(1) .rank { color: var(--accent-text); }
         .icao {
             font-family: var(--font-mono);
             font-weight: 700;
@@ -162,17 +135,17 @@
 
         .bar-track {
             height: 6px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 3px;
+            background: var(--surface-2);
+            border-radius: var(--radius-pill);
             margin: 0.55rem 0 0.4rem;
             overflow: hidden;
         }
         .bar-fill {
             height: 100%;
-            border-radius: 3px;
-            background: linear-gradient(90deg, var(--primary-color), var(--primary-hover));
+            border-radius: var(--radius-pill);
+            background: var(--accent);
         }
-        .srow:nth-child(1) .bar-fill { background: linear-gradient(90deg, var(--primary-hover), var(--accent-teal)); }
+        .srow:nth-child(1) .bar-fill { background: var(--accent); }
 
         .sub {
             font-size: 0.72rem;
@@ -254,5 +227,6 @@
         </div>
         {% endif %}
     </div>
+    {% include "_theme_toggle.html" %}
 </body>
 </html>

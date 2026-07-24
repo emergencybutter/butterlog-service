@@ -1,42 +1,24 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ButterLog Live Traffic Map</title>
     <meta name="description" content="View live flight telemetry and coordinates mapping in real-time.">
-    
-    <!-- CSS & Fonts -->
+
+    <!-- Leaflet -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    {% include "_theme_head.html" %}
 
     <style>
-        :root {
-            --bg-gradient: radial-gradient(circle at 50% 0%, #14181a 0%, #0a0c0d 100%);
-            --panel-bg: rgba(16, 19, 20, 0.82);
-            --border-color: rgba(225, 232, 220, 0.10);
-            --text-primary: #eef1ea;
-            --text-secondary: #b0bab6;
-            --text-muted: #7a8682;
-            --primary-color: #ffb000;
-            --primary-hover: #ffc23d;
-            --accent-pink: #36e3c6;
-            --accent-green: #5ad17e;
-            --accent-red: #ff7a8a;
-            --accent-orange: #ff8a3d;
-            --card-bg: rgba(20, 24, 26, 0.7);
-            --font-display: 'Bricolage Grotesque', sans-serif;
-            --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-        }
-
         h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
 
         body {
             font-family: 'Hanken Grotesk', sans-serif;
             margin: 0;
             padding: 0;
-            background: #0a0c0d;
+            background: var(--bg);
             color: var(--text-primary);
             height: 100vh;
             display: flex;
@@ -64,22 +46,18 @@
             align-items: center;
             gap: 2rem;
             padding: 0.75rem 2rem;
-            background: var(--panel-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--border-color);
-            border-radius: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
         }
 
         .navbar-brand {
+            font-family: var(--font-display);
             font-size: 1.25rem;
-            font-weight: 700;
-            background: linear-gradient(90deg, var(--primary-color), var(--accent-pink));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: -0.5px;
+            font-weight: 800;
+            color: var(--text);
+            letter-spacing: -0.03em;
             text-decoration: none;
         }
 
@@ -94,18 +72,18 @@
             font-weight: 500;
             font-size: 0.9rem;
             padding: 0.4rem 0.8rem;
-            border-radius: 8px;
-            transition: all 0.2s;
+            border-radius: var(--radius);
+            transition: color var(--t), background-color var(--t);
         }
 
         .nav-link:hover {
             color: var(--text-primary);
-            background: rgba(255, 255, 255, 0.05);
+            background: var(--surface-2);
         }
 
         .nav-link.active {
-            color: var(--primary-color);
-            background: rgba(255, 176, 0, 0.12);
+            color: var(--accent-text);
+            background: var(--accent-weak);
         }
 
         /* Glassmorphic Sidebar Overlay */
@@ -116,17 +94,14 @@
             bottom: 1.5rem;
             width: 380px;
             z-index: 10;
-            background: var(--panel-bg);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--border-color);
-            border-radius: 24px;
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
             display: flex;
             flex-direction: column;
             overflow: hidden;
             box-sizing: border-box;
-            transition: transform 0.3s ease;
         }
 
         .sidebar-header {
@@ -149,32 +124,15 @@
         .pulse-dot {
             width: 8px;
             height: 8px;
-            background-color: var(--accent-green);
+            background-color: var(--ok);
             border-radius: 50%;
-            box-shadow: 0 0 0 0 rgba(166, 227, 161, 0.7);
-            animation: pulse 1.6s infinite;
-        }
-
-        @keyframes pulse {
-            0% {
-                transform: scale(0.95);
-                box-shadow: 0 0 0 0 rgba(166, 227, 161, 0.7);
-            }
-            70% {
-                transform: scale(1);
-                box-shadow: 0 0 0 8px rgba(166, 227, 161, 0);
-            }
-            100% {
-                transform: scale(0.95);
-                box-shadow: 0 0 0 0 rgba(166, 227, 161, 0);
-            }
         }
 
         .active-count {
             font-size: 0.8rem;
-            background: rgba(255, 255, 255, 0.06);
+            background: var(--surface-2);
             padding: 0.25rem 0.6rem;
-            border-radius: 12px;
+            border-radius: var(--radius-sm);
             color: var(--text-secondary);
             font-weight: 500;
         }
@@ -198,21 +156,20 @@
         }
 
         .aircraft-card {
-            background: var(--card-bg);
-            border: 1px solid rgba(255, 255, 255, 0.03);
-            border-radius: 16px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             padding: 1rem;
             cursor: pointer;
-            transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: border-color var(--t), transform var(--t);
             display: flex;
             flex-direction: column;
             gap: 0.5rem;
         }
 
         .aircraft-card:hover {
-            border-color: rgba(255, 176, 0, 0.3);
+            border-color: var(--border-strong);
             transform: translateY(-2px);
-            background: rgba(30, 30, 46, 0.75);
         }
 
         .aircraft-card-header {
@@ -230,10 +187,10 @@
         .aircraft-type {
             font-size: 0.8rem;
             font-weight: 600;
-            background: rgba(255, 176, 0, 0.15);
-            color: var(--primary-color);
+            background: var(--accent-weak);
+            color: var(--accent-text);
             padding: 0.15rem 0.5rem;
-            border-radius: 6px;
+            border-radius: var(--radius-sm);
             text-transform: uppercase;
         }
 
@@ -293,33 +250,25 @@
 
         .no-aircraft svg {
             opacity: 0.3;
-            animation: float 3s ease-in-out infinite;
-        }
-
-        @keyframes float {
-            0% { transform: translateY(0px); }
-            50% { transform: translateY(-10px); }
-            100% { transform: translateY(0px); }
         }
 
         /* Leaflet Overrides */
         .leaflet-bar {
-            border: 1px solid var(--border-color) !important;
-            border-radius: 12px !important;
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
             overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3) !important;
+            box-shadow: var(--shadow) !important;
         }
 
         .leaflet-bar a {
-            background: rgba(30, 30, 46, 0.85) !important;
-            backdrop-filter: blur(8px);
+            background: var(--surface) !important;
             color: var(--text-primary) !important;
-            border-bottom: 1px solid var(--border-color) !important;
+            border-bottom: 1px solid var(--border) !important;
         }
 
         .leaflet-bar a:hover {
-            background: rgba(30, 30, 46, 0.95) !important;
-            color: var(--primary-color) !important;
+            background: var(--surface-2) !important;
+            color: var(--accent-text) !important;
         }
 
         .leaflet-container {
@@ -338,24 +287,23 @@
 
         /* Leaflet Popup customization */
         .leaflet-popup-content-wrapper {
-            background: rgba(17, 17, 27, 0.9) !important;
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border-color) !important;
-            border-radius: 16px !important;
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
             color: var(--text-primary) !important;
-            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.4) !important;
+            box-shadow: var(--shadow) !important;
             padding: 0.25rem;
         }
 
         .leaflet-popup-tip {
-            background: rgba(17, 17, 27, 0.9) !important;
-            border: 1px solid var(--border-color) !important;
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
         }
 
         .popup-title {
             font-weight: 700;
             font-size: 1rem;
-            color: var(--primary-color);
+            color: var(--accent-text);
             margin-bottom: 0.25rem;
         }
 
@@ -363,7 +311,7 @@
             font-size: 0.8rem;
             color: var(--text-secondary);
             margin-bottom: 0.5rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-bottom: 1px solid var(--border);
             padding-bottom: 0.25rem;
         }
 

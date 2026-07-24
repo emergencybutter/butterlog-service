@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,18 +9,11 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    {% include "_theme_head.html" %}
     <style>
-        :root {
-            --bg: #0a0c0d; --panel: #101314; --border: rgba(225,232,220,0.10);
-            --text: #eef1ea; --muted: #b0bab6; --dim: #7a8682;
-            --purple: #ffb000; --pink: #36e3c6; --green: #5ad17e; --blue: #36e3c6; --red: #ff7a8a; --yellow: #ffc23d;
-            --font-display: 'Bricolage Grotesque', sans-serif; --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Hanken Grotesk', sans-serif; background:
-                radial-gradient(ellipse 90% 45% at 50% -10%, rgba(255,176,0,0.05), transparent 60%), var(--bg);
-                background-attachment: fixed; color: var(--text); min-height: 100vh; }
+        body { font-family: 'Hanken Grotesk', sans-serif; background: var(--bg);
+                color: var(--text); min-height: 100vh; }
         .icao { font-family: var(--font-display); letter-spacing: -0.02em; }
         .back { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
         .badge, .stat-label, .li-label, .section-title { font-family: var(--font-mono); }
@@ -33,11 +26,8 @@
         .arrow { font-size: 2rem; color: var(--purple); }
         .aircraft { font-size: 1.1rem; color: var(--pink); font-weight: 500; margin-bottom: 0.25rem; }
         .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem; }
-        .badge { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 4px; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1.5rem; }
-        .badge-butter { background: linear-gradient(135deg, #a6e3a1, #36e3c6); color: #0a0c0d; }
-        .badge-smooth { background: linear-gradient(135deg, #94e2d5, #a6e3a1); color: #11111b; }
-        .badge-firm { background: linear-gradient(135deg, #fab387, #f9e2af); color: #11111b; }
-        .badge-hard { background: linear-gradient(135deg, #f38ba8, #eba0ac); color: #11111b; }
+        .badge { display: inline-block; padding: 0.4rem 0.9rem; border-radius: var(--radius-sm); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1.5rem; }
+        /* landing-grade badge colors are defined in _theme_head.html */
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
         .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1.2rem; text-align: center; }
         .stat-label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }
@@ -51,7 +41,7 @@
         #map3d-section { margin-bottom: 2rem; }
         #map3d { position: relative; height: 480px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); background: #05070a; }
         #deck3d { display: block; width: 100%; height: 100%; }
-        .m3d-panel { position: absolute; z-index: 5; background: rgba(16,19,20,0.78); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid var(--border); border-radius: 10px; }
+        .m3d-panel { position: absolute; z-index: 5; background: rgba(16,19,20,0.92); border: 1px solid var(--border); border-radius: var(--radius); }
         .m3d-play { left: 12px; top: 12px; display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
         .m3d-play button { background: none; border: none; color: var(--text); cursor: pointer; font-size: 0.95rem; line-height: 1; padding: 0 0.2rem; }
         .m3d-play input[type=range] { width: 150px; accent-color: var(--purple); cursor: pointer; }
@@ -83,7 +73,7 @@
 <div class="page">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
         <a href="/content" class="back" style="margin-bottom:0">← Flight History</a>
-        {% if is_owner %}<button onclick="deleteShare()" style="background:rgba(243,139,168,0.12);color:#f38ba8;border:1px solid rgba(243,139,168,0.3);border-radius:8px;padding:0.5rem 1rem;cursor:pointer;font-family:inherit;font-size:0.9rem" id="delete-btn">Delete Share</button>
+        {% if is_owner %}<button onclick="deleteShare()" style="background:transparent;color:var(--error);border:1px solid var(--border-strong);border-radius:var(--radius);padding:0.5rem 1rem;cursor:pointer;font-family:var(--font-mono);font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase" id="delete-btn">Delete Share</button>
 <script>
 async function deleteShare(){
     if(!confirm('Delete this shared flight? This cannot be undone.'))return;

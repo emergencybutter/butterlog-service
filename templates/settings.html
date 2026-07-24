@@ -5,32 +5,14 @@
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>ButterLog Notification Settings</title>
             <meta name="description" content="Manage your Discord notification channels for ButterLog flight telemetry.">
+            {% include "_theme_head.html" %}
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
-
-                :root {
-                    --bg-gradient: radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255,176,0,0.06), transparent 60%), #0a0c0d;
-                    --panel-bg: #101314;
-                    --border-color: rgba(225, 232, 220, 0.10);
-                    --text-primary: #eef1ea;
-                    --text-secondary: #b0bab6;
-                    --text-muted: #7a8682;
-                    --primary-color: #ffb000;
-                    --primary-hover: #ffc23d;
-                    --accent-pink: #36e3c6;
-                    --accent-green: #5ad17e;
-                    --accent-red: #ff7a8a;
-                    --card-bg: #14181a;
-                    --font-display: 'Bricolage Grotesque', sans-serif;
-                    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-                }
-
+                * { box-sizing: border-box; }
                 h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
 
                 body {
                     font-family: 'Hanken Grotesk', sans-serif;
-                    background: var(--bg-gradient);
-                    background-attachment: fixed;
+                    background: var(--bg);
                     color: var(--text-primary);
                     min-height: 100vh;
                     margin: 0;
@@ -39,7 +21,6 @@
                     align-items: center;
                     justify-content: flex-start;
                     padding: 3rem 1rem;
-                    box-sizing: border-box;
                 }
 
                 .settings-container {
@@ -47,16 +28,9 @@
                     width: 100%;
                     background: var(--panel-bg);
                     border: 1px solid var(--border-color);
-                    border-radius: 6px;
+                    border-radius: var(--radius);
                     padding: 3rem;
-                    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-                    box-sizing: border-box;
-                    animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-                }
-
-                @keyframes fadeIn {
-                    from { opacity: 0; transform: translateY(15px); }
-                    to { opacity: 1; transform: translateY(0); }
+                    box-shadow: var(--shadow);
                 }
 
                 .header {
@@ -66,19 +40,17 @@
 
                 h1 {
                     font-size: 2.5rem;
-                    font-weight: 700;
+                    font-weight: 800;
                     margin: 0 0 0.5rem 0;
-                    background: linear-gradient(90deg, var(--primary-color), var(--primary-hover));
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    letter-spacing: -0.5px;
+                    color: var(--text);
+                    letter-spacing: -0.02em;
                 }
 
                 .subtitle {
                     color: var(--text-secondary);
                     font-size: 1.1rem;
                     margin: 0;
-                    font-weight: 300;
+                    font-weight: 400;
                 }
 
                 .settings-section {
@@ -119,15 +91,14 @@
 
                 .guild-card {
                     background: var(--card-bg);
-                    border: 1px solid rgba(255, 255, 255, 0.04);
-                    border-radius: 20px;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
                     padding: 1.5rem;
-                    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
-                    transition: border-color 0.3s, transform 0.3s;
+                    transition: border-color var(--t);
                 }
 
                 .guild-card:hover {
-                    border-color: rgba(255, 255, 255, 0.08);
+                    border-color: var(--border-strong);
                 }
 
                 .guild-header {
@@ -135,7 +106,7 @@
                     align-items: center;
                     gap: 0.75rem;
                     margin-bottom: 1.25rem;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+                    border-bottom: 1px solid var(--border);
                     padding-bottom: 0.75rem;
                 }
 
@@ -149,21 +120,21 @@
                     font-size: 0.75rem;
                     font-weight: 600;
                     padding: 0.25rem 0.5rem;
-                    border-radius: 6px;
+                    border-radius: var(--radius-sm);
                     text-transform: uppercase;
                     letter-spacing: 0.5px;
                 }
 
                 .admin-badge {
-                    background: rgba(255, 176, 0, 0.15);
-                    color: var(--primary-color);
-                    border: 1px solid rgba(255, 176, 0, 0.3);
+                    background: var(--accent-weak);
+                    color: var(--accent-text);
+                    border: 1px solid var(--border);
                 }
 
                 .notified-badge {
-                    background: rgba(166, 227, 161, 0.15);
-                    color: var(--accent-green);
-                    border: 1px solid rgba(166, 227, 161, 0.3);
+                    background: var(--teal-weak);
+                    color: var(--teal-text);
+                    border: 1px solid var(--border);
                 }
 
                 .channel-list {
@@ -177,15 +148,14 @@
                     justify-content: space-between;
                     align-items: center;
                     padding: 0.75rem 1rem;
-                    border-radius: 12px;
-                    background: rgba(255, 255, 255, 0.01);
+                    border-radius: var(--radius-sm);
+                    background: var(--surface-2);
                     border: 1px solid transparent;
-                    transition: background-color 0.2s, border-color 0.2s;
+                    transition: background-color var(--t), border-color var(--t);
                 }
 
                 .channel-row:hover {
-                    background-color: rgba(255, 255, 255, 0.03);
-                    border-color: rgba(255, 255, 255, 0.03);
+                    border-color: var(--border);
                 }
 
                 .channel-info {
@@ -217,14 +187,14 @@
                     text-align: center;
                     padding: 3rem 2rem;
                     background: var(--card-bg);
-                    border-radius: 20px;
-                    border: 1px dashed rgba(255, 255, 255, 0.1);
+                    border-radius: var(--radius);
+                    border: 1px dashed var(--border-strong);
                     color: var(--text-secondary);
                 }
 
                 .no-channels-fallback svg {
                     margin-bottom: 1rem;
-                    color: var(--accent-pink);
+                    color: var(--teal-text);
                 }
 
                 .nav-tabs {
@@ -242,18 +212,18 @@
                     font-weight: 500;
                     font-size: 1rem;
                     padding: 0.5rem 1rem;
-                    border-radius: 8px;
-                    transition: all 0.2s;
+                    border-radius: var(--radius);
+                    transition: color var(--t), background-color var(--t);
                 }
 
                 .nav-tab:hover {
                     color: var(--text-primary);
-                    background: rgba(255, 255, 255, 0.05);
+                    background: var(--surface-2);
                 }
 
                 .nav-tab.active {
-                    color: var(--primary-color);
-                    background: rgba(255, 176, 0, 0.1);
+                    color: var(--accent-text);
+                    background: var(--accent-weak);
                 }
 
                 .no-channels-fallback p {
@@ -284,10 +254,10 @@
                     position: absolute;
                     cursor: pointer;
                     top: 0; left: 0; right: 0; bottom: 0;
-                    background-color: rgba(255, 255, 255, 0.08);
-                    transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-                    border-radius: 24px;
-                    border: 1px solid rgba(255, 255, 255, 0.05);
+                    background-color: var(--surface-2);
+                    transition: background-color var(--t), border-color var(--t);
+                    border-radius: var(--radius-pill);
+                    border: 1px solid var(--border);
                 }
 
                 .slider:before {
@@ -297,19 +267,19 @@
                     width: 16px;
                     left: 3px;
                     bottom: 3px;
-                    background-color: var(--text-secondary);
-                    transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    background-color: var(--text-muted);
+                    transition: transform var(--t), background-color var(--t);
                     border-radius: 50%;
                 }
 
                 input:checked + .slider {
-                    background-color: rgba(166, 227, 161, 0.2);
-                    border-color: rgba(166, 227, 161, 0.4);
+                    background-color: var(--teal-weak);
+                    border-color: var(--teal);
                 }
 
                 input:checked + .slider:before {
                     transform: translateX(24px);
-                    background-color: var(--accent-green);
+                    background-color: var(--ok);
                 }
 
                 /* Input and Custom Channels */
@@ -321,38 +291,33 @@
 
                 input[type="text"] {
                     flex: 1;
-                    background: rgba(17, 17, 27, 0.6);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 12px;
+                    background: var(--surface-2);
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
                     padding: 0.75rem 1rem;
                     color: var(--text-primary);
                     font-family: inherit;
                     font-size: 0.95rem;
-                    outline: none;
-                    transition: border-color 0.2s, box-shadow 0.2s;
-                }
-
-                input[type="text"]:focus {
-                    border-color: var(--primary-color);
-                    box-shadow: 0 0 0 3px rgba(255, 176, 0, 0.15);
+                    transition: border-color var(--t);
                 }
 
                 button {
-                    background: var(--primary-color);
-                    color: #11111b;
+                    background: var(--accent);
+                    color: var(--on-accent);
                     border: none;
-                    border-radius: 12px;
+                    border-radius: var(--radius);
                     padding: 0.75rem 1.5rem;
+                    font-family: var(--font-mono);
                     font-weight: 600;
+                    font-size: 0.82rem;
+                    letter-spacing: 0.04em;
+                    text-transform: uppercase;
                     cursor: pointer;
-                    font-family: inherit;
-                    font-size: 0.95rem;
-                    transition: transform 0.2s, background-color 0.2s;
+                    transition: background-color var(--t);
                 }
 
                 button:hover {
-                    background: var(--primary-hover);
-                    transform: translateY(-1px);
+                    background: var(--accent-hover);
                 }
 
                 /* Toast Notifications */
@@ -367,11 +332,11 @@
                 }
 
                 .toast {
-                    background: rgba(30, 30, 46, 0.95);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    background: var(--surface-2);
+                    border: 1px solid var(--border);
                     padding: 1rem 1.5rem;
-                    border-radius: 14px;
-                    box-shadow: 0 15px 30px rgba(0,0,0,0.5);
+                    border-radius: var(--radius);
+                    box-shadow: var(--shadow);
                     display: flex;
                     align-items: center;
                     gap: 0.75rem;
@@ -382,11 +347,11 @@
                 }
 
                 .toast.success {
-                    border-left: 4px solid var(--accent-green);
+                    border-left: 4px solid var(--ok);
                 }
 
                 .toast.error {
-                    border-left: 4px solid var(--accent-red);
+                    border-left: 4px solid var(--error);
                 }
 
                 @keyframes slideIn {
@@ -541,5 +506,6 @@
 
 
             </script>
+            {% include "_theme_toggle.html" %}
         </body>
         </html>

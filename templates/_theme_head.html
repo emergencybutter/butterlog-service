@@ -1,0 +1,180 @@
+<!-- Shared theme layer for all ButterLog service pages.
+     Canonical dark+light tokens + back-compat aliases for legacy variable names.
+     See STYLE_GUIDE.md at the repo root. Include inside <head>. Pages that are
+     dark-locked data-viz (map, share_detail) set data-theme="dark" on <html>. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="theme-color" content="#0f1211" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f5f0" media="(prefers-color-scheme: light)">
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('butterlog-theme');
+      if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  })();
+</script>
+<style>
+  :root {
+    /* Neutrals */
+    --bg:          #0f1211;
+    --surface:     #171a19;
+    --surface-2:   #1e2220;
+    --border:      rgba(230, 235, 225, 0.12);
+    --border-strong: rgba(230, 235, 225, 0.22);
+
+    --text:        #e9ece7;
+    --text-2:      #b9c0ba;
+    --text-muted:  #8a938c;
+
+    /* Accent — amber */
+    --accent:      #e0930c;
+    --accent-hover:#f2a628;
+    --on-accent:   #1a1205;
+    --accent-text: #eaa63a;
+    --accent-weak: rgba(224, 147, 12, 0.14);
+
+    /* Secondary — teal */
+    --teal:        #33b8a1;
+    --teal-text:   #4fd0ba;
+    --teal-weak:   rgba(51, 184, 161, 0.14);
+
+    /* Status */
+    --ok:    #5fbf7a;
+    --warn:  #e0850f;
+    --error: #e0687a;
+
+    --font-display: 'Bricolage Grotesque', sans-serif;
+    --font-body:    'Hanken Grotesk', sans-serif;
+    --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+    --radius:    6px;
+    --radius-sm: 4px;
+    --radius-pill: 999px;
+    --shadow:    0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -16px rgba(0,0,0,0.6);
+    --ease: cubic-bezier(0.3, 0.7, 0.4, 1);
+    --t:    0.2s var(--ease);
+
+    color-scheme: dark;
+
+    /* ---- Back-compat aliases (legacy names used across templates) ---- */
+    --bg-gradient:   var(--bg);
+    --panel-bg:      var(--surface);
+    --panel:         var(--surface);
+    --card-bg:       var(--surface-2);
+    --border-color:  var(--border);
+    --text-primary:   var(--text);
+    --text-secondary: var(--text-2);
+    --muted:          var(--text-2);
+    --dim:            var(--text-muted);
+    --primary-color:  var(--accent);
+    --primary-hover:  var(--accent-hover);
+    --accent-pink:   var(--teal-text);
+    --accent-teal:   var(--teal-text);
+    --pink:          var(--teal-text);
+    --blue:          var(--teal-text);
+    --purple:        var(--accent-text);
+    --accent-green:  var(--ok);
+    --green:         var(--ok);
+    --accent-red:    var(--error);
+    --red:           var(--error);
+    --accent-orange: var(--warn);
+    --accent-yellow: var(--accent-hover);
+    --yellow:        var(--accent-hover);
+  }
+
+  :root[data-theme="light"] {
+    --bg:          #f7f5f0;
+    --surface:     #ffffff;
+    --surface-2:   #f0ede6;
+    --border:      rgba(20, 25, 20, 0.14);
+    --border-strong: rgba(20, 25, 20, 0.26);
+
+    --text:        #1b1e1c;
+    --text-2:      #4a5049;
+    --text-muted:  #6d746c;
+
+    --accent:      #d98a0a;
+    --accent-hover:#c47d05;
+    --on-accent:   #1a1205;
+    --accent-text: #9a5a00;
+    --accent-weak: rgba(217, 138, 10, 0.12);
+
+    --teal:        #128a77;
+    --teal-text:   #0f7d6c;
+    --teal-weak:   rgba(18, 138, 119, 0.10);
+
+    --ok:    #2f8a52;
+    --warn:  #b5670a;
+    --error: #c0384f;
+
+    --shadow: 0 1px 2px rgba(20,25,20,0.06), 0 10px 30px -18px rgba(20,25,20,0.18);
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg:          #f7f5f0;
+      --surface:     #ffffff;
+      --surface-2:   #f0ede6;
+      --border:      rgba(20, 25, 20, 0.14);
+      --border-strong: rgba(20, 25, 20, 0.26);
+
+      --text:        #1b1e1c;
+      --text-2:      #4a5049;
+      --text-muted:  #6d746c;
+
+      --accent:      #d98a0a;
+      --accent-hover:#c47d05;
+      --on-accent:   #1a1205;
+      --accent-text: #9a5a00;
+      --accent-weak: rgba(217, 138, 10, 0.12);
+
+      --teal:        #128a77;
+      --teal-text:   #0f7d6c;
+      --teal-weak:   rgba(18, 138, 119, 0.10);
+
+      --ok:    #2f8a52;
+      --warn:  #b5670a;
+      --error: #c0384f;
+
+      --shadow: 0 1px 2px rgba(20,25,20,0.06), 0 10px 30px -18px rgba(20,25,20,0.18);
+      color-scheme: light;
+    }
+  }
+
+  /* Shared: landing-grade badges (solid, not gradient) */
+  .badge-butter, .badge-smooth { background: var(--ok);     color: #08120c; }
+  .badge-firm                  { background: var(--warn);   color: #1a1205; }
+  .badge-hard                  { background: var(--error);  color: #1a0a0d; }
+  .badge-ongoing               { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); }
+
+  /* Shared: focus */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Floating theme toggle (theme-aware pages) */
+  .theme-toggle {
+    position: fixed; bottom: 1.25rem; left: 1.25rem; z-index: 900;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px;
+    background: var(--surface); color: var(--text-2);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; box-shadow: var(--shadow);
+    transition: color var(--t), border-color var(--t);
+  }
+  .theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+  .theme-toggle svg { width: 18px; height: 18px; display: block; }
+  .theme-toggle .icon-sun { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-sun { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .theme-toggle .icon-sun { display: block; }
+    :root:not([data-theme="dark"]) .theme-toggle .icon-moon { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>

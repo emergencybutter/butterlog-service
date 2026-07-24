@@ -4,105 +4,65 @@
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>ButterLog Service</title>
+            {% include "_theme_head.html" %}
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500;700&display=swap');
-                :root {
-                    --ink: #0a0c0d;
-                    --panel: #101314;
-                    --line: rgba(225, 232, 220, 0.10);
-                    --line-amber: rgba(255, 176, 0, 0.42);
-                    --amber: #ffb000;
-                    --amber-bright: #ffc23d;
-                    --teal: #36e3c6;
-                    --paper: #eef1ea;
-                    --muted: #8b9794;
-                }
                 * { box-sizing: border-box; }
                 body {
-                    font-family: 'Hanken Grotesk', sans-serif;
-                    background: var(--ink);
-                    color: var(--paper);
+                    font-family: var(--font-body);
+                    background: var(--bg);
+                    color: var(--text);
                     display: flex;
                     justify-content: center;
                     align-items: center;
                     min-height: 100vh;
                     margin: 0;
-                    position: relative;
-                    overflow: hidden;
-                }
-                /* chart-grid + beacon backdrop */
-                body::before {
-                    content: "";
-                    position: fixed; inset: 0; z-index: 0;
-                    background-image:
-                        linear-gradient(rgba(225,232,220,0.05) 1px, transparent 1px),
-                        linear-gradient(90deg, rgba(225,232,220,0.05) 1px, transparent 1px);
-                    background-size: 56px 56px;
-                    mask-image: radial-gradient(ellipse 80% 80% at 50% 30%, #000 30%, transparent 75%);
-                    -webkit-mask-image: radial-gradient(ellipse 80% 80% at 50% 30%, #000 30%, transparent 75%);
-                }
-                body::after {
-                    content: "";
-                    position: fixed; inset: 0; z-index: 0;
-                    background: radial-gradient(ellipse 60% 50% at 50% 30%, rgba(255,176,0,0.10), transparent 60%);
                 }
                 .container {
-                    position: relative;
-                    z-index: 1;
                     text-align: center;
-                    background: var(--panel);
+                    background: var(--surface);
                     padding: 3rem 2.5rem;
-                    border-radius: 6px;
-                    box-shadow: 0 40px 80px -40px rgba(0, 0, 0, 0.95);
-                    border: 1px solid var(--line);
+                    border-radius: var(--radius);
+                    box-shadow: var(--shadow);
+                    border: 1px solid var(--border);
                     max-width: 420px;
                     width: 90%;
                 }
-                .container::before, .container::after {
-                    content: ""; position: absolute; width: 14px; height: 14px; border-color: var(--line-amber);
-                }
-                .container::before { top: 10px; left: 10px; border-top: 1.5px solid; border-left: 1.5px solid; }
-                .container::after { bottom: 10px; right: 10px; border-bottom: 1.5px solid; border-right: 1.5px solid; }
                 .eyebrow {
-                    font-family: 'JetBrains Mono', monospace;
-                    font-size: 0.7rem;
-                    letter-spacing: 0.28em;
+                    font-family: var(--font-mono);
+                    font-size: 0.72rem;
+                    letter-spacing: 0.1em;
                     text-transform: uppercase;
-                    color: var(--teal);
+                    color: var(--teal-text);
                     margin-bottom: 1.25rem;
                 }
                 h1 {
-                    font-family: 'Bricolage Grotesque', sans-serif;
-                    color: #fff;
+                    font-family: var(--font-display);
+                    color: var(--text);
                     margin: 0 0 1rem 0;
                     font-size: 2rem;
                     font-weight: 800;
                     letter-spacing: -0.02em;
                 }
                 p {
-                    color: var(--muted);
+                    color: var(--text-2);
                     margin-bottom: 2rem;
                     line-height: 1.6;
                 }
                 .btn {
                     display: inline-block;
-                    background: var(--amber);
-                    color: #1a1205;
+                    background: var(--accent);
+                    color: var(--on-accent);
                     padding: 0.85rem 1.6rem;
-                    border-radius: 4px;
+                    border-radius: var(--radius);
                     text-decoration: none;
-                    font-family: 'JetBrains Mono', monospace;
-                    font-weight: 700;
+                    font-family: var(--font-mono);
+                    font-weight: 600;
                     font-size: 0.82rem;
-                    letter-spacing: 0.08em;
+                    letter-spacing: 0.04em;
                     text-transform: uppercase;
-                    box-shadow: 0 8px 30px -10px rgba(255, 176, 0, 0.5);
-                    transition: transform 0.2s, background-color 0.2s;
+                    transition: background-color var(--t);
                 }
-                .btn:hover {
-                    background: var(--amber-bright);
-                    transform: translateY(-2px);
-                }
+                .btn:hover { background: var(--accent-hover); }
             </style>
         </head>
         <body>
@@ -112,5 +72,6 @@
                 <p>Welcome! Authenticate using your Discord account to get started.</p>
                 <a href="/api/v0/auth/login" class="btn">Log In with Discord</a>
             </div>
+            {% include "_theme_toggle.html" %}
         </body>
         </html>
