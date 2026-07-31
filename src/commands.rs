@@ -14,7 +14,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::error::AppError;
 use crate::handlers::get_user_id_from_session;
@@ -410,6 +409,7 @@ pub fn advertised_commands(statistics: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn pause_is_the_only_stable_command() {
