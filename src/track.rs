@@ -195,9 +195,46 @@ async fn owned_active_flight(
     Ok(status)
 }
 
-/// Merge newly observed flight events into `statistics.events`, keyed by
-/// `(event_type, timestamp)`. Runs inside the caller's transaction against a
-/// locked row so it cannot race a concurrent `PUT /flights/:id`.
+/// Identity of a flight event. The app has emitted both casings over time, so
+/// accept either rather than letting a rename duplicate every event.
+fn event_key(e: &serde_json::Value) -> (String, String) {
+    (
+        e.get("event_type")
+            .or_else(|| e.get("eventType"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        e.get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+/// Union of the two event lists, keyed by `(event_type, timestamp)`.
+///
+/// Returns `None` when `incoming` adds nothing, which is the *common* case: the
+/// app re-sends the whole cumulative list with every 20s batch, so from the
+/// first takeoff onward almost every merge is a no-op. The caller uses this to
+/// skip the write entirely — see `merge_events`.
+fn merged_events(
+    existing: &[serde_json::Value],
+    incoming: &[serde_json::Value],
+) -> Option<Vec<serde_json::Value>> {
+    let mut seen: std::collections::HashSet<(String, String)> =
+        existing.iter().map(event_key).collect();
+    let mut merged = existing.to_vec();
+    for ev in incoming {
+        if seen.insert(event_key(ev)) {
+            merged.push(ev.clone());
+        }
+    }
+    (merged.len() != existing.len()).then_some(merged)
+}
+
+/// Merge newly observed flight events into `statistics.events`. Runs inside the
+/// caller's transaction against a locked row so it cannot race a concurrent
+/// `PUT /flights/:id`.
 async fn merge_events(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flight_id: i64,
@@ -207,41 +244,24 @@ async fn merge_events(
         return Ok(());
     }
 
-    let stats: serde_json::Value =
+    let mut stats: serde_json::Value =
         sqlx::query_scalar("SELECT statistics FROM flights WHERE id = $1 FOR UPDATE")
             .bind(flight_id)
             .fetch_one(&mut **tx)
             .await?;
 
-    let mut stats = stats;
     let existing = stats
         .get("events")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
 
-    let key = |e: &serde_json::Value| {
-        (
-            e.get("event_type")
-                .or_else(|| e.get("eventType"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            e.get("timestamp")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        )
+    // Nothing new: leave the row alone. Writing an identical statistics blob
+    // back on every batch would rewrite a multi-kilobyte JSONB (and its TOAST
+    // chunks) roughly 500 times over a three-hour flight, for no change.
+    let Some(merged) = merged_events(&existing, incoming) else {
+        return Ok(());
     };
-
-    let mut seen: std::collections::HashSet<(String, String)> =
-        existing.iter().map(key).collect();
-    let mut merged = existing;
-    for ev in incoming {
-        if seen.insert(key(ev)) {
-            merged.push(ev.clone());
-        }
-    }
 
     if let Some(obj) = stats.as_object_mut() {
         obj.insert("events".to_string(), serde_json::Value::Array(merged));
@@ -667,6 +687,57 @@ mod tests {
         let n = MAX_POINTS_PER_BATCH + 1;
         let b = batch(0, vec![1; n], vec![1.0; n], vec![2.0; n]);
         assert!(decode_batch(&b).is_err());
+    }
+
+    fn ev(kind: &str, ts: &str) -> serde_json::Value {
+        serde_json::json!({ "event_type": kind, "timestamp": ts })
+    }
+
+    #[test]
+    fn resending_the_same_events_asks_for_no_write() {
+        // The app re-sends its whole cumulative event list on every 20s batch,
+        // so this is the steady state for most of a flight. Returning None is
+        // what stops it rewriting the statistics blob 500 times per flight.
+        let existing = vec![ev("takeoff", "2026-01-01 10:00:00")];
+        assert!(merged_events(&existing, &existing).is_none());
+    }
+
+    #[test]
+    fn a_genuinely_new_event_is_appended() {
+        let existing = vec![ev("takeoff", "2026-01-01 10:00:00")];
+        let incoming = vec![
+            ev("takeoff", "2026-01-01 10:00:00"),
+            ev("top_of_climb", "2026-01-01 10:12:00"),
+        ];
+        let merged = merged_events(&existing, &incoming).expect("should ask for a write");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(event_key(&merged[1]).0, "top_of_climb");
+    }
+
+    #[test]
+    fn the_first_event_of_a_flight_writes() {
+        let merged = merged_events(&[], &[ev("takeoff", "2026-01-01 10:00:00")]).unwrap();
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn both_key_casings_identify_the_same_event() {
+        // The app has emitted both over time; treating them as distinct would
+        // duplicate every event on the flight the casing changed.
+        let existing = vec![serde_json::json!({
+            "eventType": "landing", "timestamp": "2026-01-01 11:30:00"
+        })];
+        let incoming = vec![ev("landing", "2026-01-01 11:30:00")];
+        assert!(merged_events(&existing, &incoming).is_none());
+    }
+
+    #[test]
+    fn same_type_at_a_different_time_is_a_different_event() {
+        // Touch-and-goes produce several landings; keying on type alone would
+        // collapse them into one.
+        let existing = vec![ev("landing", "2026-01-01 11:00:00")];
+        let incoming = vec![ev("landing", "2026-01-01 11:30:00")];
+        assert_eq!(merged_events(&existing, &incoming).unwrap().len(), 2);
     }
 
     #[test]
