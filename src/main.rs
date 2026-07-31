@@ -16,7 +16,10 @@ mod r2;
 mod handlers;
 mod discord;
 mod telemetry;
+mod commands;
+mod live;
 mod templates;
+mod track;
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -72,6 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r2: r2_client,
         discord_http,
     };
+
+    // Ends flights that stopped reporting and prunes expired track points.
+    track::spawn_reaper(state.db.clone());
 
     // Build the router with trace logging
     let app = Router::new()
@@ -131,6 +137,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/v0/multiplayer/ping",
             post(handlers::multiplayer_ping_bearer_handler),
+        )
+        // Live flight track: a pure append that doubles as the liveness
+        // heartbeat, kept off PUT /flights/:id so it never triggers a Discord sync.
+        .route(
+            "/api/v0/flights/:id/track",
+            post(track::upload_track_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(track::MAX_TRACK_DECOMPRESSED as usize)),
+        )
+        .route("/api/v0/flights/:id/track/cursor", get(track::track_cursor_handler))
+        .route("/api/v0/flights/:id/end", post(track::end_flight_handler))
+        // Public, like the map and the flight history pages it mirrors.
+        .route("/api/v0/flights/:id/live", get(live::live_flight_handler))
+        // Owner-only in both directions — the one non-public part of the
+        // live-flight feature.
+        .route(
+            "/api/v0/flights/:id/commands",
+            get(commands::poll_commands_handler).post(commands::issue_command_handler),
+        )
+        .route(
+            "/api/v0/flights/:id/commands/:cid",
+            get(commands::command_status_handler),
+        )
+        .route(
+            "/api/v0/flights/:id/commands/:cid/ack",
+            post(commands::ack_command_handler),
         )
         .route("/api/v0/users/:webhook_token/flights", post(handlers::create_flight_handler))
         .route(
@@ -485,8 +516,31 @@ async fn settings_handler(
 
 async fn flight_detail_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(flight_id): axum::extract::Path<i64>,
 ) -> Result<Response, AppError> {
+    // A flight still in progress gets the live page instead: same detail, but
+    // fetched from /api/v0/flights/:id/live and kept current. Requires a track
+    // to draw — a flight from a client too old to stream one falls through to
+    // the static page, which is exactly what it rendered before.
+    let live: Option<(String, i32, i64)> =
+        sqlx::query_as("SELECT status, track_points, user_id FROM flights WHERE id = $1")
+            .bind(flight_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some((status, track_points, owner_id)) = live {
+        if status != "ended" && track_points > 0 {
+            let viewer = handlers::get_user_id_from_session(&state.db, &headers)
+                .await
+                .ok();
+            let page = templates::LiveDetailPage {
+                flight_id,
+                is_owner: viewer == Some(owner_id),
+            };
+            return Ok(Html(page.render()?).into_response());
+        }
+    }
+
     let row: Option<(String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT f.departure, f.arrival, f.statistics, f.created_at, u.username, u.global_name, f.notes \
          FROM flights f JOIN users u ON f.user_id = u.id WHERE f.id = $1"
@@ -775,6 +829,10 @@ struct MapAircraft {
     heading: f64,
     speed: f64,
     updated_ago_secs: i64,
+    /// This flight is streaming a track, so the popup can link to the live
+    /// detail page. Read from the denormalised counter on `flights` rather than
+    /// counting track rows, keeping the map query a single pass.
+    live: bool,
 }
 
 /// Live position pulled out of a flight's `statistics.current_snapshot`.
@@ -819,8 +877,8 @@ fn aircraft_type_of(statistics: &serde_json::Value) -> String {
 async fn map_data_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let active_flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>)> = sqlx::query_as(
-        "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at, u.username, u.global_name \
+    let active_flights: Vec<(i64, String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>, i32)> = sqlx::query_as(
+        "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at, u.username, u.global_name, f.track_points \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
          WHERE f.updated_at > NOW() - INTERVAL '5 minutes'"
@@ -846,6 +904,7 @@ async fn map_data_handler(
                 heading: pos.heading,
                 speed: pos.speed,
                 updated_ago_secs: now.signed_duration_since(flight.4).num_seconds(),
+                live: flight.7 > 0,
             });
         }
     }
@@ -1326,6 +1385,13 @@ mod tests {
             .route("/api/v0/flights/:id/screenshots/:hash", delete(|| async {}))
             .route("/api/v0/flights/share", post(|| async {}))
             .route("/api/v0/flights/share/:share_id", get(|| async {}).delete(|| async {}))
+            .route("/api/v0/flights/:id/track", post(|| async {}))
+            .route("/api/v0/flights/:id/track/cursor", get(|| async {}))
+            .route("/api/v0/flights/:id/end", post(|| async {}))
+            .route("/api/v0/flights/:id/live", get(|| async {}))
+            .route("/api/v0/flights/:id/commands", get(|| async {}).post(|| async {}))
+            .route("/api/v0/flights/:id/commands/:cid", get(|| async {}))
+            .route("/api/v0/flights/:id/commands/:cid/ack", post(|| async {}))
             .route("/api/v0/multiplayer/ping", post(|| async {}))
             .route("/api/v0/user/:user_id/current", get(|| async {}));
     }

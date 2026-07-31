@@ -16,6 +16,17 @@ pub enum AppError {
     Forbidden(String),
     Storage(String),
     Template(askama::Error),
+    /// The request is well-formed but conflicts with the resource's current
+    /// state (e.g. commanding a flight that is no longer active).
+    Conflict(String),
+    /// The resource existed but is finished and will not accept more writes.
+    Gone(String),
+    /// Body over the configured cap, checked after decompression.
+    PayloadTooLarge(String),
+    /// Semantically invalid parameter (e.g. a heading outside 0-359).
+    Unprocessable(String),
+    /// Rate limit exceeded.
+    TooManyRequests(String),
 }
 
 impl From<askama::Error> for AppError {
@@ -87,6 +98,13 @@ impl IntoResponse for AppError {
             AppError::NotFound(ref msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(ref msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Forbidden(ref msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            AppError::Conflict(ref msg) => (StatusCode::CONFLICT, msg.clone()),
+            AppError::Gone(ref msg) => (StatusCode::GONE, msg.clone()),
+            AppError::PayloadTooLarge(ref msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+            AppError::Unprocessable(ref msg) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
+            }
+            AppError::TooManyRequests(ref msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
         };
 
         let body = Json(json!({
@@ -109,6 +127,11 @@ impl std::fmt::Display for AppError {
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::Storage(msg) => write!(f, "Storage error: {}", msg),
             AppError::Template(err) => write!(f, "Template error: {}", err),
+            AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            AppError::Gone(msg) => write!(f, "Gone: {}", msg),
+            AppError::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
+            AppError::Unprocessable(msg) => write!(f, "Unprocessable: {}", msg),
+            AppError::TooManyRequests(msg) => write!(f, "Too many requests: {}", msg),
         }
     }
 }

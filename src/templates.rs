@@ -12,6 +12,18 @@ pub struct HomePage;
 #[template(path = "map.html")]
 pub struct MapPage;
 
+/// The live variant of the flight detail page. Carries only the flight id: the
+/// page fetches the document itself from `/api/v0/flights/:id/live` and then
+/// keeps it current, so there is nothing to server-render.
+#[derive(Template)]
+#[template(path = "live_detail.html")]
+pub struct LiveDetailPage {
+    pub flight_id: i64,
+    /// Only the pilot gets the control strip. Remote control of a running
+    /// simulator is the one owner-only part of the live-flight feature.
+    pub is_owner: bool,
+}
+
 #[derive(Template)]
 #[template(path = "flight_detail.html")]
 pub struct FlightDetailPage {
@@ -153,6 +165,47 @@ mod tests {
     fn static_pages_render() {
         assert!(HomePage.render().unwrap().contains("ButterLog Backend"));
         assert!(MapPage.render().unwrap().contains("ButterLog Live Traffic Map"));
+    }
+
+    #[test]
+    fn live_page_wires_its_flight_id_into_the_poller() {
+        let html = LiveDetailPage { flight_id: 4242, is_owner: false }.render().unwrap();
+        assert!(html.contains("const FLIGHT_ID = 4242;"));
+        // The shared renderer must be inlined, not just referenced: the live
+        // page and the share page draw with the same code.
+        assert!(html.contains("function renderFlightDoc("));
+        assert!(html.contains("function renderFlight3D("));
+    }
+
+    #[test]
+    fn only_the_pilot_gets_the_sim_control_strip() {
+        // Remote control of a running simulator is the one owner-only part of
+        // the live-flight feature; a visitor must not even receive the markup.
+        let visitor = LiveDetailPage { flight_id: 1, is_owner: false }.render().unwrap();
+        assert!(!visitor.contains("controls-mount"));
+        assert!(!visitor.contains("Sim controls"));
+
+        let owner = LiveDetailPage { flight_id: 1, is_owner: true }.render().unwrap();
+        assert!(owner.contains("controls-mount"));
+        assert!(owner.contains("Sim controls"));
+        // Pause is the stable control; the autopilot ones sit behind the beta
+        // disclosure with their caveat spelled out.
+        assert!(owner.contains("Pause sim"));
+        assert!(owner.contains("beta-chip"));
+        assert!(owner.contains("PMDG"));
+    }
+
+    #[test]
+    fn share_page_uses_the_same_shared_renderer() {
+        let html = ShareDetailPage {
+            share_id: "abc-123".into(),
+            is_owner: false,
+            json_escaped: "{}".into(),
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("function renderFlightDoc("));
+        assert!(html.contains("renderFlightDoc(SHARE_DATA);"));
     }
 
     #[test]

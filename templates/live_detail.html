@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ButterLog Live Flight</title>
+    <meta property="og:site_name" content="ButterLog">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
+    {% include "_theme_head.html" %}
+    {% include "_flight_detail_style.html" %}
+</head>
+<body>
+<div class="page">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+        <a href="/content" class="back" style="margin-bottom:0">← Flight History</a>
+        <a href="/map" class="back" style="margin-bottom:0">Live Map →</a>
+    </div>
+    <div class="live-bar">
+        <span class="live-chip" id="live-chip"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
+        <span class="live-meta" id="live-pilot"></span>
+        <span class="live-meta" id="live-updated"></span>
+    </div>
+    <div id="live-handoff"></div>
+    {% if is_owner %}<div id="controls-mount"></div>{% endif %}
+    <div id="header-mount"></div>
+    <div id="gallery-mount"></div>
+    <div id="map"></div>
+    <div id="map3d-section" style="display:none">
+        <div class="section-title" style="margin-bottom:0.75rem">3D Flight Path</div>
+        <div id="map3d">
+            <canvas id="deck3d"></canvas>
+            <div class="m3d-panel m3d-play">
+                <button id="m3d-play" title="Play flight">▶</button>
+                <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
+            </div>
+            <div class="m3d-panel m3d-controls">
+                <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="58" aria-label="Camera tilt angle"></label>
+                <button id="m3d-reset">Reset view</button>
+            </div>
+            <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
+            <div class="m3d-panel m3d-hint">drag to pan · scroll to zoom · ctrl-drag to tilt</div>
+        </div>
+    </div>
+    <div class="charts" id="charts-mount"></div>
+</div>
+<div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
+    <button class="lb-close" onclick="closeLb()">✕</button>
+    <img id="lb-img" src="" alt="">
+</div>
+{% include "_flight_render.html" %}
+<script>
+(function () {
+    const FLIGHT_ID = {{ flight_id }};
+    const POLL_MS = 10000;
+    let handle = null;
+    let lastEpoch = null;
+    let threeDeeDone = false;
+    let stopped = false;
+
+    const chip = document.getElementById('live-chip');
+    const label = document.getElementById('live-label');
+    const updatedEl = document.getElementById('live-updated');
+
+    function setStatus(doc) {
+        const s = doc.status;
+        chip.className = 'live-chip' + (s === 'active' ? '' : s === 'stale' ? ' is-stale' : ' is-ended');
+        label.textContent = s === 'active' ? 'Live' : s === 'stale' ? 'Signal lost' : 'Flight ended';
+        const ago = doc.updatedAgoSecs;
+        updatedEl.textContent = s === 'ended'
+            ? ''
+            : ago < 60 ? `updated ${ago}s ago` : `updated ${Math.floor(ago / 60)}m ago`;
+        if (doc.pilot) document.getElementById('live-pilot').textContent = doc.pilot.name;
+    }
+
+    // Once the flight is over, the share is the permanent artifact — point at it
+    // rather than leaving a frozen live page as the thing people bookmark.
+    function handoff(doc) {
+        if (!doc.shareId) return;
+        document.getElementById('live-handoff').innerHTML =
+            `<div class="landing-card" style="margin-bottom:1.5rem"><div class="section-title">Flight complete</div>
+             <div>This flight has finished. <a href="/content/flights/share/${encodeURIComponent(doc.shareId)}" style="color:var(--purple)">View the full shared flight →</a></div></div>`;
+    }
+
+    async function poll(first) {
+        if (stopped) return;
+        // `since` must be omitted rather than sent empty: the query parses as an
+        // integer, and `?since=` would be a 400. A first poll that found no
+        // samples yet leaves lastEpoch null, so this is reachable.
+        const url = (first || lastEpoch == null)
+            ? `/api/v0/flights/${FLIGHT_ID}/live`
+            : `/api/v0/flights/${FLIGHT_ID}/live?since=${lastEpoch}`;
+        let doc;
+        try {
+            const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+            if (res.status === 304) { schedule(); return; }
+            if (!res.ok) throw new Error(res.status);
+            doc = await res.json();
+        } catch (e) {
+            // A failed poll is not fatal: keep the last good render on screen
+            // and try again on the next tick.
+            updatedEl.textContent = 'reconnecting…';
+            schedule();
+            return;
+        }
+
+        if (first) {
+            handle = renderFlightDoc(doc);
+        } else {
+            handle.append(doc);
+        }
+        if (typeof renderControls === 'function') renderControls(doc);
+        if (doc.lastEpoch != null) lastEpoch = doc.lastEpoch;
+        handle.setCurrent(doc.current);
+        setStatus(doc);
+
+        if (doc.status === 'ended') {
+            handoff(doc);
+            // The 3D view assumes a complete track — its camera fit and scrub
+            // both span the whole flight — so it only appears once there is one.
+            if (!threeDeeDone) {
+                threeDeeDone = true;
+                renderFlight3D({
+                    transposedData: {
+                        timestamps: handle.state.timestamps.map((t, i, a) => i === 0 ? t : t - a[i-1]),
+                        latitudes: handle.state.lats,
+                        longitudes: handle.state.lons,
+                        altitudes: handle.state.alts,
+                    },
+                    summary: handle.state.summary,
+                });
+            }
+            // Nothing more will change; stop polling rather than hammering a
+            // finished flight forever.
+            stopped = true;
+            return;
+        }
+        schedule();
+    }
+
+    let timer = null;
+    function schedule() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        // Pause while the tab is hidden — a background tab left on a 10-hour
+        // flight would otherwise poll thousands of times nobody sees. The
+        // visibility handler below restarts it.
+        if (document.hidden || stopped) return;
+        timer = setTimeout(() => { timer = null; poll(false); }, POLL_MS);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !stopped && handle && !timer) poll(false);
+    });
+
+    poll(true);
+})();
+</script>
+{% if is_owner %}
+<script>
+// Sim control strip. Rendered only for the pilot, and only for the commands the
+// connected client advertises — so a pilot who has not enabled remote control
+// sees nothing here rather than a row of buttons that do nothing.
+(function () {
+    const FLIGHT_ID = {{ flight_id }};
+    const mount = document.getElementById('controls-mount');
+    let built = null;
+
+    async function send(kind, params, btn) {
+        const original = btn.textContent;
+        btn.disabled = true;
+        setStatus(btn, '', 'sending…');
+        try {
+            const res = await fetch(`/api/v0/flights/${FLIGHT_ID}/commands`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: kind, params }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                setStatus(btn, 'bad', body.error || `failed (${res.status})`);
+                return;
+            }
+            const { commandId } = await res.json();
+            await track(commandId, btn);
+        } catch (e) {
+            setStatus(btn, 'bad', 'network error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    }
+
+    function setStatus(btn, cls, text) {
+        let el = btn.nextElementSibling;
+        if (!el || !el.classList.contains('ctl-status')) {
+            el = document.createElement('span');
+            el.className = 'ctl-status';
+            btn.after(el);
+        }
+        el.className = 'ctl-status' + (cls ? ' ' + cls : '');
+        el.textContent = text;
+    }
+
+    // Poll the command until it reaches a terminal state. `unsupported` is the
+    // one that matters: it means the sim took the command and the aircraft
+    // ignored it, which is exactly what happens on add-on autopilots.
+    async function track(commandId, btn) {
+        for (let i = 0; i < 40; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            let s;
+            try {
+                const res = await fetch(`/api/v0/flights/${FLIGHT_ID}/commands/${commandId}`, { credentials: 'include' });
+                if (!res.ok) continue;
+                s = await res.json();
+            } catch (e) { continue; }
+            if (s.status === 'pending' || s.status === 'delivered') continue;
+            if (s.status === 'applied') { setStatus(btn, 'ok', 'applied'); return; }
+            setStatus(btn, 'bad', s.detail ? `${s.status}: ${s.detail}` : s.status);
+            return;
+        }
+        setStatus(btn, 'bad', 'no response');
+    }
+
+    const BETA = {
+        set_heading_bug: { label: 'Set heading', field: { key: 'heading', min: 0, max: 359, step: 1, unit: '°' } },
+        set_altitude: { label: 'Set altitude', field: { key: 'feet', min: 0, max: 60000, step: 100, unit: 'ft' } },
+        set_vertical_speed: { label: 'Set V/S', field: { key: 'fpm', min: -6000, max: 6000, step: 100, unit: 'fpm' } },
+        ap_heading_mode: { label: 'HDG mode', toggle: true },
+        ap_nav_mode: { label: 'NAV mode', toggle: true },
+    };
+
+    window.renderControls = function (doc) {
+        const available = doc.commands || [];
+        // Rebuild only when the advertised set actually changes, so a click is
+        // never yanked out from under the pointer on a poll.
+        const key = available.join(',') + '|' + doc.status;
+        if (key === built) return;
+        built = key;
+
+        if (available.length === 0 || doc.status === 'ended') {
+            mount.innerHTML = available.length === 0 && doc.status !== 'ended'
+                ? `<div class="ctl-card"><div class="section-title">Sim controls</div>
+                   <div class="ctl-note">Enable “Allow remote commands” in ButterLog’s settings to control this flight from here.</div></div>`
+                : '';
+            return;
+        }
+
+        const betaAvailable = Object.keys(BETA).filter(k => available.includes(k));
+        mount.innerHTML = `
+            <div class="ctl-card">
+                <div class="section-title">Sim controls</div>
+                ${available.includes('pause') ? `<div class="ctl-row">
+                    <button class="ctl-btn" data-cmd="pause" data-state="on">Pause sim</button>
+                    <button class="ctl-btn" data-cmd="pause" data-state="off">Resume</button>
+                </div>` : ''}
+                ${betaAvailable.length ? `<details class="beta-disclosure">
+                    <summary>Autopilot controls <span class="beta-chip">Beta</span></summary>
+                    <div class="ctl-note">These drive the aircraft’s <em>default</em> autopilot. Study-level add-ons (PMDG, Fenix and similar) run their own and will ignore them — the command will be delivered and nothing will move.</div>
+                    <div class="ctl-row" style="margin-top:0.85rem">
+                        ${betaAvailable.map(k => {
+                            const c = BETA[k];
+                            if (c.toggle) {
+                                return `<button class="ctl-btn" data-cmd="${k}" data-enabled="true">${c.label} on</button>
+                                        <button class="ctl-btn" data-cmd="${k}" data-enabled="false">${c.label} off</button>`;
+                            }
+                            return `<span class="ctl-field">${c.label}
+                                <input type="number" id="f-${k}" min="${c.field.min}" max="${c.field.max}" step="${c.field.step}" aria-label="${c.label}">
+                                ${c.field.unit}</span>
+                                <button class="ctl-btn" data-cmd="${k}" data-field="${c.field.key}" data-input="f-${k}">Send</button>`;
+                        }).join('')}
+                    </div>
+                </details>` : ''}
+            </div>`;
+
+        mount.querySelectorAll('button[data-cmd]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const kind = btn.dataset.cmd;
+                let params = {};
+                if (btn.dataset.state) params = { state: btn.dataset.state };
+                else if (btn.dataset.enabled) params = { enabled: btn.dataset.enabled === 'true' };
+                else if (btn.dataset.field) {
+                    const input = document.getElementById(btn.dataset.input);
+                    const v = parseFloat(input.value);
+                    if (Number.isNaN(v)) { setStatus(btn, 'bad', 'enter a value'); return; }
+                    params[btn.dataset.field] = v;
+                }
+                send(kind, params, btn);
+            });
+        });
+    };
+})();
+</script>
+{% endif %}
+</body>
+</html>

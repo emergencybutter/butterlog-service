@@ -22,6 +22,6 @@ image = { version = "0.25", default-features = false, features = ["webp", "jpeg"
 sha2 = "0.10"
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
 flate2 = "1.0"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 askama = "0.12"
 

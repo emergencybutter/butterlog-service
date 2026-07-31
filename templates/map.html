@@ -465,6 +465,7 @@
                         <div class="popup-detail">Altitude: <span>${Math.round(ac.altitude).toLocaleString()} ft</span></div>
                         <div class="popup-detail">Speed: <span>${Math.round(ac.speed)} kts</span></div>
                         <div class="popup-detail">Heading: <span>${Math.round(ac.heading)}°</span></div>
+                        ${ac.live ? `<div class="popup-detail" style="margin-top:0.5rem"><a href="/content/flights/${ac.flight_id}" style="color:var(--purple);text-decoration:none">Watch this flight live →</a></div>` : ''}
                     `;
                     
                     if (markers.has(ac.flight_id)) {

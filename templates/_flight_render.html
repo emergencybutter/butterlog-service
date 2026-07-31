@@ -1,0 +1,444 @@
+<script>
+// Shared renderer for a flight document (the app's FlightDetailShare shape).
+// Used by both the share page, which gets one static document, and the live
+// page, which gets the same shape from /api/v0/flights/:id/live and then feeds
+// it deltas. Keeping one implementation is why the live read model was built to
+// emit the share's shape in the first place.
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function reconstructTs(deltas) {
+    if (!deltas || !deltas.length) return [];
+    const ts = [deltas[0]];
+    for (let i = 1; i < deltas.length; i++) ts.push(ts[i-1] + deltas[i]);
+    return ts;
+}
+function fmtDur(m) { const h = Math.floor(m/60); return h > 0 ? h+'h '+(m%60)+'m' : m+'m'; }
+function fmtDate(s) {
+    if (!s) return '';
+    try { return new Date(s.replace(' ','T')+'Z').toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'}); } catch { return s; }
+}
+
+// Renders the document and returns a handle the live page uses to keep it
+// current without tearing the page down on every poll.
+function renderFlightDoc(d) {
+    const td = d.transposedData || d.transposed_data || {};
+    const state = {
+        timestamps: reconstructTs(td.timestamps),
+        lats: (td.latitudes || []).slice(),
+        lons: (td.longitudes || []).slice(),
+        alts: (td.altitudes || []).slice(),
+        ias: (td.ias || []).slice(),
+        vs: (td.vspeed || []).slice(),
+        pitch: (td.pitch || []).slice(),
+        summary: d.summary || {},
+        screenshots: d.screenshots || [],
+        map: null, path: null, planeMarker: null, charts: [], userMoved: false,
+    };
+
+    function headerHtml() {
+        const sum = state.summary;
+        const dep = sum.startIcao || sum.departure || '?';
+        const arr = sum.endIcao || sum.arrival || '?';
+        const ac = sum.aircraftTitle || sum.airframe_name || '';
+        const rIcao = (sum.resolvedIcao || sum.resolved_icao || '').trim();
+        const rAirline = (sum.resolvedAirline || sum.resolved_airline || '').trim();
+        const deducedHtml = (rIcao || rAirline)
+            ? `<div class="meta">Deduced: ${esc([rIcao, rAirline].filter(Boolean).join(' · '))}</div>`
+            : '';
+        const dur = sum.durationMinutes || sum.duration_minutes || 0;
+        const maxAlt = (sum.maxAltitude || sum.max_altitude || 0).toFixed(0);
+        const maxGs = (sum.maxGroundSpeed || sum.max_ground_speed || 0).toFixed(0);
+        const fuel = (sum.fuelConsumed || sum.fuel_consumed || 0).toFixed(1);
+        const events = sum.events || [];
+        const lEvt = events.filter(e => (e.eventType||e.event_type) === 'landing').pop();
+        const lvs = lEvt && (lEvt.touchdownFpm || lEvt.touchdown_fpm);
+        let badgeHtml = '';
+        if (lvs != null) {
+            const a = Math.abs(lvs);
+            const [cls, lbl] = a < 150 ? ['butter','BUTTER'] : a < 250 ? ['smooth','SMOOTH'] : a < 350 ? ['firm','FIRM'] : ['hard','HARD'];
+            badgeHtml = `<div class="badge badge-${cls}">${lbl} — ${Math.round(a)} fpm</div>`;
+        }
+        const notesText = (sum.notes || '').trim();
+        const notesHtml = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${esc(notesText)}</div></div>` : '';
+        return `
+        <div style="margin-bottom:1.5rem">
+            <div class="route"><span class="icao">${esc(dep)}</span><span class="arrow">→</span><span class="icao">${esc(arr)}</span></div>
+            <div class="aircraft">${esc(ac)}</div>
+            ${deducedHtml}
+            <div class="meta">${fmtDate(sum.startTime||sum.start_time)} · ${fmtDur(dur)}</div>
+            ${badgeHtml}
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Max Altitude</div><div class="stat-value">${maxAlt} ft</div></div>
+            <div class="stat-card"><div class="stat-label">Max Speed (GS)</div><div class="stat-value">${maxGs} kt</div></div>
+            <div class="stat-card"><div class="stat-label">Fuel Consumed</div><div class="stat-value">${fuel} gal</div></div>
+            <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${fmtDur(dur)}</div></div>
+        </div>
+        ${lEvt ? `<div class="landing-card"><div class="section-title">Landing Performance</div><div class="landing-grid">
+            ${lvs != null ? `<div><div class="li-label">Touchdown VS</div><div class="li-val">${Math.round(lvs)} fpm</div></div>` : ''}
+            ${(lEvt.landingG||lEvt.landing_g) != null ? `<div><div class="li-label">Landing G</div><div class="li-val">${(lEvt.landingG||lEvt.landing_g).toFixed(2)} G</div></div>` : ''}
+            ${(lEvt.offsetPercent||lEvt.offset_percent) != null ? `<div><div class="li-label">Offset</div><div class="li-val">${(lEvt.offsetPercent||lEvt.offset_percent).toFixed(1)}%</div></div>` : ''}
+            ${(lEvt.thresholdDistFt||lEvt.threshold_dist_ft) != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${Math.round(lEvt.thresholdDistFt||lEvt.threshold_dist_ft)} ft</div></div>` : ''}
+        </div></div>` : ''}
+        ${notesHtml}`;
+    }
+
+    function drawHeader() { document.getElementById('header-mount').innerHTML = headerHtml(); }
+
+    function eventMarkersOnMap() {
+        if (!state.map) return;
+        (state.summary.events || []).forEach(e => {
+            const type = e.eventType||e.event_type;
+            if (!e.latitude || !e.longitude) return;
+            const key = type + '|' + e.timestamp;
+            state.map._blSeen = state.map._blSeen || {};
+            if (state.map._blSeen[key]) return;
+            state.map._blSeen[key] = true;
+            const color = type==='takeoff'?'#a6e3a1':type==='landing'?'#f38ba8':'#89b4fa';
+            const label = type==='takeoff'?'Takeoff':type==='landing'?'Landing':type==='top_of_climb'?'TOC':'TOD';
+            L.circleMarker([e.latitude,e.longitude],{radius:7,color,fillColor:color,fillOpacity:0.9,weight:2}).bindTooltip(label).addTo(state.map);
+        });
+    }
+
+    function drawMap() {
+        if (state.lats.length === 0) { document.getElementById('map').style.display = 'none'; return; }
+        document.getElementById('map').style.display = '';
+        const coords = state.lats.map((la, i) => [la, state.lons[i]]);
+        if (!state.map) {
+            state.map = L.map('map');
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'© OSM © CARTO',subdomains:'abcd',maxZoom:19}).addTo(state.map);
+            state.path = L.polyline(coords,{color:'#ffb000',weight:2.5,opacity:0.9}).addTo(state.map);
+            state.map.fitBounds(state.path.getBounds().pad(0.12));
+            // Once the viewer pans or zooms, stop stealing the view from them on
+            // every poll.
+            state.map.on('dragstart zoomstart', () => { state.userMoved = true; });
+        } else {
+            state.path.setLatLngs(coords);
+            if (!state.userMoved) state.map.fitBounds(state.path.getBounds().pad(0.12));
+        }
+        eventMarkersOnMap();
+    }
+
+    // Chart series, thinned to ~300 points so a long flight stays responsive.
+    function buildSeries() {
+        const ts = state.timestamps;
+        const step = Math.max(1, Math.floor(ts.length / 300));
+        const ad=[], id=[], vd=[], pd=[], sampledTs=[];
+        const t0 = ts[0];
+        for (let i=0; i<ts.length; i+=step) {
+            const x = ts[i] - t0;
+            ad.push({x, y:state.alts[i]||0}); id.push({x, y:state.ias[i]||0});
+            vd.push({x, y:state.vs[i]||0}); pd.push({x, y:state.pitch[i]||0});
+            sampledTs.push(ts[i]);
+        }
+        return {ad, id, vd, pd, sampledTs, t0};
+    }
+
+    function drawCharts() {
+        if (state.timestamps.length === 0) return;
+        const series = buildSeries();
+        if (state.charts.length) {
+            // Rebuilding the datasets and updating in place is cheap at these
+            // sizes and avoids tearing down four canvases every poll.
+            const data = [series.ad, series.id, series.vd, series.pd];
+            state.charts.forEach((c, i) => { c.data.datasets[0].data = data[i]; c.update('none'); });
+            return;
+        }
+        const t0 = series.t0;
+        const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
+        const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':t;
+        const eventMarks = [], shotMarks = [];
+        function remapMarks() {
+            eventMarks.length = 0; shotMarks.length = 0;
+            const s = buildSeries();
+            const gap = s.sampledTs.length>1 ? Math.abs(s.sampledTs[1]-s.sampledTs[0]) : 30;
+            (state.summary.events || []).forEach(e => {
+                const type = e.eventType||e.event_type;
+                const ets = e.timestamp;
+                if (!ets) return;
+                let epoch;
+                try { epoch = new Date(ets.replace(' ','T')+'Z').getTime()/1000; } catch (_) { return; }
+                if (!epoch || isNaN(epoch)) return;
+                let bi=-1, bd=Infinity;
+                for (let i=0;i<s.sampledTs.length;i++) { const dd=Math.abs(s.sampledTs[i]-epoch); if (dd<bd) { bd=dd; bi=i; } }
+                if (bi<0 || bd > gap*1.5 + 30) return;
+                eventMarks.push({x:epoch-t0, color:evColor(type), label:evLabel(type)});
+            });
+            state.screenshots.forEach((sc, i) => {
+                let epoch = null;
+                if (typeof sc.timestamp === 'number') epoch = sc.timestamp;
+                else if (sc.timestamp) { try { epoch = new Date(String(sc.timestamp).replace(' ','T')+'Z').getTime()/1000; } catch (_) { epoch = null; } }
+                if (!epoch || isNaN(epoch)) return;
+                let bi=-1, bd=Infinity;
+                for (let j=0;j<s.sampledTs.length;j++) { const dd=Math.abs(s.sampledTs[j]-epoch); if (dd<bd) { bd=dd; bi=j; } }
+                if (bi<0 || bd > gap*1.5 + 30) return;
+                shotMarks.push({x:epoch-t0, lb:i});
+            });
+        }
+        remapMarks();
+        state.remapMarks = remapMarks;
+        const shotHit = (chart, x, y) => {
+            const xs = chart.scales.x, area = chart.chartArea;
+            if (!xs || !area || y < area.bottom - 22) return -1;
+            let best=-1, bestd=10;
+            shotMarks.forEach(m => { const dd=Math.abs(xs.getPixelForValue(m.x)-x); if (dd<bestd) { bestd=dd; best=m.lb; } });
+            return best;
+        };
+        const eventMarkerPlugin = {
+            id:'eventMarkers',
+            afterDatasetsDraw(chart) {
+                const ctx = chart.ctx, area = chart.chartArea, xs = chart.scales.x;
+                if (!area || !xs) return;
+                ctx.save();
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'center';
+                eventMarks.forEach(mm => {
+                    const px = xs.getPixelForValue(mm.x);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([4,3]);
+                    ctx.moveTo(px, area.top);
+                    ctx.lineTo(px, area.bottom);
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = mm.color;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = mm.color;
+                    ctx.fillText(mm.label, px, area.top + 8);
+                });
+                ctx.font = '12px sans-serif';
+                ctx.textBaseline = 'bottom';
+                ctx.strokeStyle = '#9399b2';
+                shotMarks.forEach(m => {
+                    const px = xs.getPixelForValue(m.x);
+                    if (px==null || isNaN(px)) return;
+                    ctx.beginPath();
+                    ctx.setLineDash([]);
+                    ctx.moveTo(px, area.bottom);
+                    ctx.lineTo(px, area.bottom - 12);
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.fillText('📷', px, area.bottom - 12);
+                });
+                ctx.restore();
+            }
+        };
+        const opts = () => ({
+            responsive:true, maintainAspectRatio:true, animation:false,
+            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:(items)=>items.length?new Date((t0+items[0].parsed.x)*1000).toISOString().slice(11,16):''}}},
+            scales:{
+                x:{type:'linear',ticks:{color:'#6c7086',maxTicksLimit:6,callback:(v)=>new Date((t0+v)*1000).toISOString().slice(11,16)},grid:{color:'rgba(255,255,255,0.04)'}},
+                y:{ticks:{color:'#6c7086'},grid:{color:'rgba(255,255,255,0.04)'}},
+            },
+            onClick:(evt, els, chart) => {
+                const lb = shotHit(chart, evt.x, evt.y);
+                if (lb >= 0 && typeof openLb === 'function') openLb(lb);
+            },
+            onHover:(evt, els, chart) => {
+                chart.canvas.style.cursor = shotHit(chart, evt.x, evt.y) >= 0 ? 'pointer' : 'default';
+            },
+        });
+        const mk = (id2, lbl, data, color) => {
+            const el = document.createElement('div'); el.className='chart-card';
+            el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas>`;
+            document.getElementById('charts-mount').appendChild(el);
+            state.charts.push(new Chart(document.getElementById(id2),{type:'line',data:{datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]}));
+        };
+        mk('ca','Altitude (ft)',series.ad,'#ffb000');
+        mk('ci','Airspeed (kt)',series.id,'#36e3c6');
+        mk('cv','Vert Speed (fpm)',series.vd,'#ff7a8a');
+        mk('cp','Pitch (°)',series.pd,'#ffc23d');
+    }
+
+    function drawGallery() {
+        if (state.screenshots.length === 0) return;
+        const urls = state.screenshots.map(s=>s.url);
+        window._lbUrls = urls;
+        const thumbs = urls.map((u,i)=>`<img src="${u}" loading="lazy" onclick="openLb(${i})" alt="">`).join('');
+        document.getElementById('gallery-mount').innerHTML=`<div class="gallery-section"><div class="section-title">Screenshots</div><div class="gallery">${thumbs}</div></div>`;
+    }
+
+    drawHeader();
+    drawGallery();
+    drawMap();
+    drawCharts();
+
+    return {
+        state,
+        /// Append a delta document's samples and redraw the moving parts.
+        append(doc) {
+            const t = doc.transposedData || doc.transposed_data || {};
+            const ts = reconstructTs(t.timestamps);
+            if (ts.length) {
+                state.timestamps = state.timestamps.concat(ts);
+                state.lats = state.lats.concat(t.latitudes || []);
+                state.lons = state.lons.concat(t.longitudes || []);
+                state.alts = state.alts.concat(t.altitudes || []);
+                state.ias = state.ias.concat(t.ias || []);
+                state.vs = state.vs.concat(t.vspeed || []);
+                state.pitch = state.pitch.concat(t.pitch || []);
+            }
+            if (doc.summary) state.summary = doc.summary;
+            if (doc.screenshots) {
+                const grew = doc.screenshots.length !== state.screenshots.length;
+                state.screenshots = doc.screenshots;
+                if (grew) drawGallery();
+            }
+            if (ts.length || doc.summary) {
+                drawHeader();
+                drawMap();
+                if (state.remapMarks) state.remapMarks();
+                drawCharts();
+            }
+        },
+        /// Drop a marker at the aircraft's reported position, so a viewer sees
+        /// where it is even before the next track sample lands.
+        setCurrent(pos) {
+            if (!pos || !state.map) return;
+            const ll = [pos.latitude, pos.longitude];
+            if (!state.planeMarker) {
+                state.planeMarker = L.circleMarker(ll, {radius:6,color:'#ffffff',fillColor:'#ffb000',fillOpacity:1,weight:2}).addTo(state.map);
+            } else {
+                state.planeMarker.setLatLng(ll);
+            }
+            state.planeMarker.bindTooltip(`${Math.round(pos.altitude)} ft · ${Math.round(pos.speed)} kt · ${Math.round(pos.heading)}°`);
+        },
+    };
+}
+
+// 3D flight path over real terrain (deck.gl + free AWS terrarium elevation
+// tiles textured with ESRI World Imagery — no API key). Renders the track as an
+// altitude-graded line floating above the terrain mesh, with an animated marker.
+//
+// Only meaningful once the track is complete: the camera fit and the playback
+// scrub both assume the whole flight is present, so the live page holds this
+// back until the flight ends rather than re-framing under the viewer every poll.
+function renderFlight3D(d) {
+    if (typeof deck === 'undefined' || !deck.TerrainLayer) return;
+    const td = d.transposedData || d.transposed_data || {};
+    const lats = td.latitudes || [], lons = td.longitudes || [], altsFt = td.altitudes || [];
+    if (lats.length < 2) return;
+    const M = 0.3048; // feet → metres (MSL, matches terrain elevation)
+
+    const N = lats.length, cap = 800, step = Math.max(1, Math.floor(N / cap));
+
+    // True-scale altitude is only a few pixels tall against a whole flight, so the
+    // climb is invisible. Scale height up — terrain AND track by the same factor,
+    // to keep the above-ground relationship honest — until it reads at a glance.
+    // Adaptive: aim for the peak to stand ~18% of the flight's ground span tall.
+    let maxAltFt = 0, minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+    for (let i = 0; i < N; i++) {
+        if (altsFt[i] > maxAltFt) maxAltFt = altsFt[i];
+        if (lons[i] < minLng) minLng = lons[i]; if (lons[i] > maxLng) maxLng = lons[i];
+        if (lats[i] < minLat) minLat = lats[i]; if (lats[i] > maxLat) maxLat = lats[i];
+    }
+    const wM = (maxLng - minLng) * 111320 * Math.cos((minLat + maxLat) / 2 * Math.PI / 180);
+    const hM = (maxLat - minLat) * 111320, diagM = Math.hypot(wM, hM) || 1;
+    const maxAltM = maxAltFt * M;
+    const EXAG = Math.max(1, Math.min(8, maxAltM > 0 ? (0.18 * diagM) / maxAltM : 1));
+    const Z = M * EXAG; // feet → exaggerated metres
+
+    // Downsample to keep the geometry light on long flights.
+    const pts = [];
+    for (let i = 0; i < N; i += step) pts.push([lons[i], lats[i], (altsFt[i] || 0) * Z]);
+    const last = N - 1;
+    if (pts[pts.length - 1][0] !== lons[last] || pts[pts.length - 1][1] !== lats[last])
+        pts.push([lons[last], lats[last], (altsFt[last] || 0) * Z]);
+    // Altitude → colour: teal (low) to amber (high), matching the site palette.
+    const altColor = ft => {
+        const x = Math.max(0, Math.min(1, maxAltFt ? ft / maxAltFt : 0));
+        return [Math.round(54 + 201 * x), Math.round(227 - 51 * x), Math.round(198 - 198 * x)];
+    };
+    const segs = [];
+    for (let i = 0; i < pts.length - 1; i++) segs.push({ path: [pts[i], pts[i + 1]], color: altColor(pts[i][2] / Z) });
+    // Faint vertical "curtain" dropping from the track to the ground to convey height.
+    const drops = [], dstep = Math.max(1, Math.floor(pts.length / 60));
+    for (let i = 0; i < pts.length; i += dstep) drops.push({ path: [pts[i], [pts[i][0], pts[i][1], 0]] });
+
+    const events = (d.summary && d.summary.events) || [];
+    const evLabel = t => t === 'takeoff' ? 'Takeoff' : t === 'landing' ? 'Landing' : t === 'top_of_climb' ? 'TOC' : t === 'top_of_descent' ? 'TOD' : t;
+    const evColor = t => t === 'takeoff' ? [90, 209, 126] : t === 'landing' ? [255, 122, 138] : [54, 227, 198];
+    const evPts = events.filter(e => e.latitude && e.longitude).map(e => {
+        const type = e.eventType || e.event_type;
+        return { position: [e.longitude, e.latitude, (e.altitude || 0) * Z], color: evColor(type), label: evLabel(type) };
+    });
+
+    // Fit the horizontal extent (bounds already computed above), tilt, look along route.
+    const section = document.getElementById('map3d-section');
+    section.style.display = ''; // size the container before measuring / creating Deck
+    const el = document.getElementById('map3d');
+    const vp = new deck.WebMercatorViewport({ width: el.clientWidth || 800, height: el.clientHeight || 480 });
+    const fit = vp.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 60 });
+    const bearing = (() => {
+        const r = Math.PI / 180, a = pts[0], b = pts[pts.length - 1], dLon = (b[0] - a[0]) * r;
+        const y = Math.sin(dLon) * Math.cos(b[1] * r);
+        const x = Math.cos(a[1] * r) * Math.sin(b[1] * r) - Math.sin(a[1] * r) * Math.cos(b[1] * r) * Math.cos(dLon);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    })();
+    const initView = { longitude: fit.longitude, latitude: fit.latitude, zoom: Math.max(1, fit.zoom - 0.6), pitch: 58, bearing, maxPitch: 85 };
+
+    const terrain = new deck.TerrainLayer({
+        id: 'terrain', minZoom: 0, maxZoom: 14,
+        elevationDecoder: { rScaler: 256 * EXAG, gScaler: EXAG, bScaler: EXAG / 256, offset: -32768 * EXAG },
+        elevationData: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+        texture: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        operation: 'terrain+draw',
+    });
+    const statics = [
+        terrain,
+        new deck.PathLayer({ id: 'drops', data: drops, getPath: p => p.path, getColor: [255, 176, 0, 45], widthUnits: 'pixels', getWidth: 1, widthMinPixels: 1 }),
+        new deck.PathLayer({ id: 'track', data: segs, getPath: p => p.path, getColor: p => p.color, widthUnits: 'pixels', getWidth: 4, widthMinPixels: 2, capRounded: true, jointRounded: true }),
+        new deck.ScatterplotLayer({ id: 'events', data: evPts, getPosition: e => e.position, getRadius: 6, radiusUnits: 'pixels', getFillColor: e => e.color, stroked: true, getLineColor: [10, 12, 13], lineWidthMinPixels: 1.5 }),
+        new deck.TextLayer({ id: 'evlabels', data: evPts, getPosition: e => e.position, getText: e => e.label, getSize: 11, getColor: [238, 241, 234], getPixelOffset: [0, -14], fontFamily: 'monospace', background: true, getBackgroundColor: [16, 19, 20, 190], backgroundPadding: [4, 2] }),
+    ];
+    const marker = progress => {
+        const f = progress * (pts.length - 1), i = Math.floor(f), frac = f - i;
+        const a = pts[i], b = pts[Math.min(i + 1, pts.length - 1)];
+        const pos = [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac, a[2] + (b[2] - a[2]) * frac];
+        return [
+            new deck.ScatterplotLayer({ id: 'plane-glow', data: [pos], getPosition: p => p, getRadius: 14, radiusUnits: 'pixels', getFillColor: [255, 176, 0, 70] }),
+            new deck.ScatterplotLayer({ id: 'plane', data: [pos], getPosition: p => p, getRadius: 6, radiusUnits: 'pixels', getFillColor: [255, 255, 255], stroked: true, getLineColor: [255, 176, 0], lineWidthMinPixels: 2 }),
+        ];
+    };
+
+    // Track the live view so the tilt slider can change pitch without losing pan/zoom.
+    let curView = { ...initView };
+    const pitchSlider = document.getElementById('m3d-pitch');
+    const deckgl = new deck.Deck({
+        canvas: 'deck3d', initialViewState: initView,
+        controller: { dragRotate: true, inertia: true },
+        onViewStateChange: ({ viewState }) => { curView = viewState; pitchSlider.value = Math.round(viewState.pitch); },
+        layers: [...statics, ...marker(0)],
+    });
+    pitchSlider.oninput = () => { curView = { ...curView, pitch: +pitchSlider.value }; deckgl.setProps({ initialViewState: curView }); };
+    document.getElementById('m3d-maxalt').textContent = Math.round(maxAltFt).toLocaleString() + ' ft';
+    document.getElementById('m3d-exag').textContent = EXAG > 1.05 ? 'vertical ×' + EXAG.toFixed(1) + ' (exaggerated)' : '';
+
+    // Playback controls.
+    const playBtn = document.getElementById('m3d-play'), scrub = document.getElementById('m3d-scrub');
+    let progress = 0, playing = false, lastTs = 0;
+    const DURATION = 25000; // ms to fly the whole path
+    const render = () => deckgl.setProps({ layers: [...statics, ...marker(progress)] });
+    const tick = ts => {
+        if (!playing) return;
+        if (!lastTs) lastTs = ts;
+        progress = Math.min(1, progress + (ts - lastTs) / DURATION);
+        lastTs = ts;
+        scrub.value = Math.round(progress * 1000);
+        render();
+        if (progress >= 1) { playing = false; playBtn.textContent = '↻'; return; }
+        requestAnimationFrame(tick);
+    };
+    playBtn.onclick = () => {
+        if (progress >= 1) progress = 0;
+        playing = !playing;
+        playBtn.textContent = playing ? '❚❚' : '▶';
+        if (playing) { lastTs = 0; requestAnimationFrame(tick); }
+    };
+    scrub.oninput = () => { playing = false; playBtn.textContent = progress >= 1 ? '↻' : '▶'; progress = scrub.value / 1000; render(); };
+    document.getElementById('m3d-reset').onclick = () => { curView = { ...initView }; pitchSlider.value = 58; deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } }); };
+}
+
+function openLb(i){ document.getElementById('lb-img').src=window._lbUrls[i]; document.getElementById('lightbox').classList.add('open'); document.body.style.overflow='hidden'; }
+function closeLb(){ document.getElementById('lightbox').classList.remove('open'); document.body.style.overflow=''; }
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeLb();});
+</script>

@@ -84,6 +84,45 @@ Updates only the pilot notes for a flight.
     *   `400 Bad Request`: Notes too long.
     *   `404 Not Found`: Flight ID does not exist for this user.
 
+#### Upload a Track Batch
+`POST /flights/:id/track`
+
+Appends telemetry samples to an in-progress flight, so it can be watched live on the web. Kept separate from `PUT /flights/:id` because that endpoint triggers a Discord notification sync and so cannot be sent frequently; this one is a pure append and also acts as the flight's liveness heartbeat (it bumps `updated_at`).
+
+*   **Request Body:** gzip-compressed JSON (`Content-Type: application/octet-stream`), at most **256KB decompressed**, at most **2000 samples**:
+    ```jsonc
+    {
+      "startEpoch": 1753900123,   // absolute unix seconds of the first sample
+      "points": {                 // columnar, same layout as a share's transposedData
+        "timestamps": [0, 10, 10],  // deltas; the first is 0
+        "latitudes": [], "longitudes": [],
+        "altitudes": [], "ias": [], "vspeed": [], "pitch": [], "roll": []
+      },
+      "events": []                // FlightEvent objects, merged into statistics.events
+    }
+    ```
+    `latitudes`/`longitudes` must match the timestamp count. The other columns may be omitted entirely, but if present must also match — a short column would misalign every later sample. Samples without a usable fix are dropped.
+*   **Response:**
+    *   `200 OK`: `{ "lastEpoch", "accepted", "duplicates", "totalPoints", "status" }`.
+    *   `400 Bad Request`: malformed batch or mismatched columns.
+    *   `410 Gone`: the flight has ended; stop sending.
+    *   `413 Payload Too Large` / `429 Too Many Requests`.
+
+Writes are `ON CONFLICT DO NOTHING` on `(flight_id, sample_epoch)`, so **the endpoint is idempotent**: the sample timestamp is the natural key. Re-sending a batch after a timeout, resuming from a stale cursor, or two clients briefly racing are all no-ops. There is no sequence number and no resync handshake, and batches may arrive out of order.
+
+#### Track Cursor
+`GET /flights/:id/track/cursor`
+
+Where the server thinks the track ends: `{ "lastEpoch", "totalPoints", "status" }`. A bandwidth optimisation for a client that lost its local cursor — replaying the whole flight would also be correct, just wasteful.
+
+#### End a Flight
+`POST /flights/:id/end`
+
+*   **Request Body (JSON, optional):** `reason` (`landed` | `sim_closed` | `abandoned`, default `landed`), `shareId` (string, optional).
+*   **Response:** `204 No Content`. Calling it twice is not an error.
+
+Sets `status = 'ended'`, so the live page can hand off to the permanent share rather than showing a frozen track. Without this call a flight is ended by a reaper 30 minutes after its last update.
+
 ---
 
 ### Screenshot Management
@@ -178,9 +217,11 @@ Returns every flight updated in the last 5 minutes, for the live map. Intentiona
       "altitude": 0.0,
       "heading": 0.0,
       "speed": 0.0,
-      "updated_ago_secs": 12
+      "updated_ago_secs": 12,
+      "live": true
     }
     ```
+    `live` marks a flight that is streaming a track, so a client can link to the live detail page.
 
 #### Aircraft Usage Stats (public)
 `GET /api/v0/stats/aircraft`
@@ -235,6 +276,63 @@ Identical response to the numeric-id endpoint above, but keyed by the pilot's Di
     *   `discord_id` (string): The pilot's Discord user id (snowflake).
 *   **Response:** `200 OK` with the same object as above, or `null` if that Discord user has no active flight (or isn't a known Butterlog user).
 
+#### Live Flight Document (public)
+`GET /api/v0/flights/:id/live`
+
+The in-progress equivalent of a share: the same document shape (`summary`, `transposedData`, `screenshots`), so one client-side renderer draws both. Public, mirroring the live map and the flight history pages.
+
+*   **Query:** `since=<epoch>` returns only samples newer than that timestamp, and omits `summary`/`screenshots` (setting `summaryUnchanged: true`) — a typical delta at a 10s poll is a few hundred bytes. Omit it for the whole track.
+*   **Response:** `200 OK`
+    ```jsonc
+    {
+      "status": "active" | "stale" | "ended",
+      "lastEpoch": 1753900155,       // feed back as ?since=
+      "updatedAgoSecs": 6,
+      "shareId": null,               // set once ended and shared; the page links to it
+      "trackPoints": 1204,
+      "commands": ["pause"],         // what the pilot's client will accept, may be empty
+      "pilot": { "userId": 12, "name": "..." },
+      "current": { "latitude", "longitude", "altitude", "heading", "speed", "phase" },
+      "summary": { /* share-shaped FlightSummary */ },
+      "transposedData": { /* columnar samples */ },
+      "screenshots": [ { "timestamp", "url" } ],
+      "remoteFlightId": 123
+    }
+    ```
+    `active` means reporting; `stale` means no update for over 120s (a frozen track, not a stopped aeroplane); `ended` means the app said so or the reaper gave up. Sends an `ETag`; an unchanged poll answers `304`.
+
+---
+
+### Sim Commands
+
+Commands sent from the web to a running simulator. **Owner-only in both directions** — this is the one non-public part of the live-flight feature. The desktop app also has to opt in (`Allow remote commands`, off by default) before it will poll at all.
+
+Command types, with stability. `pause` is **stable**; the rest are **beta** because they drive the aircraft's *default* autopilot, and study-level add-ons implement their own and ignore the stock events — the command is delivered, reported applied, and nothing moves.
+
+| `type` | params | stability |
+|---|---|---|
+| `pause` | `state`: `on` \| `off` \| `toggle` | stable |
+| `set_heading_bug` | `heading`: 0–359 | beta |
+| `ap_heading_mode` | `enabled`: bool | beta |
+| `ap_nav_mode` | `enabled`: bool | beta |
+| `set_vertical_speed` | `fpm`: −6000…6000 | beta |
+| `set_altitude` | `feet`: 0…60000 | beta |
+
+#### Issue a Command
+`POST /api/v0/flights/:id/commands` — body `{ "type", "params", "ttlSecs" }` (TTL default 30s, max 120s, so a command issued while the app was offline cannot fire on reconnect).
+
+*   `202 Accepted`: `{ "commandId", "status": "pending", "stability" }`.
+*   `403` not the owner · `409` flight not active · `422` bad parameter · `429` over 30/min.
+
+#### Poll for Commands (the app)
+`GET /api/v0/flights/:id/commands?wait=25` — long-poll. Returns pending commands immediately if any exist, otherwise holds up to `wait` seconds (max 25) and answers `204`. Delivery is stamped as the commands are claimed, so a command is handed out **at most once** even if the ack never arrives.
+
+#### Command Status
+`GET /api/v0/flights/:id/commands/:cid` — `{ "id", "type", "stability", "status", "detail" }`, where status is `pending`, `delivered`, or a terminal `applied` / `unsupported` / `rejected` / `expired`. `unsupported` is a first-class outcome: it is what the app reports when the connected sim has no binding for the command.
+
+#### Acknowledge a Command (the app)
+`POST /api/v0/flights/:id/commands/:cid/ack` — body `{ "result", "detail" }`. Always `204`, including for an already-acked command, so a retrying client is never told it failed.
+
 ---
 
 ### Discord Notification Settings
@@ -252,7 +350,7 @@ These endpoints use the web session (the `token` cookie set by the OAuth callbac
 *   `/` -- landing page with Discord login.
 *   `/content` -- latest flights from every pilot.
 *   `/content/flight/user/:user_id` -- one pilot's flights.
-*   `/content/flights/:id` -- flight detail page.
+*   `/content/flights/:id` -- flight detail page. While the flight is in progress and streaming a track, this serves the **live** variant instead: the same detail, polled from `/api/v0/flights/:id/live`, with a LIVE badge and (for the pilot) the sim control strip.
 *   `/content/flights/share/:share_id` -- shared flight page (map, charts, screenshots).
 *   `/content/settings` -- Discord notification settings (requires login).
 *   `/map` -- live traffic map.

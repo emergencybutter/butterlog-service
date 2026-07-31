@@ -1,0 +1,85 @@
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Hanken Grotesk', sans-serif; background: var(--bg);
+            color: var(--text); min-height: 100vh; }
+    .icao { font-family: var(--font-display); letter-spacing: -0.02em; }
+    .back { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
+    .badge, .stat-label, .li-label, .section-title { font-family: var(--font-mono); }
+    .stat-value, .li-val { font-family: var(--font-display); }
+    .page { max-width: 900px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+    .back { color: var(--dim); text-decoration: none; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 0.4rem; margin-bottom: 1.5rem; }
+    .back:hover { color: var(--purple); }
+    .route { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.4rem; }
+    .icao { font-size: 2.2rem; font-weight: 700; }
+    .arrow { font-size: 2rem; color: var(--purple); }
+    .aircraft { font-size: 1.1rem; color: var(--pink); font-weight: 500; margin-bottom: 0.25rem; }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem; }
+    .badge { display: inline-block; padding: 0.4rem 0.9rem; border-radius: var(--radius-sm); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 1.5rem; }
+    /* landing-grade badge colors are defined in _theme_head.html */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1.2rem; text-align: center; }
+    .stat-label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }
+    .stat-value { font-size: 1.4rem; font-weight: 700; }
+    .landing-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1.5rem; margin-bottom: 2rem; }
+    .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.5px; color: var(--pink); font-weight: 600; margin-bottom: 0.75rem; }
+    .landing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1rem; }
+    .li-label { color: var(--dim); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; margin-bottom: 0.2rem; }
+    .li-val { font-size: 1.3rem; font-weight: 700; }
+    #map { height: 400px; border-radius: 6px; margin-bottom: 2rem; border: 1px solid var(--border); }
+    #map3d-section { margin-bottom: 2rem; }
+    #map3d { position: relative; height: 480px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); background: #05070a; }
+    #deck3d { display: block; width: 100%; height: 100%; }
+    .m3d-panel { position: absolute; z-index: 5; background: rgba(16,19,20,0.92); border: 1px solid var(--border); border-radius: var(--radius); }
+    .m3d-play { left: 12px; top: 12px; display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; }
+    .m3d-play button { background: none; border: none; color: var(--text); cursor: pointer; font-size: 0.95rem; line-height: 1; padding: 0 0.2rem; }
+    .m3d-play input[type=range] { width: 150px; accent-color: var(--purple); cursor: pointer; }
+    .m3d-controls { right: 12px; top: 12px; padding: 0; overflow: hidden; display: flex; align-items: stretch; }
+    .m3d-controls button { background: none; border: none; color: var(--text); cursor: pointer; font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.5rem 0.8rem; }
+    .m3d-controls button:hover { color: var(--purple); }
+    .m3d-tilt { display: flex; align-items: center; gap: 0.45rem; padding: 0.4rem 0.7rem; border-right: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+    .m3d-tilt input[type=range] { width: 84px; accent-color: var(--purple); cursor: pointer; }
+    .m3d-legend { left: 12px; bottom: 12px; padding: 0.5rem 0.7rem; font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .m3d-legend .bar { width: 130px; height: 8px; border-radius: 4px; margin-top: 0.35rem; background: linear-gradient(90deg, #36e3c6, #ffb000); }
+    .m3d-legend .ends { display: flex; justify-content: space-between; margin-top: 0.25rem; color: var(--dim); }
+    .m3d-hint { right: 12px; bottom: 12px; padding: 0.35rem 0.6rem; font-family: var(--font-mono); font-size: 0.6rem; color: var(--dim); letter-spacing: 0.03em; }
+    @media (max-width: 600px) { .m3d-hint { display: none; } .m3d-play input[type=range] { width: 90px; } .m3d-tilt input[type=range] { width: 54px; } }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 2rem; }
+    @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+    .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; }
+    .chart-card canvas { max-height: 200px; }
+    .gallery { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 0.5rem; scrollbar-width: thin; }
+    .gallery img { width: 160px; height: 100px; object-fit: cover; border-radius: 8px; flex-shrink: 0; border: 1px solid var(--border); cursor: pointer; transition: transform 0.2s; }
+    .gallery img:hover { transform: scale(1.04); }
+    .gallery-section { margin-bottom: 2rem; }
+    .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1000; align-items: center; justify-content: center; }
+    .lightbox.open { display: flex; }
+    .lightbox img { max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: 10px; }
+    .lb-close { position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: rgba(255,255,255,0.6); font-size: 1.5rem; cursor: pointer; padding: 0.5rem; }
+    /* Live flight additions */
+    .live-bar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+    .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--error); box-shadow: 0 0 0 0 rgba(255,122,138,0.7); animation: livePulse 2s infinite; }
+    @keyframes livePulse { 70% { box-shadow: 0 0 0 8px rgba(255,122,138,0); } 100% { box-shadow: 0 0 0 0 rgba(255,122,138,0); } }
+    @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+    .live-chip { display: inline-flex; align-items: center; gap: 0.5rem; font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; padding: 0.35rem 0.7rem; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); color: var(--text); }
+    .live-chip.is-stale { color: var(--muted); }
+    .live-chip.is-stale .live-dot { background: var(--muted); animation: none; }
+    .live-chip.is-ended { color: var(--muted); }
+    .live-chip.is-ended .live-dot { background: var(--muted); animation: none; }
+    .live-meta { font-family: var(--font-mono); font-size: 0.72rem; color: var(--dim); letter-spacing: 0.06em; text-transform: uppercase; }
+    /* Sim control strip (pilot only) */
+    .ctl-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem; margin-bottom: 2rem; }
+    .ctl-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+    .ctl-btn { background: transparent; color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0.5rem 1rem; cursor: pointer; font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    .ctl-btn:hover:not(:disabled) { border-color: var(--purple); color: var(--purple); }
+    .ctl-btn:disabled { opacity: 0.5; cursor: default; }
+    .ctl-note { font-family: var(--font-mono); font-size: 0.7rem; color: var(--dim); margin-top: 0.5rem; letter-spacing: 0.03em; }
+    .ctl-status { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 0.3rem; }
+    .ctl-status.ok { color: var(--success, #a6e3a1); }
+    .ctl-status.bad { color: var(--error); }
+    .beta-chip { display: inline-block; font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.1rem 0.35rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--muted); margin-left: 0.4rem; vertical-align: middle; }
+    .beta-disclosure { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 0.85rem; }
+    .beta-disclosure summary { cursor: pointer; font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .beta-disclosure summary:hover { color: var(--purple); }
+    .ctl-field { display: inline-flex; align-items: center; gap: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .ctl-field input { width: 5.5rem; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 0.4rem 0.5rem; font-family: var(--font-mono); font-size: 0.8rem; }
+</style>
