@@ -634,6 +634,10 @@ type FlightListRow = (
     Option<String>,
     Option<String>,
     String,
+    // status
+    String,
+    // track_points
+    i32,
 );
 
 /// Minimal HTML escaping for user-controlled text rendered into attributes/markup.
@@ -681,7 +685,7 @@ async fn content_handler(
     // Latest flights across every pilot
     let flights: Vec<FlightListRow> = sqlx::query_as(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
-                u.id, u.username, u.global_name, u.avatar, u.discord_id \
+                u.id, u.username, u.global_name, u.avatar, u.discord_id, f.status, f.track_points \
          FROM flights f JOIN users u ON f.user_id = u.id \
          ORDER BY f.created_at DESC LIMIT 50"
     )
@@ -701,7 +705,7 @@ async fn content_user_handler(
     // Latest flights for a single pilot
     let flights: Vec<FlightListRow> = sqlx::query_as(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
-                u.id, u.username, u.global_name, u.avatar, u.discord_id \
+                u.id, u.username, u.global_name, u.avatar, u.discord_id, f.status, f.track_points \
          FROM flights f JOIN users u ON f.user_id = u.id \
          WHERE f.user_id = $1 ORDER BY f.created_at DESC LIMIT 50"
     )
@@ -768,8 +772,14 @@ async fn render_flights_page(
                 _ => "https://cdn.discordapp.com/embed/avatars/0.png".to_string(),
             };
             let screenshots = screenshots_by_flight.remove(&flight_id).unwrap_or_default();
+            // A flight that is still running and has a track to draw gets the
+            // live page; the badge says LIVE rather than ONGOING so the card
+            // reads as something worth clicking.
+            let is_live = flight.10 != "ended" && flight.11 > 0;
             let landing_badge = if stats.get("landing_snapshot").is_some() {
                 landing_badge_html(&stats).unwrap_or_default()
+            } else if is_live {
+                r#"<div class="badge badge-live">LIVE</div>"#.to_string()
             } else {
                 r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string()
             };
@@ -778,6 +788,11 @@ async fn render_flights_page(
                     .get(&flight_id)
                     .map(|sid| format!("/content/flights/share/{}", sid))
                     .unwrap_or_default(),
+                live_href: if is_live {
+                    format!("/content/flights/{}", flight_id)
+                } else {
+                    String::new()
+                },
                 avatar_url,
                 pilot: flight.7.unwrap_or(flight.6),
                 dep: flight.1,

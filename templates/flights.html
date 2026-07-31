@@ -350,7 +350,7 @@
             {% else %}
             <div class="flight-list">
                 {% for flight in flights %}
-                {% if !flight.share_href.is_empty() %}<a href="{{ flight.share_href }}" class="flight-card-link">{% else %}<div class="flight-card-link" style="cursor:default">{% endif %}
+                {% if !flight.live_href.is_empty() %}<a href="{{ flight.live_href }}" class="flight-card-link">{% else if !flight.share_href.is_empty() %}<a href="{{ flight.share_href }}" class="flight-card-link">{% else %}<div class="flight-card-link" style="cursor:default">{% endif %}
                 <div class="flight-card">
                     <div class="flight-top">
                         <div class="flight-main">
@@ -380,7 +380,7 @@
                     <div class="screenshot-gallery">{% for url in flight.screenshots %}<img class="screenshot-thumb" src="{{ url }}" alt="Screenshot {{ loop.index }}" loading="lazy" onclick='openLightbox({{ flight.urls_json|safe }}, {{ loop.index0 }})'>{% endfor %}</div>
                     {% endif %}
                 </div>
-                {% if !flight.share_href.is_empty() %}</a>{% else %}</div>{% endif %}
+                {% if !flight.live_href.is_empty() || !flight.share_href.is_empty() %}</a>{% else %}</div>{% endif %}
                 {% endfor %}
             </div>
             {% endif %}

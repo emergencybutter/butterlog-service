@@ -72,6 +72,11 @@ pub struct FlightsPage {
 pub struct FlightCard {
     /// Link to the share page; empty when the flight has no share.
     pub share_href: String,
+    /// Link to the live flight page; empty unless the flight is in progress and
+    /// streaming a track. Takes precedence over `share_href`, which an
+    /// in-progress flight does not have yet — without this the one card a
+    /// viewer most wants to click is the only one that isn't clickable.
+    pub live_href: String,
     pub avatar_url: String,
     pub pilot: String,
     pub dep: String,
@@ -253,6 +258,7 @@ mod tests {
             my_flights_active: false,
             flights: vec![FlightCard {
                 share_href: String::new(),
+                live_href: String::new(),
                 avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
                 pilot: "Pilot".into(),
                 dep: "EGLL".into(),
@@ -274,6 +280,59 @@ mod tests {
         assert!(html.contains("British Airways"));
         // Unshared flights render as a non-link card
         assert!(html.contains(r#"<div class="flight-card-link" style="cursor:default">"#));
+    }
+
+    /// A card links to whichever page actually exists for that flight, and an
+    /// in-progress flight must not fall through to the non-clickable branch —
+    /// it is the card a viewer is most likely to want.
+    #[test]
+    fn a_live_flight_card_links_to_the_live_page() {
+        fn card(live: &str, share: &str) -> FlightCard {
+            FlightCard {
+                share_href: share.into(),
+                live_href: live.into(),
+                avatar_url: "a.png".into(),
+                pilot: "Pilot".into(),
+                dep: "EGLL".into(),
+                arr: "In Flight".into(),
+                airframe: "A320".into(),
+                resolved_icao: String::new(),
+                resolved_airline: String::new(),
+                simulator: "MSFS".into(),
+                date_str: "June 09, 2026, 12:00 UTC".into(),
+                landing_badge: r#"<div class="badge badge-live">LIVE</div>"#.into(),
+                screenshots: vec![],
+                urls_json: "[]".into(),
+            }
+        }
+        fn render(c: FlightCard) -> String {
+            FlightsPage {
+                subtitle: "s".into(),
+                history_active: true,
+                show_my_flights: false,
+                my_flights_href: String::new(),
+                my_flights_active: false,
+                flights: vec![c],
+            }
+            .render()
+            .unwrap()
+        }
+
+        // In progress: links live, and is a real anchor rather than a dead div.
+        let live = render(card("/content/flights/42", ""));
+        assert!(live.contains(r#"href="/content/flights/42""#));
+        assert!(!live.contains(r#"style="cursor:default""#));
+        assert!(live.contains("LIVE"));
+
+        // A flight that is both live and already shared prefers the live page,
+        // since that is the one still changing.
+        let both = render(card("/content/flights/42", "/content/flights/share/abc"));
+        assert!(both.contains(r#"href="/content/flights/42""#));
+        assert!(!both.contains("/content/flights/share/abc"));
+
+        // Finished and shared: unchanged behaviour.
+        let done = render(card("", "/content/flights/share/abc"));
+        assert!(done.contains(r#"href="/content/flights/share/abc""#));
 
         let empty = FlightsPage {
             subtitle: "s".into(),
