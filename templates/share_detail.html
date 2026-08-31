@@ -28,6 +28,8 @@ async function deleteShare(){
 }
 </script>{% endif %}
     </div>
+    <div id="pfd-mount" class="pfd is-hidden"></div>
+    <div id="replay-mount" class="rp is-hidden"></div>
     <div id="header-mount"></div>
     <div id="gallery-mount"></div>
     <div id="map"></div>
@@ -53,14 +55,25 @@ async function deleteShare(){
     <button class="lb-close" onclick="closeLb()">✕</button>
     <img id="lb-img" src="" alt="">
 </div>
-<script>
+<script data-sim="{{ simulator }}">
 const SHARE_DATA = {{ json_escaped|safe }};
+// Not in the share blob - it has never carried it - so the page supplies it.
+// The renderer needs it to read the track's raw pitch and roll. It arrives as
+// an attribute rather than interpolated into this script: the value comes from
+// a client-submitted statistics blob, and attribute escaping is the escaping
+// askama actually does.
+SHARE_DATA.simulator = document.currentScript.dataset.sim || "";
 </script>
 {% include "_flight_render.html" %}
+{% include "_pfd.html" %}
+{% include "_replay.html" %}
 <script>
-// A share is a finished flight: the whole document is present up front, so both
-// the 2D and 3D views render once and never change.
-renderFlightDoc(SHARE_DATA);
+// A share is a finished flight: the whole document is present up front, so the
+// 2D and 3D views render once and never change, and the replay can take the
+// whole track immediately.
+const handle = renderFlightDoc(SHARE_DATA);
+// Before the 3D view, which binds its own play button to the same cursor.
+handle.enableReplay();
 renderFlight3D(SHARE_DATA);
 </script>
 </body>

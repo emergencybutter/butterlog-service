@@ -397,9 +397,16 @@
         // Add zoom control top left
         L.control.zoom({ position: 'topleft' }).addTo(map);
 
-        // Dark Matter tiles
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            maxZoom: 20
+        // Esri's Dark Gray Canvas. CARTO's keyless basemap now serves tiles
+        // watermarked "API KEY REQUIRED" - still HTTP 200, so nothing errors,
+        // the notice is painted into the image. Esri needs no key and is
+        // already a dependency here (the 3D view textures terrain from it).
+        // Its canvas is only tiled to z16, so anything deeper upscales the z16
+        // tile rather than requesting a "Map data not yet available" placeholder.
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
+            maxZoom: 20,
+            maxNativeZoom: 16
         }).addTo(map);
 
         // Store active markers
@@ -519,7 +526,11 @@
                 // Adjust map view on first load to encompass active planes
                 if (isFirstLoad && markers.size > 0) {
                     const group = new L.featureGroup(Array.from(markers.values()).map(m => m.marker));
-                    map.fitBounds(group.getBounds().pad(0.3));
+                    // A single aircraft gives degenerate bounds, which fitBounds
+                    // answers with the map's maxZoom - street level under an
+                    // aeroplane at FL450. Cap it at an en-route zoom, which also
+                    // keeps the view inside the basemap's native tiles.
+                    map.fitBounds(group.getBounds().pad(0.3), { maxZoom: 9 });
                     isFirstLoad = false;
                 }
             } catch (err) {

@@ -37,8 +37,25 @@ pub struct CurrentPosition {
     pub latitude: f64,
     pub longitude: f64,
     pub altitude: f64,
+    /// True heading as the sim reported it. Kept for the map tooltip, which has
+    /// always shown this; the flight display uses `magnetic_heading`.
     pub heading: f64,
     pub speed: f64,
+    /// Attitude in the aviation convention: nose-up and right-wing-down are
+    /// positive, whichever sim the sample came from. See `extract_current`.
+    pub pitch: f64,
+    pub roll: f64,
+    pub ias: f64,
+    pub vertical_speed: f64,
+    /// What the altimeter reads, falling back to MSL when the client did not
+    /// report it.
+    pub indicated_altitude: f64,
+    /// Heading a compass would show, in 0..360.
+    pub magnetic_heading: f64,
+    /// Altimeter subscale setting, in inHg. Both sims report inches - MSFS's
+    /// `KOHLSMAN SETTING HG` and X-Plane's `barometer_setting` - so there is
+    /// nothing to convert. Zero means the client never reported one.
+    pub altimeter_setting: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
 }
@@ -81,6 +98,10 @@ pub struct LiveSummary {
 #[serde(rename_all = "camelCase")]
 pub struct LiveDocument {
     pub status: String,
+    /// Which sim produced the samples. The renderer needs it to read the
+    /// track's raw pitch and roll, whose signs differ per sim; see
+    /// `extract_current` for the same rule applied to the live snapshot.
+    pub simulator: String,
     pub last_epoch: Option<i64>,
     pub updated_ago_secs: i64,
     pub share_id: Option<String>,
@@ -207,12 +228,49 @@ fn extract_current(statistics: &serde_json::Value) -> Option<CurrentPosition> {
         keys.iter()
             .find_map(|k| snapshot.get(*k).and_then(|v| v.as_f64()))
     };
+
+    // The two sims disagree on attitude sign and on what `HDG` means, and the
+    // app forwards each one raw. MSFS uses the SimConnect convention — `Pitch`
+    // positive nose-down, `Roll` positive left-wing-down, `HDG` true — while
+    // X-Plane's `theta`/`phi`/`mag_psi` are already nose-up, right-wing-down
+    // and magnetic. Normalise here so every consumer sees one convention.
+    let xplane = statistics
+        .get("simulator")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("X-Plane"))
+        .unwrap_or(false);
+
+    let heading = num(&["HDG", "heading"]).unwrap_or(0.0);
+    let pitch_raw = num(&["Pitch", "pitch"]).unwrap_or(0.0);
+    let roll_raw = num(&["Roll", "roll"]).unwrap_or(0.0);
+    // East variation is positive, so magnetic = true - variation.
+    let magvar = num(&["MagVar", "magnetic_variation"]).unwrap_or(0.0);
+    let (pitch, roll, magnetic) = if xplane {
+        (pitch_raw, roll_raw, heading)
+    } else {
+        (-pitch_raw, -roll_raw, heading - magvar)
+    };
+
+    let altitude = num(&["AltMSL", "gps_altitude_msl", "AltB"]).unwrap_or(0.0);
+
     Some(CurrentPosition {
         latitude: num(&["Latitude", "latitude"])?,
         longitude: num(&["Longitude", "longitude"])?,
-        altitude: num(&["AltMSL", "gps_altitude_msl", "AltB"]).unwrap_or(0.0),
-        heading: num(&["HDG", "heading"]).unwrap_or(0.0),
+        altitude,
+        heading,
         speed: num(&["GndSpd", "ground_speed"]).unwrap_or(0.0),
+        pitch,
+        roll,
+        ias: num(&["IAS", "indicated_airspeed"]).unwrap_or(0.0),
+        vertical_speed: num(&["VSpd", "vertical_speed"]).unwrap_or(0.0),
+        // A client that never reported an altimeter reading sends 0 rather than
+        // nothing, and a tape pinned to sea level while cruising is worse than
+        // one showing MSL, so treat a flat zero as absent.
+        indicated_altitude: num(&["AltB", "indicated_altitude"])
+            .filter(|v| *v != 0.0)
+            .unwrap_or(altitude),
+        magnetic_heading: magnetic.rem_euclid(360.0),
+        altimeter_setting: num(&["BaroA", "altimeter_setting"]).unwrap_or(0.0),
         phase: statistics
             .get("flight_phase")
             .and_then(|v| v.as_str())
@@ -362,6 +420,11 @@ pub async fn live_flight_handler(
 
     let doc = LiveDocument {
         status: status.to_string(),
+        simulator: statistics
+            .get("simulator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         last_epoch,
         updated_ago_secs,
         share_id,
@@ -494,5 +557,58 @@ mod tests {
         assert_eq!(pos.latitude, 1.0);
         assert_eq!(pos.altitude, 0.0);
         assert!(extract_current(&json!({ "current_snapshot": {} })).is_none());
+    }
+
+    #[test]
+    fn msfs_attitude_and_heading_are_converted_to_the_aviation_convention() {
+        let stats = json!({
+            "simulator": "MSFS",
+            "current_snapshot": {
+                "Latitude": 1.0, "Longitude": 2.0,
+                // SimConnect: nose up 8 degrees, right wing down 20 degrees.
+                "Pitch": -8.0, "Roll": -20.0,
+                "HDG": 10.0, "MagVar": 15.0,
+            }
+        });
+        let pos = extract_current(&stats).unwrap();
+        assert_eq!(pos.pitch, 8.0);
+        assert_eq!(pos.roll, 20.0);
+        // 10 true with 15 east variation is 355 magnetic, not -5.
+        assert_eq!(pos.magnetic_heading, 355.0);
+    }
+
+    #[test]
+    fn xplane_attitude_and_heading_are_taken_as_reported() {
+        let stats = json!({
+            "simulator": "X-Plane",
+            "current_snapshot": {
+                "Latitude": 1.0, "Longitude": 2.0,
+                "Pitch": 8.0, "Roll": 20.0,
+                "HDG": 10.0, "MagVar": 15.0,
+            }
+        });
+        let pos = extract_current(&stats).unwrap();
+        assert_eq!(pos.pitch, 8.0);
+        assert_eq!(pos.roll, 20.0);
+        assert_eq!(pos.magnetic_heading, 10.0);
+    }
+
+    #[test]
+    fn the_altimeter_subscale_is_passed_through_in_inches() {
+        let stats = json!({
+            "current_snapshot": { "Latitude": 1.0, "Longitude": 2.0, "BaroA": 29.92 }
+        });
+        assert_eq!(extract_current(&stats).unwrap().altimeter_setting, 29.92);
+        // A client that never reported one sends nothing; the display hides it.
+        let bare = json!({ "current_snapshot": { "Latitude": 1.0, "Longitude": 2.0 } });
+        assert_eq!(extract_current(&bare).unwrap().altimeter_setting, 0.0);
+    }
+
+    #[test]
+    fn the_altimeter_tape_falls_back_to_msl_when_no_reading_was_sent() {
+        let stats = json!({
+            "current_snapshot": { "Latitude": 1.0, "Longitude": 2.0, "AltMSL": 31000.0 }
+        });
+        assert_eq!(extract_current(&stats).unwrap().indicated_altitude, 31000.0);
     }
 }

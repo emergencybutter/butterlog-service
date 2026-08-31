@@ -1,0 +1,254 @@
+<!-- Replay transport for a finished flight.
+
+     One cursor drives every view on the page - the flight display, the map
+     marker, the chart cursors, the 3D aircraft - so there is a single notion of
+     "where we are in the flight" rather than a scrubber per widget. Views
+     subscribe; nothing polls.
+
+     The cursor is a time, not a sample index. The uploader thins cruise far
+     harder than the climb, so stepping by index would sprint through an hour of
+     cruise and crawl through the approach. -->
+<style>
+    .rp { display: flex; align-items: center; gap: 0.8rem; background: var(--panel); border: 1px solid var(--border);
+          border-radius: 6px; padding: 0.6rem 0.9rem; margin-bottom: 1.5rem; }
+    .rp.is-hidden { display: none; }
+    .rp-play { flex: none; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
+               background: transparent; color: var(--text); border: 1px solid var(--border-strong);
+               border-radius: var(--radius); cursor: pointer; font-size: 0.85rem; line-height: 1; }
+    .rp-play:hover { border-color: var(--purple); color: var(--purple); }
+    .rp-scrub { flex: 1 1 auto; min-width: 0; accent-color: var(--purple); cursor: pointer; }
+    .rp-time { flex: none; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); letter-spacing: 0.04em; }
+    .rp-time .sep, .rp-time .total { color: var(--dim); }
+    .rp-rate { flex: none; font-family: var(--font-mono); font-size: 0.66rem; color: var(--dim); letter-spacing: 0.08em;
+               border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.15rem 0.4rem; }
+    @media (max-width: 600px) { .rp-rate { display: none; } .rp { gap: 0.6rem; padding: 0.5rem 0.6rem; } }
+
+    /* Replay cursor drawn over each chart. A positioned div rather than a
+       canvas repaint: four Chart.js redraws per animation frame is the one
+       thing that made the replay stutter on a phone. */
+    .chart-card { position: relative; }
+    .chart-cursor { position: absolute; left: 0; top: 0; width: 1px; background: var(--purple);
+                    pointer-events: none; display: none; will-change: transform; }
+</style>
+<script>
+// window.FlightReplay - shared transport. `attach` once with a rendered
+// flight's state, then `subscribe` from each view.
+window.FlightReplay = (function () {
+    const subs = [];
+    let S = null;            // the renderer's state object
+    let ts = null;           // absolute sample epochs
+    let axis = null;         // the renderer's timeline: dead air capped
+    let span = 0;            // playback length in seconds
+    let realSpan = 0;        // wall-clock length of the flight in seconds
+    let cursor = 0;          // position on the playback axis
+    let rate = 60;           // playback seconds per real second
+    let playing = false, raf = null, lastMs = 0;
+    let mount = null, playBtn = null, scrub = null, elapsedEl = null;
+    let lastHeading = 0;
+
+    const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+    function fmt(secs) {
+        secs = Math.max(0, Math.round(secs));
+        const h = Math.floor(secs / 3600), m = Math.floor(secs % 3600 / 60), s = secs % 60;
+        const mm = String(m).padStart(2, '0'), ss = String(s).padStart(2, '0');
+        return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+    }
+
+    // Greatest index at or before `t` on the playback axis.
+    function indexAt(t) {
+        let lo = 0, hi = axis.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (axis[mid] <= t) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    const lerp = (arr, i, j, f) => {
+        const a = arr && arr[i], b = arr && arr[j];
+        if (typeof a !== 'number') return typeof b === 'number' ? b : 0;
+        if (typeof b !== 'number') return a;
+        return a + (b - a) * f;
+    };
+
+    // Ground track from the positions either side of the cursor. The track
+    // carries no heading of its own - no sim reports one into the sample
+    // stream - so this is course over ground, and the display says so.
+    function bearing(i, j) {
+        const r = Math.PI / 180;
+        const la1 = S.lats[i] * r, la2 = S.lats[j] * r, dLon = (S.lons[j] - S.lons[i]) * r;
+        const y = Math.sin(dLon) * Math.cos(la2);
+        const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function trackAt(i, j) {
+        // Parked or holding: consecutive fixes are the same point and the
+        // bearing between them is noise, so hold the last real one.
+        const moved = (a, b) => Math.abs(S.lats[a] - S.lats[b]) > 1e-5 || Math.abs(S.lons[a] - S.lons[b]) > 1e-5;
+        if (moved(i, j)) { lastHeading = bearing(i, j); return lastHeading; }
+        for (let k = 1; k <= 6; k++) {
+            const a = Math.max(0, i - k), b = Math.min(ts.length - 1, j + k);
+            if (moved(a, b)) { lastHeading = bearing(a, b); return lastHeading; }
+        }
+        return lastHeading;
+    }
+
+    function sampleAt(t) {
+        const i = indexAt(t);
+        const j = Math.min(i + 1, axis.length - 1);
+        const dp = axis[j] - axis[i];
+        const f = dp > 0 ? clamp((t - axis[i]) / dp, 0, 1) : 0;
+        return {
+            index: i,
+            // Real time, interpolated across the pair - a capped gap runs the
+            // clock fast rather than pretending the time did not pass.
+            epoch: ts[i] + (ts[j] - ts[i]) * f,
+            latitude: lerp(S.lats, i, j, f),
+            longitude: lerp(S.lons, i, j, f),
+            altitude: lerp(S.alts, i, j, f),
+            ias: lerp(S.ias, i, j, f),
+            vspeed: lerp(S.vs, i, j, f),
+            pitch: lerp(S.pitch, i, j, f),
+            roll: lerp(S.roll, i, j, f),
+            track: trackAt(i, j),
+        };
+    }
+
+    function emit() {
+        const sample = sampleAt(cursor);
+        const ev = {
+            // Real flight time, for the clock readout. `axis` is the shared
+            // timeline position the charts are drawn against, and `progress`
+            // the scrub fraction of it; across a compressed gap all three
+            // advance at different rates.
+            seconds: sample.epoch - ts[0],
+            axis: cursor,
+            progress: span > 0 ? cursor / span : 0,
+            atEnd: span > 0 && cursor >= span,
+            playing: playing,
+            sample: sample,
+        };
+        if (scrub) scrub.value = Math.round(ev.progress * 1000);
+        if (elapsedEl) elapsedEl.textContent = fmt(ev.seconds);
+        if (playBtn) {
+            playBtn.textContent = playing ? '❚❚' : ev.atEnd ? '↻' : '▶';
+            playBtn.setAttribute('aria-label', playing ? 'Pause replay' : 'Play replay');
+        }
+        for (let i = 0; i < subs.length; i++) subs[i](ev);
+    }
+
+    function tick(ms) {
+        raf = null;
+        if (!playing) return;
+        if (!lastMs) lastMs = ms;
+        cursor = cursor + (ms - lastMs) / 1000 * rate;
+        lastMs = ms;
+        if (cursor >= span) { cursor = span; playing = false; }
+        emit();
+        if (playing) raf = requestAnimationFrame(tick);
+    }
+
+    function play() {
+        if (!S || playing) return;
+        if (cursor >= span) cursor = 0;
+        playing = true; lastMs = 0;
+        raf = requestAnimationFrame(tick);
+        emit();
+    }
+
+    function pause() {
+        if (!playing) return;
+        playing = false;
+        if (raf) { cancelAnimationFrame(raf); raf = null; }
+        emit();
+    }
+
+    function seek(progress) {
+        if (!S) return;
+        // Stop without emitting: the seek below emits once for both changes.
+        if (playing) { playing = false; if (raf) { cancelAnimationFrame(raf); raf = null; } }
+        cursor = clamp(progress, 0, 1) * span;
+        emit();
+    }
+
+    function buildTransport() {
+        mount = document.getElementById('replay-mount');
+        if (!mount) return;
+        mount.className = 'rp';
+        mount.innerHTML =
+            `<button class="rp-play" id="rp-play" aria-label="Play replay" title="Play / pause (space)">▶</button>
+             <input class="rp-scrub" id="rp-scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Replay position">
+             <span class="rp-time"><span id="rp-elapsed">0:00</span><span class="sep"> / </span><span class="total">${fmt(realSpan)}</span></span>
+             <span class="rp-rate" title="Average speed-up. Idle gaps in the log are skipped, so this is not a constant rate.">~${Math.round(realSpan * rate / span)}× real time</span>`;
+        playBtn = document.getElementById('rp-play');
+        scrub = document.getElementById('rp-scrub');
+        elapsedEl = document.getElementById('rp-elapsed');
+        playBtn.addEventListener('click', () => playing ? pause() : play());
+        scrub.addEventListener('input', () => seek(scrub.value / 1000));
+    }
+
+    document.addEventListener('keydown', e => {
+        if (!S) return;
+        const tag = (e.target && e.target.tagName || '').toLowerCase();
+        // `button` included so a focused play button is not toggled twice:
+        // once by the browser's own click-on-space and once by us.
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button' || e.target.isContentEditable) return;
+        if (e.code === 'Space') { e.preventDefault(); playing ? pause() : play(); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); seek((cursor + span * (e.shiftKey ? 0.05 : 0.01)) / span); }
+        else if (e.key === 'ArrowLeft') { e.preventDefault(); seek((cursor - span * (e.shiftKey ? 0.05 : 0.01)) / span); }
+    });
+
+    // Chart pixel positions move with the layout, so re-place the views on a
+    // resize without advancing the cursor.
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (!S) return;
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(emit, 120);
+    });
+
+    return {
+        /// Take over a rendered flight. `state` is the renderer's, so the
+        /// replay reads exactly the arrays the charts and map were drawn from.
+        attach(state) {
+            if (!state || !state.timestamps || state.timestamps.length < 2) return false;
+            S = state;
+            ts = state.timestamps;
+            // The renderer owns the timeline - it owns the samples, and the
+            // charts are plotted against the same axis. Scrubbing over
+            // anything else would put the cursor somewhere the charts disagree
+            // with. See `rebuildAxis` in the shared renderer for why dead air
+            // is capped at all.
+            axis = state.axis;
+            realSpan = ts[ts.length - 1] - ts[0];
+            if (!axis || axis.length !== ts.length || !(realSpan > 0)) { S = null; return false; }
+            span = axis[axis.length - 1];
+            if (!(span > 0)) { S = null; return false; }
+            // Aim for a minute of watching whatever the flight's length, but
+            // never so slow that a circuit drags nor so fast that a long-haul
+            // is a blur.
+            rate = clamp(span / 60, 20, 400);
+            cursor = 0;
+            lastHeading = 0;
+            buildTransport();
+            emit();
+            return true;
+        },
+        subscribe(fn) {
+            subs.push(fn);
+            if (S) {
+                const sample = sampleAt(cursor);
+                fn({ seconds: sample.epoch - ts[0], axis: cursor, progress: span > 0 ? cursor / span : 0,
+                     atEnd: false, playing: playing, sample: sample });
+            }
+        },
+        ready() { return S !== null; },
+        play: play,
+        pause: pause,
+        toggle() { playing ? pause() : play(); },
+        seek: seek,
+    };
+})();
+</script>

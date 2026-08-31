@@ -158,6 +158,9 @@ pub struct NotifiedChannel {
 pub struct ShareDetailPage {
     pub share_id: String,
     pub is_owner: bool,
+    /// `MSFS`, `X-Plane`, or empty when the share predates the flights link.
+    /// The renderer reads the track's raw pitch and roll through it.
+    pub simulator: String,
     /// Share JSON with `</` and backslashes escaped for safe <script> embedding.
     pub json_escaped: String,
 }
@@ -180,6 +183,9 @@ mod tests {
         // page and the share page draw with the same code.
         assert!(html.contains("function renderFlightDoc("));
         assert!(html.contains("function renderFlight3D("));
+        // The flight display is part of the live page for everyone, pilot or not.
+        assert!(html.contains("id=\"pfd-mount\""));
+        assert!(html.contains("window.renderPFD ="));
     }
 
     #[test]
@@ -200,11 +206,32 @@ mod tests {
         assert!(owner.contains("PMDG"));
     }
 
+    /// The simulator reaches the page through an attribute rather than a JS
+    /// string, because it comes from a client-submitted statistics blob and
+    /// askama's escaping is HTML escaping.
+    #[test]
+    fn a_hostile_simulator_name_cannot_break_out_of_the_share_page() {
+        let html = ShareDetailPage {
+            share_id: "abc-123".into(),
+            is_owner: false,
+            simulator: r#"" ; alert(1); //"#.into(),
+            json_escaped: "{}".into(),
+        }
+        .render()
+        .unwrap();
+        // The quote that would close the attribute is escaped, so the payload
+        // stays inert data. It is still *present* - escaped, not stripped.
+        assert!(html.contains(r#"data-sim="&quot; ; alert(1); //""#), "attribute not escaped");
+        // And the script reads it as data rather than being generated with it.
+        assert!(html.contains("SHARE_DATA.simulator = document.currentScript.dataset.sim"));
+    }
+
     #[test]
     fn share_page_uses_the_same_shared_renderer() {
         let html = ShareDetailPage {
             share_id: "abc-123".into(),
             is_owner: false,
+            simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
         .render()
@@ -376,6 +403,7 @@ mod tests {
         let owner = ShareDetailPage {
             share_id: "abc-123".into(),
             is_owner: true,
+            simulator: "MSFS".into(),
             json_escaped: r#"{"summary":{"x":"<\/script>"}}"#.into(),
         };
         let html = owner.render().unwrap();
@@ -385,6 +413,7 @@ mod tests {
         let visitor = ShareDetailPage {
             share_id: "abc-123".into(),
             is_owner: false,
+            simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         };
         assert!(!visitor.render().unwrap().contains("Delete Share"));

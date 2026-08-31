@@ -24,6 +24,8 @@
         <span class="live-meta" id="live-updated"></span>
     </div>
     <div id="live-handoff"></div>
+    <div id="pfd-mount" class="pfd is-hidden"></div>
+    <div id="replay-mount" class="rp is-hidden"></div>
     {% if is_owner %}<div id="controls-mount"></div>{% endif %}
     <div id="header-mount"></div>
     <div id="gallery-mount"></div>
@@ -51,6 +53,8 @@
     <img id="lb-img" src="" alt="">
 </div>
 {% include "_flight_render.html" %}
+{% include "_pfd.html" %}
+{% include "_replay.html" %}
 <script>
 (function () {
     const FLIGHT_ID = {{ flight_id }};
@@ -112,6 +116,7 @@
             handle.append(doc);
         }
         if (typeof renderControls === 'function') renderControls(doc);
+        renderPFD(doc);
         if (doc.lastEpoch != null) lastEpoch = doc.lastEpoch;
         handle.setCurrent(doc.current);
         setStatus(doc);
@@ -122,6 +127,9 @@
             // both span the whole flight — so it only appears once there is one.
             if (!threeDeeDone) {
                 threeDeeDone = true;
+                // Replay first: the 3D view binds its play button to the
+                // cursor this creates.
+                handle.enableReplay();
                 renderFlight3D({
                     transposedData: {
                         timestamps: handle.state.timestamps.map((t, i, a) => i === 0 ? t : t - a[i-1]),

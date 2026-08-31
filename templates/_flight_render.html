@@ -21,6 +21,14 @@ function fmtDate(s) {
 // current without tearing the page down on every poll.
 function renderFlightDoc(d) {
     const td = d.transposedData || d.transposed_data || {};
+    // The track carries attitude exactly as the sim reported it, and the two
+    // sims disagree: MSFS is positive nose-down and positive left-wing-down,
+    // X-Plane's theta/phi are already nose-up and right-wing-down. Normalise
+    // once here, so the pitch chart and the flight display cannot disagree.
+    // Same rule as `extract_current` in live.rs, including treating an unknown
+    // simulator as MSFS.
+    const attSign = /x-?plane/i.test(d.simulator || '') ? 1 : -1;
+    const att = arr => (arr || []).map(v => v * attSign);
     const state = {
         timestamps: reconstructTs(td.timestamps),
         lats: (td.latitudes || []).slice(),
@@ -28,10 +36,11 @@ function renderFlightDoc(d) {
         alts: (td.altitudes || []).slice(),
         ias: (td.ias || []).slice(),
         vs: (td.vspeed || []).slice(),
-        pitch: (td.pitch || []).slice(),
+        pitch: att(td.pitch),
+        roll: att(td.roll),
         summary: d.summary || {},
         screenshots: d.screenshots || [],
-        map: null, path: null, planeMarker: null, charts: [], userMoved: false,
+        map: null, path: null, planeMarker: null, charts: [], cursors: [], userMoved: false,
     };
 
     function headerHtml() {
@@ -105,18 +114,85 @@ function renderFlightDoc(d) {
         const coords = state.lats.map((la, i) => [la, state.lons[i]]);
         if (!state.map) {
             state.map = L.map('map');
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'© OSM © CARTO',subdomains:'abcd',maxZoom:19}).addTo(state.map);
+            // Esri's Dark Gray Canvas. CARTO's keyless basemap now serves tiles
+            // watermarked "API KEY REQUIRED" - still HTTP 200, so nothing errors,
+            // the notice is painted into the image. Esri needs no key and is
+            // already a dependency here (the 3D view textures terrain from it).
+            // Its canvas stops at z16, so maxNativeZoom upscales past that rather
+            // than fetching the "Map data not yet available" placeholder.
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{attribution:'Esri, HERE, Garmin, &copy; OpenStreetMap contributors',maxZoom:19,maxNativeZoom:16}).addTo(state.map);
             state.path = L.polyline(coords,{color:'#ffb000',weight:2.5,opacity:0.9}).addTo(state.map);
-            state.map.fitBounds(state.path.getBounds().pad(0.12));
+            state.map.fitBounds(state.path.getBounds().pad(0.12), { maxZoom: 16 });
             // Once the viewer pans or zooms, stop stealing the view from them on
             // every poll.
             state.map.on('dragstart zoomstart', () => { state.userMoved = true; });
         } else {
             state.path.setLatLngs(coords);
-            if (!state.userMoved) state.map.fitBounds(state.path.getBounds().pad(0.12));
+            if (!state.userMoved) state.map.fitBounds(state.path.getBounds().pad(0.12), { maxZoom: 16 });
         }
         eventMarkersOnMap();
     }
+
+    /// The flight's timeline: one position per sample, with dead air capped.
+    ///
+    /// Real flights are full of it - a log left running on the ramp for two
+    /// hours, a dropout mid-cruise - and the uploader deliberately thins cruise
+    /// to one sample every few minutes. Plotting wall-clock time linearly hands
+    /// almost the whole axis to an empty ramp: on a real share here, a
+    /// two-hour-46 gap squeezed the entire flight into the right-hand 3% of
+    /// every chart. So cap what any one gap may occupy, scaled to how often
+    /// this flight actually sampled, and plot against that.
+    ///
+    /// Everything time-shaped on the page rides this axis: the four charts, the
+    /// event and screenshot marks, and the replay cursor. Tick labels and
+    /// tooltips convert back, so the clock a viewer reads is always real.
+    function rebuildAxis() {
+        const ts = state.timestamps;
+        state.axis = [0];
+        state.gaps = [];
+        if (ts.length < 2) return;
+        const gaps = [];
+        for (let i=1; i<ts.length; i++) gaps.push(ts[i] - ts[i-1]);
+        const sorted = gaps.slice().sort((a,b)=>a-b);
+        const cap = Math.max(60, (sorted[sorted.length>>1] || 1) * 4);
+        for (let i=1; i<ts.length; i++) {
+            state.axis.push(state.axis[i-1] + Math.min(gaps[i-1], cap));
+            // Remember what was compressed, so the charts can say so rather
+            // than quietly presenting skipped hours as continuous flight.
+            if (gaps[i-1] > cap) state.gaps.push({from: state.axis[i-1], to: state.axis[i], skipped: gaps[i-1]});
+        }
+    }
+
+    /// Greatest index at or before `v` in a sorted array.
+    function floorIndex(arr, v) {
+        let lo = 0, hi = arr.length - 1;
+        while (lo < hi) { const mid = (lo+hi+1)>>1; if (arr[mid] <= v) lo = mid; else hi = mid-1; }
+        return lo;
+    }
+
+    function epochToAxis(epoch) {
+        const ts = state.timestamps, ax = state.axis;
+        if (!ax || ax.length === 0) return 0;
+        const last = ts.length - 1;
+        if (epoch <= ts[0]) return 0;
+        if (epoch >= ts[last]) return ax[last];
+        const i = floorIndex(ts, epoch), j = Math.min(i+1, last);
+        const dt = ts[j] - ts[i];
+        return ax[i] + (ax[j] - ax[i]) * (dt > 0 ? (epoch - ts[i]) / dt : 0);
+    }
+
+    function axisToEpoch(x) {
+        const ts = state.timestamps, ax = state.axis;
+        if (!ax || ax.length === 0) return ts[0] || 0;
+        const last = ax.length - 1;
+        if (x <= 0) return ts[0];
+        if (x >= ax[last]) return ts[last];
+        const i = floorIndex(ax, x), j = Math.min(i+1, last);
+        const d = ax[j] - ax[i];
+        return ts[i] + (ts[j] - ts[i]) * (d > 0 ? (x - ax[i]) / d : 0);
+    }
+
+    const clockAt = x => new Date(axisToEpoch(x) * 1000).toISOString().slice(11, 16);
 
     // Chart series, thinned to ~300 points so a long flight stays responsive.
     function buildSeries() {
@@ -125,7 +201,7 @@ function renderFlightDoc(d) {
         const ad=[], id=[], vd=[], pd=[], sampledTs=[];
         const t0 = ts[0];
         for (let i=0; i<ts.length; i+=step) {
-            const x = ts[i] - t0;
+            const x = state.axis[i];
             ad.push({x, y:state.alts[i]||0}); id.push({x, y:state.ias[i]||0});
             vd.push({x, y:state.vs[i]||0}); pd.push({x, y:state.pitch[i]||0});
             sampledTs.push(ts[i]);
@@ -143,7 +219,6 @@ function renderFlightDoc(d) {
             state.charts.forEach((c, i) => { c.data.datasets[0].data = data[i]; c.update('none'); });
             return;
         }
-        const t0 = series.t0;
         const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
         const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':t;
         const eventMarks = [], shotMarks = [];
@@ -161,7 +236,7 @@ function renderFlightDoc(d) {
                 let bi=-1, bd=Infinity;
                 for (let i=0;i<s.sampledTs.length;i++) { const dd=Math.abs(s.sampledTs[i]-epoch); if (dd<bd) { bd=dd; bi=i; } }
                 if (bi<0 || bd > gap*1.5 + 30) return;
-                eventMarks.push({x:epoch-t0, color:evColor(type), label:evLabel(type)});
+                eventMarks.push({x:epochToAxis(epoch), color:evColor(type), label:evLabel(type)});
             });
             state.screenshots.forEach((sc, i) => {
                 let epoch = null;
@@ -171,7 +246,7 @@ function renderFlightDoc(d) {
                 let bi=-1, bd=Infinity;
                 for (let j=0;j<s.sampledTs.length;j++) { const dd=Math.abs(s.sampledTs[j]-epoch); if (dd<bd) { bd=dd; bi=j; } }
                 if (bi<0 || bd > gap*1.5 + 30) return;
-                shotMarks.push({x:epoch-t0, lb:i});
+                shotMarks.push({x:epochToAxis(epoch), lb:i});
             });
         }
         remapMarks();
@@ -183,14 +258,30 @@ function renderFlightDoc(d) {
             shotMarks.forEach(m => { const dd=Math.abs(xs.getPixelForValue(m.x)-x); if (dd<bestd) { bestd=dd; best=m.lb; } });
             return best;
         };
+        const fmtSkip = secs => {
+            const h = Math.floor(secs/3600), m = Math.round(secs%3600/60);
+            return h > 0 ? `${h}h${String(m).padStart(2,'0')}` : `${m}m`;
+        };
         const eventMarkerPlugin = {
             id:'eventMarkers',
             afterDatasetsDraw(chart) {
                 const ctx = chart.ctx, area = chart.chartArea, xs = chart.scales.x;
                 if (!area || !xs) return;
                 ctx.save();
+                // Compressed dead air, shaded and labelled. Without this the
+                // axis silently claims two hours on the ramp took a minute.
                 ctx.font = '9px sans-serif';
                 ctx.textAlign = 'center';
+                (state.gaps || []).forEach(g => {
+                    const x1 = xs.getPixelForValue(g.from), x2 = xs.getPixelForValue(g.to);
+                    if (x1 == null || x2 == null || isNaN(x1) || isNaN(x2)) return;
+                    const l = Math.max(area.left, Math.min(x1, x2)), r = Math.min(area.right, Math.max(x1, x2));
+                    if (r <= l) return;
+                    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+                    ctx.fillRect(l, area.top, r - l, area.bottom - area.top);
+                    ctx.fillStyle = '#6c7086';
+                    ctx.fillText('⋯ ' + fmtSkip(g.skipped), (l + r) / 2, area.bottom - 4);
+                });
                 eventMarks.forEach(mm => {
                     const px = xs.getPixelForValue(mm.x);
                     if (px==null || isNaN(px)) return;
@@ -224,9 +315,9 @@ function renderFlightDoc(d) {
         };
         const opts = () => ({
             responsive:true, maintainAspectRatio:true, animation:false,
-            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:(items)=>items.length?new Date((t0+items[0].parsed.x)*1000).toISOString().slice(11,16):''}}},
+            plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:(items)=>items.length?clockAt(items[0].parsed.x):''}}},
             scales:{
-                x:{type:'linear',ticks:{color:'#6c7086',maxTicksLimit:6,callback:(v)=>new Date((t0+v)*1000).toISOString().slice(11,16)},grid:{color:'rgba(255,255,255,0.04)'}},
+                x:{type:'linear',ticks:{color:'#6c7086',maxTicksLimit:6,callback:(v)=>clockAt(v)},grid:{color:'rgba(255,255,255,0.04)'}},
                 y:{ticks:{color:'#6c7086'},grid:{color:'rgba(255,255,255,0.04)'}},
             },
             onClick:(evt, els, chart) => {
@@ -239,9 +330,10 @@ function renderFlightDoc(d) {
         });
         const mk = (id2, lbl, data, color) => {
             const el = document.createElement('div'); el.className='chart-card';
-            el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas>`;
+            el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas><div class="chart-cursor"></div>`;
             document.getElementById('charts-mount').appendChild(el);
             state.charts.push(new Chart(document.getElementById(id2),{type:'line',data:{datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]}));
+            state.cursors.push(el.querySelector('.chart-cursor'));
         };
         mk('ca','Altitude (ft)',series.ad,'#ffb000');
         mk('ci','Airspeed (kt)',series.id,'#36e3c6');
@@ -257,13 +349,72 @@ function renderFlightDoc(d) {
         document.getElementById('gallery-mount').innerHTML=`<div class="gallery-section"><div class="section-title">Screenshots</div><div class="gallery">${thumbs}</div></div>`;
     }
 
+    rebuildAxis();
     drawHeader();
     drawGallery();
     drawMap();
     drawCharts();
 
+    // Drop a marker at a reported position. Used by the live page for the
+    // aircraft's current fix and by replay for the interpolated one.
+    function setCurrentPos(pos) {
+        if (!pos || !state.map) return;
+        const ll = [pos.latitude, pos.longitude];
+        if (!state.planeMarker) {
+            state.planeMarker = L.circleMarker(ll, {radius:6,color:'#ffffff',fillColor:'#ffb000',fillOpacity:1,weight:2}).addTo(state.map);
+            state.planeMarker.bindTooltip('');
+        } else {
+            state.planeMarker.setLatLng(ll);
+        }
+        // Re-binding on every frame of a replay would rebuild the tooltip 60
+        // times a second; set the text on the binding that is already there.
+        state.planeMarker.setTooltipContent(`${Math.round(pos.altitude)} ft · ${Math.round(pos.speed)} kt · ${Math.round(pos.heading)}°`);
+    }
+
+    // Place the replay cursor on each chart. Takes a position on the shared
+    // axis, which is what the charts are plotted against. A positioned overlay
+    // rather than a canvas repaint: redrawing four Chart.js canvases per frame
+    // is what made the replay stutter.
+    function positionChartCursors(seconds) {
+        for (let i = 0; i < state.charts.length; i++) {
+            const chart = state.charts[i], cur = state.cursors[i];
+            if (!chart || !cur) continue;
+            const xs = chart.scales.x, area = chart.chartArea;
+            const px = (xs && area && seconds >= xs.min && seconds <= xs.max) ? xs.getPixelForValue(seconds) : null;
+            if (px == null || isNaN(px)) { cur.style.display = 'none'; continue; }
+            const cv = chart.canvas;
+            cur.style.display = '';
+            cur.style.top = (cv.offsetTop + area.top) + 'px';
+            cur.style.height = (area.bottom - area.top) + 'px';
+            cur.style.transform = `translateX(${(cv.offsetLeft + px).toFixed(1)}px)`;
+        }
+    }
+
     return {
         state,
+        /// Hand the flight to the replay transport and wire every view on the
+        /// page to its cursor. Only meaningful once the track is complete, so
+        /// the live page calls this when the flight ends and the share page
+        /// calls it straight away. Returns false if there is nothing to replay.
+        enableReplay() {
+            if (typeof FlightReplay === 'undefined' || !FlightReplay.attach(state)) return false;
+            FlightReplay.subscribe(ev => {
+                const s = ev.sample;
+                if (typeof renderPFDSample === 'function') renderPFDSample({
+                    pitch: s.pitch, roll: s.roll, ias: s.ias, altitude: s.altitude,
+                    // No sim reports a heading into the sample stream, so this
+                    // is course over ground derived from the fixes - true, not
+                    // magnetic. The display says which.
+                    heading: s.track,
+                    headingLabel: 'GROUND TRACK · TRUE',
+                    caption: new Date(s.epoch * 1000).toISOString().slice(11, 19) + 'Z',
+                    animate: false,
+                });
+                setCurrentPos({ latitude: s.latitude, longitude: s.longitude, altitude: s.altitude, speed: s.ias, heading: s.track });
+                positionChartCursors(ev.axis);
+            });
+            return true;
+        },
         /// Append a delta document's samples and redraw the moving parts.
         append(doc) {
             const t = doc.transposedData || doc.transposed_data || {};
@@ -275,7 +426,9 @@ function renderFlightDoc(d) {
                 state.alts = state.alts.concat(t.altitudes || []);
                 state.ias = state.ias.concat(t.ias || []);
                 state.vs = state.vs.concat(t.vspeed || []);
-                state.pitch = state.pitch.concat(t.pitch || []);
+                state.pitch = state.pitch.concat(att(t.pitch));
+                state.roll = state.roll.concat(att(t.roll));
+                rebuildAxis();
             }
             if (doc.summary) state.summary = doc.summary;
             if (doc.screenshots) {
@@ -292,16 +445,7 @@ function renderFlightDoc(d) {
         },
         /// Drop a marker at the aircraft's reported position, so a viewer sees
         /// where it is even before the next track sample lands.
-        setCurrent(pos) {
-            if (!pos || !state.map) return;
-            const ll = [pos.latitude, pos.longitude];
-            if (!state.planeMarker) {
-                state.planeMarker = L.circleMarker(ll, {radius:6,color:'#ffffff',fillColor:'#ffb000',fillOpacity:1,weight:2}).addTo(state.map);
-            } else {
-                state.planeMarker.setLatLng(ll);
-            }
-            state.planeMarker.bindTooltip(`${Math.round(pos.altitude)} ft · ${Math.round(pos.speed)} kt · ${Math.round(pos.heading)}°`);
-        },
+        setCurrent: setCurrentPos,
     };
 }
 
@@ -390,15 +534,10 @@ function renderFlight3D(d) {
         new deck.ScatterplotLayer({ id: 'events', data: evPts, getPosition: e => e.position, getRadius: 6, radiusUnits: 'pixels', getFillColor: e => e.color, stroked: true, getLineColor: [10, 12, 13], lineWidthMinPixels: 1.5 }),
         new deck.TextLayer({ id: 'evlabels', data: evPts, getPosition: e => e.position, getText: e => e.label, getSize: 11, getColor: [238, 241, 234], getPixelOffset: [0, -14], fontFamily: 'monospace', background: true, getBackgroundColor: [16, 19, 20, 190], backgroundPadding: [4, 2] }),
     ];
-    const marker = progress => {
-        const f = progress * (pts.length - 1), i = Math.floor(f), frac = f - i;
-        const a = pts[i], b = pts[Math.min(i + 1, pts.length - 1)];
-        const pos = [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac, a[2] + (b[2] - a[2]) * frac];
-        return [
-            new deck.ScatterplotLayer({ id: 'plane-glow', data: [pos], getPosition: p => p, getRadius: 14, radiusUnits: 'pixels', getFillColor: [255, 176, 0, 70] }),
-            new deck.ScatterplotLayer({ id: 'plane', data: [pos], getPosition: p => p, getRadius: 6, radiusUnits: 'pixels', getFillColor: [255, 255, 255], stroked: true, getLineColor: [255, 176, 0], lineWidthMinPixels: 2 }),
-        ];
-    };
+    const marker = pos => [
+        new deck.ScatterplotLayer({ id: 'plane-glow', data: [pos], getPosition: p => p, getRadius: 14, radiusUnits: 'pixels', getFillColor: [255, 176, 0, 70] }),
+        new deck.ScatterplotLayer({ id: 'plane', data: [pos], getPosition: p => p, getRadius: 6, radiusUnits: 'pixels', getFillColor: [255, 255, 255], stroked: true, getLineColor: [255, 176, 0], lineWidthMinPixels: 2 }),
+    ];
 
     // Track the live view so the tilt slider can change pitch without losing pan/zoom.
     let curView = { ...initView };
@@ -407,34 +546,30 @@ function renderFlight3D(d) {
         canvas: 'deck3d', initialViewState: initView,
         controller: { dragRotate: true, inertia: true },
         onViewStateChange: ({ viewState }) => { curView = viewState; pitchSlider.value = Math.round(viewState.pitch); },
-        layers: [...statics, ...marker(0)],
+        layers: [...statics, ...marker(pts[0])],
     });
     pitchSlider.oninput = () => { curView = { ...curView, pitch: +pitchSlider.value }; deckgl.setProps({ initialViewState: curView }); };
     document.getElementById('m3d-maxalt').textContent = Math.round(maxAltFt).toLocaleString() + ' ft';
     document.getElementById('m3d-exag').textContent = EXAG > 1.05 ? 'vertical ×' + EXAG.toFixed(1) + ' (exaggerated)' : '';
 
-    // Playback controls.
+    // Playback. The panel's button and slider are a second view onto the page's
+    // one replay cursor, not a transport of their own - two scrubbers
+    // disagreeing about where the flight is would be worse than none.
     const playBtn = document.getElementById('m3d-play'), scrub = document.getElementById('m3d-scrub');
-    let progress = 0, playing = false, lastTs = 0;
-    const DURATION = 25000; // ms to fly the whole path
-    const render = () => deckgl.setProps({ layers: [...statics, ...marker(progress)] });
-    const tick = ts => {
-        if (!playing) return;
-        if (!lastTs) lastTs = ts;
-        progress = Math.min(1, progress + (ts - lastTs) / DURATION);
-        lastTs = ts;
-        scrub.value = Math.round(progress * 1000);
-        render();
-        if (progress >= 1) { playing = false; playBtn.textContent = '↻'; return; }
-        requestAnimationFrame(tick);
-    };
-    playBtn.onclick = () => {
-        if (progress >= 1) progress = 0;
-        playing = !playing;
-        playBtn.textContent = playing ? '❚❚' : '▶';
-        if (playing) { lastTs = 0; requestAnimationFrame(tick); }
-    };
-    scrub.oninput = () => { playing = false; playBtn.textContent = progress >= 1 ? '↻' : '▶'; progress = scrub.value / 1000; render(); };
+    if (typeof FlightReplay !== 'undefined' && FlightReplay.ready()) {
+        FlightReplay.subscribe(ev => {
+            const p = ev.sample;
+            deckgl.setProps({ layers: [...statics, ...marker([p.longitude, p.latitude, (p.altitude || 0) * Z])] });
+            if (document.activeElement !== scrub) scrub.value = Math.round(ev.progress * 1000);
+            playBtn.textContent = ev.playing ? '❚❚' : ev.atEnd ? '↻' : '▶';
+        });
+        playBtn.onclick = () => FlightReplay.toggle();
+        scrub.oninput = () => FlightReplay.seek(scrub.value / 1000);
+    } else {
+        // No replay (no transport mounted, or a track too short to scrub): the
+        // aircraft stays parked at the start rather than offering dead controls.
+        playBtn.closest('.m3d-panel').style.display = 'none';
+    }
     document.getElementById('m3d-reset').onclick = () => { curView = { ...initView }; pitchSlider.value = 58; deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } }); };
 }
 

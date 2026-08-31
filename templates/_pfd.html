@@ -1,0 +1,318 @@
+<!-- Primary flight display for a flight that is still in the air.
+     One SVG built once, then driven by transforms on each poll so the browser
+     interpolates across the 10s gap between samples instead of snapping.
+
+     Colours are fixed rather than tokenised: sky-over-ground only reads as an
+     attitude indicator against a black bezel. The live page is already
+     dark-locked (`data-theme="dark"`, see STYLE_GUIDE section 9), so this sits
+     with the map and the 3D view as intentional dark data-viz.
+
+     Attitude and heading arrive already normalised by the service (nose-up and
+     right-wing-down positive, heading magnetic) - see `extract_current`. -->
+<style>
+    .pfd { background: #05070a; border: 1px solid var(--border); border-radius: 6px; padding: 0.55rem; margin-bottom: 1.5rem; }
+    .pfd.is-hidden { display: none; }
+    .pfd svg { display: block; width: 100%; height: auto; font-family: var(--font-mono); }
+    .pfd-anim .pfd-move { transition: transform 0.9s var(--ease); }
+
+    .pfd-frame { fill: none; stroke: rgba(230,235,225,0.28); stroke-width: 1.5; }
+    .pfd-tape-bg { fill: rgba(0,0,0,0.62); }
+    .pfd-tick { stroke: #e9ece7; stroke-width: 1.5; }
+    .pfd-tape-lbl { fill: #e9ece7; font-size: 14px; font-weight: 500; }
+    .pfd-cap { fill: #8a938c; font-size: 11px; letter-spacing: 0.14em; }
+    .pfd-horizon-line { stroke: #ffffff; stroke-width: 2.5; }
+    .pfd-ladder { stroke: #ffffff; stroke-width: 1.6; }
+    .pfd-ladder-lbl { fill: #ffffff; font-size: 12px; }
+    .pfd-bank { stroke: #ffffff; stroke-width: 2; }
+    .pfd-bank-zero { fill: none; stroke: #ffffff; stroke-width: 1.5; }
+    .pfd-roll-ptr { fill: #e0930c; }
+    .pfd-ac-shadow path { fill: none; stroke: #000000; stroke-width: 9; }
+    .pfd-ac path { fill: none; stroke: #e0930c; stroke-width: 4.5; }
+    .pfd-ac-dot { fill: #e0930c; stroke: #000000; stroke-width: 2; }
+    .pfd-read-box { fill: #000000; stroke: #e9ece7; stroke-width: 1.5; }
+    .pfd-read-val { fill: #ffffff; font-size: 24px; font-weight: 700; }
+    .pfd-lubber { fill: #e0930c; }
+    /* Barometric subscale. Cyan is the EFIS convention for a reference the
+       pilot sets, and keeps it from reading as another measured value. */
+    .pfd-baro-val { fill: #36e3c6; font-size: 17px; font-weight: 700; }
+    .pfd-baro-sub { fill: #8a938c; font-size: 12px; }
+    .pfd-lost { fill: #e0687a; font-size: 20px; font-weight: 700; letter-spacing: 0.16em; }
+
+    /* The instrument scales with the page, so on a phone every label shrinks
+       with it. Trade some breathing room for type that can still be read at
+       arm's length - watching a live flight on a phone is the common case. */
+    @media (max-width: 620px) {
+        .pfd-tape-lbl { font-size: 19px; }
+        .pfd-ladder-lbl { font-size: 16px; }
+        .pfd-cap { font-size: 15px; letter-spacing: 0.1em; }
+        .pfd-read-val { font-size: 30px; }
+        .pfd-baro-val { font-size: 22px; }
+        .pfd-baro-sub { font-size: 15px; }
+        .pfd-lost { font-size: 26px; }
+    }
+</style>
+<script>
+// Draws the live flight's attitude, speed, altitude and magnetic heading.
+// `renderPFD(doc)` is safe to call on every poll: it builds on the first call
+// with usable data and only moves things after that.
+(function () {
+    const VW = 640, VH = 400;
+    const TOP = 44, TH = 280, MID = TOP + TH / 2;
+    const SX = 16, SW = 90;                         // speed tape
+    const HX = 124, HW = 392;                       // horizon
+    const HCX = HX + HW / 2, HCY = MID;
+    const AX = 524, AW = 100;                       // altitude tape
+    const HDX = HX, HDW = HW, HDY = 334, HDH = 44;  // heading tape, under the horizon
+    const BANK_R = 112;
+
+    // Scale factors, picked so each visible window matches what the real
+    // instrument shows: about 45 deg of pitch, 90 kt, 1750 ft and 140 deg.
+    const PPD = 6, PXPK = 3, PXPF = 0.16, PXPD = 4.4;
+
+    const IAS_MAX = 600, ALT_MIN = -1000, ALT_MAX = 45000;
+
+    let root = null, built = false, applied = false, hUnwrap = null;
+
+    function markup() {
+        let spd = '';
+        for (let v = 0; v <= IAS_MAX; v += 5) {
+            const y = MID - v * PXPK, major = v % 10 === 0;
+            spd += `<line x1="${SX + SW - (major ? 14 : 8)}" y1="${y}" x2="${SX + SW}" y2="${y}" class="pfd-tick"/>`;
+            if (major) spd += `<text x="${SX + SW - 19}" y="${y + 5}" class="pfd-tape-lbl" text-anchor="end">${v}</text>`;
+        }
+
+        let alt = '';
+        for (let v = ALT_MIN; v <= ALT_MAX; v += 100) {
+            const y = MID - v * PXPF, major = v % 500 === 0;
+            alt += `<line x1="${AX}" y1="${y}" x2="${AX + (major ? 14 : 8)}" y2="${y}" class="pfd-tick"/>`;
+            if (major) alt += `<text x="${AX + 19}" y="${y + 5}" class="pfd-tape-lbl" text-anchor="start">${v}</text>`;
+        }
+
+        // Three turns' worth of compass, so the tape never runs out under a
+        // heading that has been unwrapped away from 0..360 (see headingShift).
+        let hdg = '';
+        for (let d = -360; d <= 720; d += 5) {
+            const x = HCX + d * PXPD, major = d % 10 === 0;
+            hdg += `<line x1="${x}" y1="${HDY}" x2="${x}" y2="${HDY + (major ? 11 : 6)}" class="pfd-tick"/>`;
+            if (major) {
+                const m = ((d % 360) + 360) % 360;
+                const lbl = m === 0 ? 'N' : m === 90 ? 'E' : m === 180 ? 'S' : m === 270 ? 'W' : String(m / 10);
+                hdg += `<text x="${x}" y="${HDY + 31}" class="pfd-tape-lbl" text-anchor="middle">${lbl}</text>`;
+            }
+        }
+
+        let ladder = '';
+        for (let p = -30; p <= 30; p += 5) {
+            if (p === 0) continue;
+            const y = HCY - p * PPD, w = p % 10 === 0 ? 44 : 24;
+            ladder += `<line x1="${HCX - w}" y1="${y}" x2="${HCX + w}" y2="${y}" class="pfd-ladder"/>`;
+            if (p % 10 === 0) {
+                ladder += `<text x="${HCX - w - 6}" y="${y + 4}" class="pfd-ladder-lbl" text-anchor="end">${Math.abs(p)}</text>`
+                        + `<text x="${HCX + w + 6}" y="${y + 4}" class="pfd-ladder-lbl" text-anchor="start">${Math.abs(p)}</text>`;
+            }
+        }
+
+        // Fixed bank scale: ticks sit outside the arc the rolling pointer sweeps.
+        let bank = '';
+        [[-60, 12], [-45, 12], [-30, 12], [-20, 8], [-10, 8], [10, 8], [20, 8], [30, 12], [45, 12], [60, 12]]
+            .forEach(function (m) {
+                const a = m[0] * Math.PI / 180, s = Math.sin(a), c = Math.cos(a), r1 = BANK_R + m[1];
+                bank += `<line x1="${(HCX + BANK_R * s).toFixed(1)}" y1="${(HCY - BANK_R * c).toFixed(1)}"`
+                      + ` x2="${(HCX + r1 * s).toFixed(1)}" y2="${(HCY - r1 * c).toFixed(1)}" class="pfd-bank"/>`;
+            });
+
+        return `
+<svg id="pfd-svg" viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Flight display">
+  <defs>
+    <clipPath id="pfdClipHzn"><rect x="${HX}" y="${TOP}" width="${HW}" height="${TH}" rx="4"/></clipPath>
+    <clipPath id="pfdClipSpd"><rect x="${SX}" y="${TOP}" width="${SW}" height="${TH}" rx="4"/></clipPath>
+    <clipPath id="pfdClipAlt"><rect x="${AX}" y="${TOP}" width="${AW}" height="${TH}" rx="4"/></clipPath>
+    <clipPath id="pfdClipHdg"><rect x="${HDX}" y="${HDY}" width="${HDW}" height="${HDH}" rx="4"/></clipPath>
+  </defs>
+
+  <text x="${SX + SW / 2}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle">IAS KT</text>
+  <text id="pfd-mid-cap" x="${HCX}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle"></text>
+  <text x="${AX + AW / 2}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle">ALT FT</text>
+
+  <g clip-path="url(#pfdClipHzn)">
+    <g id="pfd-roll" class="pfd-move">
+      <g id="pfd-pitch" class="pfd-move">
+        <rect x="${HCX - 1000}" y="${HCY - 2000}" width="2000" height="2000" fill="#2d7dbd"/>
+        <rect x="${HCX - 1000}" y="${HCY}" width="2000" height="2000" fill="#6e4a20"/>
+        <line x1="${HCX - 1000}" y1="${HCY}" x2="${HCX + 1000}" y2="${HCY}" class="pfd-horizon-line"/>
+        ${ladder}
+      </g>
+      <polygon points="${HCX},${HCY - BANK_R + 2} ${HCX - 9},${HCY - BANK_R + 17} ${HCX + 9},${HCY - BANK_R + 17}" class="pfd-roll-ptr"/>
+    </g>
+    ${bank}
+    <polygon points="${HCX},${HCY - BANK_R - 3} ${HCX - 9},${HCY - BANK_R - 17} ${HCX + 9},${HCY - BANK_R - 17}" class="pfd-bank-zero"/>
+  </g>
+  <g class="pfd-ac-shadow">
+    <path d="M ${HCX - 112} ${HCY} h 40 v 14"/><path d="M ${HCX + 112} ${HCY} h -40 v 14"/>
+  </g>
+  <g class="pfd-ac">
+    <path d="M ${HCX - 112} ${HCY} h 40 v 14"/><path d="M ${HCX + 112} ${HCY} h -40 v 14"/>
+  </g>
+  <rect x="${HCX - 6}" y="${HCY - 6}" width="12" height="12" class="pfd-ac-dot"/>
+  <rect x="${HX}" y="${TOP}" width="${HW}" height="${TH}" rx="4" class="pfd-frame"/>
+
+  <rect x="${SX}" y="${TOP}" width="${SW}" height="${TH}" rx="4" class="pfd-tape-bg"/>
+  <g clip-path="url(#pfdClipSpd)"><g id="pfd-spd" class="pfd-move">${spd}</g></g>
+  <rect x="${SX}" y="${TOP}" width="${SW}" height="${TH}" rx="4" class="pfd-frame"/>
+  <rect x="${SX}" y="${MID - 18}" width="${SW + 8}" height="36" class="pfd-read-box"/>
+  <text id="pfd-ias" x="${SX + (SW + 8) / 2}" y="${MID + 9}" class="pfd-read-val" text-anchor="middle">---</text>
+
+  <rect x="${AX}" y="${TOP}" width="${AW}" height="${TH}" rx="4" class="pfd-tape-bg"/>
+  <g clip-path="url(#pfdClipAlt)"><g id="pfd-alt" class="pfd-move">${alt}</g></g>
+  <rect x="${AX}" y="${TOP}" width="${AW}" height="${TH}" rx="4" class="pfd-frame"/>
+  <rect x="${AX - 8}" y="${MID - 18}" width="${AW + 8}" height="36" class="pfd-read-box"/>
+  <text id="pfd-alt-val" x="${AX - 8 + (AW + 8) / 2}" y="${MID + 9}" class="pfd-read-val" text-anchor="middle">-----</text>
+
+  <rect x="${HDX}" y="${HDY}" width="${HDW}" height="${HDH}" rx="4" class="pfd-tape-bg"/>
+  <g clip-path="url(#pfdClipHdg)"><g id="pfd-hdg" class="pfd-move">${hdg}</g></g>
+  <rect x="${HDX}" y="${HDY}" width="${HDW}" height="${HDH}" rx="4" class="pfd-frame"/>
+  <polygon points="${HCX},${HDY + 13} ${HCX - 9},${HDY - 1} ${HCX + 9},${HDY - 1}" class="pfd-lubber"/>
+  <rect x="${HCX - 52}" y="${HDY - 32}" width="104" height="30" class="pfd-read-box"/>
+  <text id="pfd-hdg-val" x="${HCX}" y="${HDY - 10}" class="pfd-read-val" text-anchor="middle">---</text>
+  <text id="pfd-hdg-cap" x="${HCX}" y="${VH - 6}" class="pfd-cap" text-anchor="middle">MAGNETIC HEADING</text>
+
+  <g id="pfd-baro" style="display:none">
+    <rect x="${AX}" y="${HDY}" width="${AW}" height="${HDH}" rx="4" class="pfd-tape-bg"/>
+    <rect x="${AX}" y="${HDY}" width="${AW}" height="${HDH}" rx="4" class="pfd-frame"/>
+    <text id="pfd-baro-in" x="${AX + AW / 2}" y="${HDY + 20}" class="pfd-baro-val" text-anchor="middle"></text>
+    <text id="pfd-baro-hpa" x="${AX + AW / 2}" y="${HDY + 36}" class="pfd-baro-sub" text-anchor="middle"></text>
+  </g>
+
+  <g id="pfd-lost" style="display:none">
+    <rect x="0" y="0" width="${VW}" height="${VH}" fill="#05070a" opacity="0.62"/>
+    <text x="${HCX}" y="${MID + 66}" class="pfd-lost" text-anchor="middle">SIGNAL LOST</text>
+  </g>
+</svg>`;
+    }
+
+    const el = function (id) { return document.getElementById(id); };
+    const clamp = function (v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; };
+    const numOr = function (v, fallback) { return typeof v === 'number' && isFinite(v) ? v : fallback; };
+    const wrap360 = function (v) { return ((v % 360) + 360) % 360; };
+
+    // The compass has to keep turning the short way round when the heading
+    // crosses north, so track an unwrapped value rather than 0..360. It is
+    // folded back once it leaves the span the ladder covers, and that one frame
+    // is applied without the transition so the tape does not spin backwards.
+    function headingShift(hdg) {
+        let snap = false;
+        if (hUnwrap === null) {
+            hUnwrap = hdg;
+            snap = true;
+        } else {
+            hUnwrap += ((hdg - hUnwrap) % 360 + 540) % 360 - 180;
+            if (hUnwrap < -180 || hUnwrap > 540) {
+                hUnwrap = ((hUnwrap % 360) + 360) % 360;
+                snap = true;
+            }
+        }
+        return { x: -hUnwrap * PXPD, snap: snap };
+    }
+
+    function ensureBuilt() {
+        root = root || document.getElementById('pfd-mount');
+        if (!root) return false;
+        if (!built) { root.innerHTML = markup(); built = true; }
+        root.classList.remove('is-hidden');
+        return true;
+    }
+
+    // One reading, whoever produced it. Angles are expected in the aviation
+    // convention (nose-up and right-wing-down positive); `animate` asks for the
+    // easing that carries the needles between two live samples, which replay
+    // turns off because it feeds a new reading every frame already.
+    function apply(r) {
+        const pitch = clamp(numOr(r.pitch, 0), -90, 90);
+        const roll = ((numOr(r.roll, 0) % 360) + 540) % 360 - 180;
+        const ias = Math.max(0, numOr(r.ias, 0));
+        const altFt = numOr(r.altitude, 0);
+        const hdg = wrap360(numOr(r.heading, 0));
+        const shift = headingShift(hdg);
+
+        // Nose up moves the horizon down; a right bank rolls the world the other way.
+        el('pfd-pitch').setAttribute('transform', `translate(0 ${(pitch * PPD).toFixed(2)})`);
+        el('pfd-roll').setAttribute('transform', `rotate(${(-roll).toFixed(2)} ${HCX} ${HCY})`);
+        el('pfd-spd').setAttribute('transform', `translate(0 ${(clamp(ias, 0, IAS_MAX) * PXPK).toFixed(2)})`);
+        el('pfd-alt').setAttribute('transform', `translate(0 ${(clamp(altFt, ALT_MIN, ALT_MAX) * PXPF).toFixed(2)})`);
+
+        const hdgEl = el('pfd-hdg');
+        if (shift.snap) hdgEl.classList.remove('pfd-move');
+        hdgEl.setAttribute('transform', `translate(${shift.x.toFixed(2)} 0)`);
+        if (shift.snap) { hdgEl.getBoundingClientRect(); hdgEl.classList.add('pfd-move'); }
+
+        el('pfd-ias').textContent = Math.round(ias);
+        el('pfd-alt-val').textContent = Math.round(altFt);
+        el('pfd-hdg-val').textContent = String(Math.round(hdg) % 360).padStart(3, '0') + '°';
+        el('pfd-hdg-cap').textContent = r.headingLabel || 'MAGNETIC HEADING';
+
+        // Altimeter subscale, in inches with the millibars underneath - the
+        // sims report inches, and which one a pilot reads depends on where
+        // they fly. Hidden rather than zeroed when absent: the track carries
+        // no barometric setting, so replay has none to show.
+        const baro = numOr(r.baro, 0);
+        if (baro > 0) {
+            el('pfd-baro').style.display = '';
+            el('pfd-baro-in').textContent = baro.toFixed(2) + ' IN';
+            el('pfd-baro-hpa').textContent = Math.round(baro * 33.8639) + ' hPa';
+        } else {
+            el('pfd-baro').style.display = 'none';
+        }
+        el('pfd-mid-cap').textContent = r.caption || '';
+        el('pfd-lost').style.display = r.stale ? '' : 'none';
+        // role="img" hides the SVG's own text from assistive tech, so the label
+        // has to carry the reading itself.
+        el('pfd-svg').setAttribute('aria-label',
+            `${Math.round(ias)} knots, ${Math.round(altFt)} feet, heading ${Math.round(hdg) % 360}, `
+            + `pitch ${Math.round(pitch)} degrees, bank ${Math.round(Math.abs(roll))} degrees `
+            + `${Math.abs(roll) < 1 ? 'level' : roll > 0 ? 'right' : 'left'}`
+            + `${baro > 0 ? `, altimeter ${baro.toFixed(2)} inches` : ''}`);
+
+        // Ease between readings only once there is a previous one to ease from:
+        // the first would otherwise sweep up from zero across the whole tape
+        // while the page loads.
+        if (r.animate && applied) {
+            if (!root.classList.contains('pfd-anim')) { root.getBoundingClientRect(); root.classList.add('pfd-anim'); }
+        } else if (!r.animate) {
+            root.classList.remove('pfd-anim');
+        }
+        applied = true;
+    }
+
+    /// Live path: one poll of the live document. Hides itself when there is
+    /// nothing flying - no fix yet, or the flight is over and replay takes over.
+    window.renderPFD = function (doc) {
+        const c = doc.current;
+        if (!c || doc.status === 'ended') {
+            root = root || document.getElementById('pfd-mount');
+            if (root) root.classList.add('is-hidden');
+            return;
+        }
+        if (!ensureBuilt()) return;
+        apply({
+            pitch: c.pitch,
+            roll: c.roll,
+            ias: numOr(c.ias, numOr(c.speed, 0)),
+            altitude: numOr(c.indicatedAltitude, numOr(c.altitude, 0)),
+            heading: numOr(c.magneticHeading, numOr(c.heading, 0)),
+            baro: c.altimeterSetting,
+            caption: (c.phase || '').replace(/_/g, ' ').toUpperCase(),
+            // A stale feed leaves the last attitude on screen, scrimmed and
+            // flagged, rather than blanking it: knowing where the aeroplane was
+            // is still worth something, as long as nobody mistakes it for live.
+            stale: doc.status === 'stale',
+            animate: true,
+        });
+    };
+
+    /// Replay path: one interpolated sample from a finished flight's track.
+    window.renderPFDSample = function (r) {
+        if (!ensureBuilt()) return;
+        apply(r);
+    };
+})();
+</script>

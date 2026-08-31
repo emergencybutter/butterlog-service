@@ -1244,14 +1244,18 @@ async fn flight_share_detail_handler(
     axum::extract::Path(share_id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let row: Option<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT r2_key, user_id FROM flight_shares WHERE id = $1"
+    // The simulator comes from the flight row rather than the share blob: the
+    // blob has never carried it, and the renderer needs it to read the track's
+    // raw pitch and roll. `remote_flight_id` is null on shares made before the
+    // flights table linked them, which reads as unknown.
+    let row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT s.r2_key, s.user_id, f.statistics->>'simulator'            FROM flight_shares s            LEFT JOIN flights f ON f.id = s.remote_flight_id           WHERE s.id = $1"
     )
     .bind(&share_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (key, share_owner_id) = match row {
+    let (key, share_owner_id, simulator) = match row {
         Some(r) => r,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Share not found</h1>".to_string())).into_response()),
     };
@@ -1279,6 +1283,7 @@ async fn flight_share_detail_handler(
     let page = templates::ShareDetailPage {
         share_id,
         is_owner,
+        simulator: simulator.unwrap_or_default(),
         json_escaped: json_str.replace('\\', "\\\\").replace("</", "<\\/"),
     };
 
