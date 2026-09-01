@@ -10,44 +10,75 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
     {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
     {% include "_flight_detail_style.html" %}
 </head>
 <body>
-<div class="page">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
-        <a href="/content" class="back" style="margin-bottom:0">← Flight History</a>
-        <a href="/map" class="back" style="margin-bottom:0">Live Map →</a>
-    </div>
-    <div class="live-bar">
-        <span class="live-chip" id="live-chip"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
-        <span class="live-meta" id="live-pilot"></span>
-        <span class="live-meta" id="live-updated"></span>
-    </div>
-    <div id="live-handoff"></div>
-    <div id="pfd-mount" class="pfd is-hidden"></div>
-    <div id="replay-mount" class="rp is-hidden"></div>
-    {% if is_owner %}<div id="controls-mount"></div>{% endif %}
-    <div id="header-mount"></div>
-    <div id="gallery-mount"></div>
-    <div id="map"></div>
-    <div id="map3d-section" style="display:none">
-        <div class="section-title" style="margin-bottom:0.75rem">3D Flight Path</div>
-        <div id="map3d">
-            <canvas id="deck3d"></canvas>
-            <div class="m3d-panel m3d-play">
-                <button id="m3d-play" title="Play flight">▶</button>
-                <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
+{% include "_app_shell.html" %}
+
+    <div class="view-head">
+        <div class="view-head-inner">
+            <a class="view-back" href="/content" aria-label="Back to flights" title="Back to flights">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            </a>
+            <span class="view-title" id="view-route">Flight</span>
+            <nav class="subnav" role="tablist" aria-label="Flight views">
+                <button class="subnav-tab" data-pane="summary" role="tab" type="button">Summary</button>
+                <button class="subnav-tab" data-pane="maps" role="tab" type="button">Maps</button>
+                <button class="subnav-tab" data-pane="graphs" role="tab" type="button">Graphs</button>
+            </nav>
+            <div class="view-actions">
+                <span class="live-chip" id="live-chip"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
+                <span class="live-meta" id="live-updated"></span>
             </div>
-            <div class="m3d-panel m3d-controls">
-                <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="58" aria-label="Camera tilt angle"></label>
-                <button id="m3d-reset">Reset view</button>
-            </div>
-            <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
-            <div class="m3d-panel m3d-hint">drag to pan · scroll to zoom · ctrl-drag to tilt</div>
         </div>
     </div>
-    <div class="charts" id="charts-mount"></div>
-</div>
+
+    <div class="view-body">
+        <div id="live-handoff"></div>
+        {% if is_owner %}<div id="controls-mount"></div>{% endif %}
+        <div id="replay-mount" class="rp is-hidden"></div>
+        <div id="header-mount"></div>
+        <div id="gallery-mount"></div>
+
+        <section data-pane="summary">
+            <div id="pfd-mount" class="pfd is-hidden"></div>
+            <div id="stats-mount"></div>
+            <div id="landing-mount"></div>
+        </section>
+
+        <section data-pane="maps">
+            <div id="map"></div>
+
+            <div id="touchdown-section" style="display:none">
+                <div class="section-title" style="margin-bottom:0.75rem">Touchdown</div>
+                <div id="map-touchdown"></div>
+            </div>
+            <div id="map3d-section" style="display:none">
+                <div class="section-title" style="margin-bottom:0.75rem">3D Flight Path</div>
+                <div id="map3d">
+                    <canvas id="deck3d"></canvas>
+                    <div class="m3d-panel m3d-play">
+                        <button id="m3d-play" title="Play flight">&#9654;</button>
+                        <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
+                    </div>
+                    <div class="m3d-panel m3d-controls">
+                        <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="58" aria-label="Camera tilt angle"></label>
+                        <button id="m3d-reset">Reset view</button>
+                    </div>
+                    <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
+                    <div class="m3d-panel m3d-hint">drag to pan &middot; scroll to zoom &middot; ctrl-drag to tilt</div>
+                </div>
+            </div>
+        </section>
+
+        <section data-pane="graphs" hidden>
+            <div class="charts" id="charts-mount"></div>
+        </section>
+    </div>
+
+{% include "_app_shell_foot.html" %}
+
 <div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
     <button class="lb-close" onclick="closeLb()">✕</button>
     <img id="lb-img" src="" alt="">
@@ -55,6 +86,7 @@
 {% include "_flight_render.html" %}
 {% include "_pfd.html" %}
 {% include "_replay.html" %}
+{% include "_flight_panes.html" %}
 <script>
 (function () {
     const FLIGHT_ID = {{ flight_id }};
@@ -76,7 +108,6 @@
         updatedEl.textContent = s === 'ended'
             ? ''
             : ago < 60 ? `updated ${ago}s ago` : `updated ${Math.floor(ago / 60)}m ago`;
-        if (doc.pilot) document.getElementById('live-pilot').textContent = doc.pilot.name;
     }
 
     // Once the flight is over, the share is the permanent artifact — point at it
@@ -112,6 +143,8 @@
 
         if (first) {
             handle = renderFlightDoc(doc);
+            window.flightHandle = handle;
+            if (window.flightPanesRefresh) window.flightPanesRefresh();
         } else {
             handle.append(doc);
         }

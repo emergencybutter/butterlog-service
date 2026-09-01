@@ -1,0 +1,47 @@
+<!-- Maps / Graphs tabs for a flight detail view.
+
+     Panes are `<section data-pane="...">`; the buttons carry the same names.
+     Include after the page has called renderFlightDoc and set
+     `window.flightHandle`, so a pane becoming visible can tell the renderer to
+     re-measure - Leaflet and Chart.js both size themselves against their
+     container at creation, and neither notices being un-hidden later. -->
+<script>
+(function () {
+    const tabs = Array.prototype.slice.call(document.querySelectorAll('.subnav-tab[data-pane]'));
+    const panes = Array.prototype.slice.call(document.querySelectorAll('section[data-pane]'));
+    if (!tabs.length) return;
+    const KEY = 'butterlog-flight-pane';
+
+    function show(name) {
+        tabs.forEach(function (t) {
+            const on = t.dataset.pane === name;
+            t.classList.toggle('is-on', on);
+            t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        panes.forEach(function (p) { p.hidden = p.dataset.pane !== name; });
+        const h = window.flightHandle;
+        if (h && h.onPaneShown) h.onPaneShown(name);
+        try { sessionStorage.setItem(KEY, name); } catch (e) {}
+    }
+
+    tabs.forEach(function (t) {
+        t.addEventListener('click', function () { show(t.dataset.pane); });
+    });
+
+    // Carry the choice between flights: someone comparing traces down a list
+    // should not have to re-pick Graphs on every one.
+    let initial = 'summary';
+    try {
+        const stored = sessionStorage.getItem(KEY);
+        if (stored && tabs.some(function (t) { return t.dataset.pane === stored; })) initial = stored;
+    } catch (e) {}
+    show(initial);
+
+    // The renderer may not exist yet on the live page, which builds its view
+    // from the first poll. Re-announce once it does.
+    window.flightPanesRefresh = function () {
+        const on = tabs.filter(function (t) { return t.classList.contains('is-on'); })[0];
+        if (on) show(on.dataset.pane);
+    };
+})();
+</script>

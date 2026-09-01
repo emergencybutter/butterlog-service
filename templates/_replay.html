@@ -95,6 +95,18 @@ window.FlightReplay = (function () {
         return lastHeading;
     }
 
+    /// Interpolate an angle the short way round, so 359 -> 001 crosses north
+    /// rather than sweeping backwards through the whole compass.
+    function lerpAngle(arr, i, j, f) {
+        const a = arr[i], b = arr[j];
+        if (typeof a !== 'number') return typeof b === 'number' ? b : 0;
+        if (typeof b !== 'number') return a;
+        const d = ((b - a) % 360 + 540) % 360 - 180;
+        return ((a + d * f) % 360 + 360) % 360;
+    }
+
+    const has = arr => Array.isArray(arr) && arr.length > 0;
+
     function sampleAt(t) {
         const i = indexAt(t);
         const j = Math.min(i + 1, axis.length - 1);
@@ -112,6 +124,12 @@ window.FlightReplay = (function () {
             vspeed: lerp(S.vs, i, j, f),
             pitch: lerp(S.pitch, i, j, f),
             roll: lerp(S.roll, i, j, f),
+            // A recorded heading beats one inferred from the fixes; the track
+            // is the fallback for flights logged before the client sent it.
+            heading: has(S.heading) ? lerpAngle(S.heading, i, j, f) : null,
+            groundSpeed: has(S.ground_speed) ? lerp(S.ground_speed, i, j, f) : null,
+            baro: has(S.baro) ? lerp(S.baro, i, j, f) : null,
+            magvar: has(S.magvar) ? lerp(S.magvar, i, j, f) : null,
             track: trackAt(i, j),
         };
     }

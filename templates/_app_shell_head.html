@@ -1,0 +1,252 @@
+<!-- Styles for the /content application chrome and the shared view primitives
+     (header bar, rows, tables, empty states) the section's pages are built from.
+     Include in <head> after _theme_head.html. -->
+<style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+        margin: 0;
+        font-family: var(--font-body);
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    .app { min-height: 100%; }
+
+    /* ── Rail ─────────────────────────────────────────────────────────────
+       A narrow band of chrome. Icons carry the navigation; the labels under
+       them are small enough to read as captions rather than as a menu of
+       links. The width is set by the longest label - "My Aircrafts" wrapping
+       to two lines would make one item taller than the rest and break the
+       rhythm of the column. */
+    .rail {
+        position: fixed; inset: 0 auto 0 0; z-index: 40;
+        width: 88px;
+        display: flex; flex-direction: column;
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+    }
+
+    .brand {
+        display: flex; align-items: center; justify-content: center;
+        height: 52px; flex: none;
+        border-bottom: 1px solid var(--border);
+        text-decoration: none;
+    }
+    .brand-mark {
+        font-family: var(--font-display); font-weight: 800; font-size: 0.95rem;
+        letter-spacing: -0.02em; color: var(--accent-text);
+    }
+    .brand-word { display: none; }
+
+    .rail-nav { list-style: none; margin: 0; padding: 8px 0 0; flex: 1 1 auto; }
+    .rail-foot { padding: 0 0 8px; border-top: 1px solid var(--border); margin-top: 8px; }
+
+    .rail-item {
+        position: relative;
+        display: flex; flex-direction: column; align-items: center; gap: 4px;
+        width: 100%; padding: 10px 4px 8px;
+        background: none; border: 0; cursor: pointer;
+        color: var(--text-muted); text-decoration: none;
+        font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.02em;
+        text-transform: uppercase; text-align: center;
+        transition: color var(--t), background-color var(--t);
+    }
+    .rail-item svg { width: 20px; height: 20px; display: block; }
+    .rail-item span { display: block; line-height: 1.1; }
+    .rail-item:hover { color: var(--text); background: var(--surface-2); }
+    /* Active is a bar plus colour: the bar survives a colour-blind read. */
+    .rail-item.is-active { color: var(--accent-text); }
+    .rail-item.is-active::before {
+        content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
+        width: 2px; background: var(--accent); border-radius: 0 2px 2px 0;
+    }
+    .rail-item.is-minor { font-size: 8px; color: var(--text-muted); opacity: 0.85; }
+    .rail-item.is-minor svg { width: 17px; height: 17px; }
+    /* Settings lives in the footer but is still a destination: without this the
+       quieter `is-minor` colour, declared later, would win over the active one. */
+    .rail-item.is-minor.is-active { color: var(--accent-text); opacity: 1; }
+
+    .theme-toggle .icon-sun, #theme-toggle .icon-sun { display: none; }
+    #theme-toggle .icon-moon { display: block; }
+    :root[data-theme="light"] #theme-toggle .icon-sun { display: block; }
+    :root[data-theme="light"] #theme-toggle .icon-moon { display: none; }
+    @media (prefers-color-scheme: light) {
+        :root:not([data-theme="dark"]) #theme-toggle .icon-sun { display: block; }
+        :root:not([data-theme="dark"]) #theme-toggle .icon-moon { display: none; }
+    }
+
+    .rail-user {
+        display: flex; flex-direction: column; align-items: center; gap: 4px;
+        padding: 10px 6px 4px;
+        font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.04em;
+        color: var(--text-muted); text-transform: uppercase;
+    }
+    .rail-user img {
+        width: 22px; height: 22px; border-radius: 50%;
+        border: 1px solid var(--border-strong);
+    }
+    .rail-user span {
+        max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ── Main column ─────────────────────────────────────────────────────── */
+    .app-main { margin-left: 88px; min-height: 100%; display: flex; flex-direction: column; }
+
+    .topbar { display: none; }
+    .hamburger {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 34px; height: 34px; margin-left: -6px;
+        background: none; border: 0; color: var(--text); cursor: pointer;
+    }
+    .hamburger svg { width: 20px; height: 20px; }
+
+    .scrim {
+        display: none; position: fixed; inset: 0; z-index: 39;
+        background: rgba(0,0,0,0.5); border: 0; padding: 0; cursor: default;
+    }
+
+    /* ── View header ──────────────────────────────────────────────────────
+       The page's own title bar: a section label and whatever controls belong
+       to the view. Deliberately not a heading - the rail already says where
+       you are, so repeating it as a banner wastes the first screenful. */
+    .view-head {
+        position: sticky; top: 0; z-index: 20;
+        height: 52px; padding: 0 20px;
+        background: color-mix(in srgb, var(--bg) 92%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--border);
+    }
+    /* The bar spans the column so its rule reads as chrome, but its contents
+       track the content width - otherwise the right-hand count floats away
+       from the list edge it belongs to. */
+    .view-head-inner {
+        display: flex; align-items: center; gap: 12px;
+        height: 100%; max-width: 900px;
+    }
+    .view-title {
+        font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
+        letter-spacing: 0.16em; text-transform: uppercase; color: var(--text);
+    }
+    .view-sub {
+        font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--text-muted);
+    }
+    .view-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+    .view-body { padding: 20px; width: 100%; max-width: 900px; }
+
+    /* ── Sub-navigation ───────────────────────────────────────────────────
+       Tabs within a view. An underline rather than a pill: it sits on the
+       header's own rule, so switching panes does not move anything. */
+    .subnav { display: flex; align-items: stretch; gap: 2px; height: 100%; }
+    .subnav-tab {
+        position: relative;
+        background: none; border: 0; cursor: pointer;
+        padding: 0 12px; color: var(--text-muted);
+        font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.12em;
+        text-transform: uppercase;
+        transition: color var(--t);
+    }
+    .subnav-tab:hover { color: var(--text); }
+    .subnav-tab.is-on { color: var(--accent-text); }
+    .subnav-tab.is-on::after {
+        content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px;
+        height: 2px; background: var(--accent);
+    }
+
+    /* A quiet way back to the list the viewer came from. */
+    .view-back {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; margin-left: -4px; flex: none;
+        color: var(--text-muted); text-decoration: none;
+        border: 1px solid transparent; border-radius: var(--radius-sm);
+        transition: color var(--t), border-color var(--t);
+    }
+    .view-back:hover { color: var(--text); border-color: var(--border); }
+    .view-back svg { width: 15px; height: 15px; }
+
+    /* ── Segmented control ────────────────────────────────────────────────── */
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+    .seg a {
+        padding: 5px 11px; text-decoration: none;
+        font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--text-muted);
+        transition: color var(--t), background-color var(--t);
+    }
+    .seg a + a { border-left: 1px solid var(--border); }
+    .seg a:hover { color: var(--text); background: var(--surface-2); }
+    .seg a.is-on { background: var(--accent-weak); color: var(--accent-text); }
+
+    /* ── Rows ─────────────────────────────────────────────────────────────
+       A list of records, not a deck of cards: hairline separators, no gaps,
+       no lift on hover. Density is the point. */
+    .rows { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+    .row { display: block; text-decoration: none; color: inherit; border-top: 1px solid var(--border); }
+    .row:first-child { border-top: 0; }
+    a.row:hover { background: var(--surface-2); }
+
+    .empty {
+        border: 1px dashed var(--border); border-radius: var(--radius);
+        padding: 40px 20px; color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+    .empty p { margin: 0 0 4px; }
+    .empty .hint { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; color: var(--text-muted); }
+
+    /* ── Narrow: the rail becomes a drawer ────────────────────────────────── */
+    @media (max-width: 899px) {
+        .rail {
+            width: 232px;
+            transform: translateX(-100%);
+            transition: transform var(--t);
+            box-shadow: var(--shadow);
+        }
+        body.nav-open .rail { transform: none; }
+        body.nav-open .scrim { display: block; }
+        body.nav-open { overflow: hidden; }
+
+        .brand { justify-content: flex-start; padding: 0 16px; gap: 8px; }
+        .brand-word {
+            display: inline; font-family: var(--font-display); font-weight: 700;
+            font-size: 0.95rem; color: var(--text); letter-spacing: -0.01em;
+        }
+
+        /* Icon-over-label becomes icon-beside-label: a drawer has the width for
+           it, and reading a list of destinations top-to-bottom is easier. */
+        .rail-item {
+            flex-direction: row; justify-content: flex-start; gap: 12px;
+            padding: 11px 16px; font-size: 0.78rem; letter-spacing: 0.02em;
+            text-transform: none; text-align: left;
+            font-family: var(--font-body);
+        }
+        .rail-item svg, .rail-item.is-minor svg { width: 18px; height: 18px; }
+        .rail-item.is-minor { font-size: 0.78rem; }
+        .rail-user { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 11px 16px; font-size: 0.72rem; }
+
+        .app-main { margin-left: 0; }
+        .topbar {
+            position: sticky; top: 0; z-index: 30;
+            display: flex; align-items: center; gap: 10px;
+            height: 52px; padding: 0 16px;
+            background: var(--surface); border-bottom: 1px solid var(--border);
+        }
+        .topbar-section {
+            font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.14em;
+            text-transform: uppercase; color: var(--text);
+        }
+        /* The top bar already names the section; repeating it in the view
+           header would spend two of a phone's rows saying the same word. */
+        .view-head { top: 52px; padding: 0 16px; }
+        .view-head .view-title { display: none; }
+        .subnav-tab { padding: 0 10px; letter-spacing: 0.08em; }
+        .view-body { padding: 16px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .rail { transition: none; }
+    }
+</style>

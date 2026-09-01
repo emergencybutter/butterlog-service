@@ -38,9 +38,30 @@ function renderFlightDoc(d) {
         vs: (td.vspeed || []).slice(),
         pitch: att(td.pitch),
         roll: att(td.roll),
+        // Everything the client uploads per sample. A flight that predates a
+        // column, or a sim that does not provide it, leaves the array empty and
+        // its chart is simply not drawn.
+        heading: (td.heading || []).slice(),
+        track: (td.track || []).slice(),
+        ground_speed: (td.ground_speed || []).slice(),
+        true_airspeed: (td.true_airspeed || []).slice(),
+        baro: (td.baro || []).slice(),
+        magvar: (td.magvar || []).slice(),
+        g_load: (td.g_load || []).slice(),
+        oat: (td.oat || []).slice(),
+        wind_speed: (td.wind_speed || []).slice(),
+        wind_dir: (td.wind_dir || []).slice(),
+        fuel_flow: (td.fuel_flow || []).slice(),
+        fuel_left: (td.fuel_left || []).slice(),
+        fuel_right: (td.fuel_right || []).slice(),
+        rpm: (td.rpm || []).slice(),
+        pct_power: (td.pct_power || []).slice(),
+        manifold: (td.manifold || []).slice(),
+        oil_temp: (td.oil_temp || []).slice(),
+        oil_press: (td.oil_press || []).slice(),
         summary: d.summary || {},
         screenshots: d.screenshots || [],
-        map: null, path: null, planeMarker: null, charts: [], cursors: [], userMoved: false,
+        map: null, path: null, planeMarker: null, touchdownMap: null, charts: [], chartKeys: [], cursors: [], userMoved: false,
     };
 
     function headerHtml() {
@@ -69,29 +90,66 @@ function renderFlightDoc(d) {
         const notesText = (sum.notes || '').trim();
         const notesHtml = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${esc(notesText)}</div></div>` : '';
         return `
-        <div style="margin-bottom:1.5rem">
-            <div class="route"><span class="icao">${esc(dep)}</span><span class="arrow">→</span><span class="icao">${esc(arr)}</span></div>
+        <div style="margin-bottom:1.25rem">
             <div class="aircraft">${esc(ac)}</div>
             ${deducedHtml}
             <div class="meta">${fmtDate(sum.startTime||sum.start_time)} · ${fmtDur(dur)}</div>
             ${badgeHtml}
         </div>
-        <div class="stats-grid">
-            <div class="stat-card"><div class="stat-label">Max Altitude</div><div class="stat-value">${maxAlt} ft</div></div>
-            <div class="stat-card"><div class="stat-label">Max Speed (GS)</div><div class="stat-value">${maxGs} kt</div></div>
-            <div class="stat-card"><div class="stat-label">Fuel Consumed</div><div class="stat-value">${fuel} gal</div></div>
-            <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${fmtDur(dur)}</div></div>
-        </div>
-        ${lEvt ? `<div class="landing-card"><div class="section-title">Landing Performance</div><div class="landing-grid">
-            ${lvs != null ? `<div><div class="li-label">Touchdown VS</div><div class="li-val">${Math.round(lvs)} fpm</div></div>` : ''}
-            ${(lEvt.landingG||lEvt.landing_g) != null ? `<div><div class="li-label">Landing G</div><div class="li-val">${(lEvt.landingG||lEvt.landing_g).toFixed(2)} G</div></div>` : ''}
-            ${(lEvt.offsetPercent||lEvt.offset_percent) != null ? `<div><div class="li-label">Offset</div><div class="li-val">${(lEvt.offsetPercent||lEvt.offset_percent).toFixed(1)}%</div></div>` : ''}
-            ${(lEvt.thresholdDistFt||lEvt.threshold_dist_ft) != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${Math.round(lEvt.thresholdDistFt||lEvt.threshold_dist_ft)} ft</div></div>` : ''}
-        </div></div>` : ''}
         ${notesHtml}`;
     }
 
-    function drawHeader() { document.getElementById('header-mount').innerHTML = headerHtml(); }
+    /// The flight's headline figures. On the Summary tab rather than the
+    /// always-on header, so Maps and Graphs open straight onto the thing they
+    /// are named for instead of a screenful of numbers first.
+    function statsHtml() {
+        const sum = state.summary;
+        const dur = sum.durationMinutes || sum.duration_minutes || 0;
+        return `<div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Max Altitude</div><div class="stat-value">${(sum.maxAltitude || sum.max_altitude || 0).toFixed(0)} ft</div></div>
+            <div class="stat-card"><div class="stat-label">Max Speed (GS)</div><div class="stat-value">${(sum.maxGroundSpeed || sum.max_ground_speed || 0).toFixed(0)} kt</div></div>
+            <div class="stat-card"><div class="stat-label">Fuel Consumed</div><div class="stat-value">${(sum.fuelConsumed || sum.fuel_consumed || 0).toFixed(1)} gal</div></div>
+            <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${fmtDur(dur)}</div></div>
+        </div>`;
+    }
+
+    /// Touchdown numbers. Lives on the Summary tab rather than the always-on
+    /// header, so the flight identity stays short and the landing reads as one
+    /// thing next to the attitude it was flown at.
+    function landingHtml() {
+        const events = state.summary.events || [];
+        const lEvt = events.filter(e => (e.eventType||e.event_type) === 'landing').pop();
+        if (!lEvt) return '';
+        const lvs = lEvt.touchdownFpm || lEvt.touchdown_fpm;
+        const g = lEvt.landingG || lEvt.landing_g;
+        const off = lEvt.offsetPercent || lEvt.offset_percent;
+        const thr = lEvt.thresholdDistFt || lEvt.threshold_dist_ft;
+        const stab = lEvt.approachStability || lEvt.approach_stability;
+        return `<div class="landing-card"><div class="section-title">Landing Performance</div><div class="landing-grid">
+            ${lvs != null ? `<div><div class="li-label">Touchdown VS</div><div class="li-val">${Math.round(lvs)} fpm</div></div>` : ''}
+            ${g != null ? `<div><div class="li-label">Landing G</div><div class="li-val">${g.toFixed(2)} G</div></div>` : ''}
+            ${off != null ? `<div><div class="li-label">Offset</div><div class="li-val">${off.toFixed(1)}%</div></div>` : ''}
+            ${thr != null ? `<div><div class="li-label">Threshold</div><div class="li-val">${Math.round(thr)} ft</div></div>` : ''}
+            ${stab != null ? `<div><div class="li-label">Approach Stability</div><div class="li-val">${Math.round(stab)}</div></div>` : ''}
+        </div></div>`;
+    }
+
+    function drawHeader() {
+        document.getElementById('header-mount').innerHTML = headerHtml();
+        const sm = document.getElementById('stats-mount');
+        if (sm) sm.innerHTML = statsHtml();
+        const lm = document.getElementById('landing-mount');
+        if (lm) lm.innerHTML = landingHtml();
+        // The shell's title bar names the record you are looking at; only the
+        // renderer knows the route, so it fills it in.
+        const bar = document.getElementById('view-route');
+        if (bar) {
+            const sum = state.summary;
+            const dep = sum.startIcao || sum.departure || '';
+            const arr = sum.endIcao || sum.arrival || '';
+            if (dep || arr) bar.textContent = `${dep} → ${arr}`;
+        }
+    }
 
     function eventMarkersOnMap() {
         if (!state.map) return;
@@ -194,19 +252,100 @@ function renderFlightDoc(d) {
 
     const clockAt = x => new Date(axisToEpoch(x) * 1000).toISOString().slice(11, 16);
 
+    /// True when this flight actually carries a series. An array is either
+    /// full-length or empty: the service only sends a column some sample filled.
+    function hasData(key) {
+        const a = state[key];
+        return Array.isArray(a) && a.length > 0;
+    }
+
+    /// A close satellite view of where the flight actually touched down.
+    ///
+    /// The overview map is drawn on the dark canvas, which stops at z16 and
+    /// would be an upscaled blur at the scale that shows a runway. Imagery is
+    /// tiled past z19 and is the point here anyway: on a runway diagram you
+    /// want to see the surface, not a drawing of it.
+    ///
+    /// Framed on the last stretch of the approach rather than on the touchdown
+    /// point alone - a single point gives degenerate bounds, and seeing the
+    /// final few miles is what puts the touchdown in the context of the airport
+    /// around it.
+    function drawTouchdownMap() {
+        const host = document.getElementById('map-touchdown');
+        const section = document.getElementById('touchdown-section');
+        if (!host || state.touchdownMap) return;
+
+        const events = state.summary.events || [];
+        const lEvt = events.filter(e => (e.eventType||e.event_type) === 'landing').pop();
+        if (!lEvt || !lEvt.latitude || !lEvt.longitude) {
+            if (section) section.style.display = 'none';
+            return;
+        }
+        if (section) section.style.display = '';
+        const td = [lEvt.latitude, lEvt.longitude];
+
+        // The approach: samples inside the last three minutes before touchdown,
+        // which is a few miles at any light-aircraft or airliner speed.
+        let epoch = null;
+        try { epoch = new Date(String(lEvt.timestamp).replace(' ', 'T') + 'Z').getTime() / 1000; } catch (_) {}
+        const approach = [];
+        if (epoch) {
+            for (let i = 0; i < state.timestamps.length; i++) {
+                const dt = epoch - state.timestamps[i];
+                if (dt >= -30 && dt <= 180) approach.push([state.lats[i], state.lons[i]]);
+            }
+        }
+
+        const map = L.map('map-touchdown', { zoomControl: true });
+        state.touchdownMap = map;
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Esri, Maxar, Earthstar Geographics',
+            maxNativeZoom: 19,
+            maxZoom: 20,
+        }).addTo(map);
+
+        if (approach.length > 1) {
+            // Cased, because a thin line disappears against aerial photography.
+            L.polyline(approach, { color: '#000000', weight: 6, opacity: 0.45 }).addTo(map);
+            L.polyline(approach, { color: '#ffb000', weight: 2.5, opacity: 1 }).addTo(map);
+        }
+
+        // Frame the airport, not the arrival. Fitting the whole approach pulls
+        // the view out to a dozen miles - the aeroplane spends most of it far
+        // from the field - and the runway becomes a scratch. Box the touchdown
+        // point at roughly a mile across instead, which is the size of an
+        // airport, and let the approach line run off the edge.
+        const NM = 1 / 60;                       // degrees of latitude per nm
+        const halfLat = 0.6 * NM;
+        const halfLon = halfLat / Math.max(0.2, Math.cos(td[0] * Math.PI / 180));
+        map.fitBounds(L.latLngBounds(
+            [td[0] - halfLat, td[1] - halfLon],
+            [td[0] + halfLat, td[1] + halfLon],
+        ), { maxZoom: 17 });
+
+        L.circleMarker(td, { radius: 7, color: '#ffffff', fillColor: '#ff7a8a', fillOpacity: 1, weight: 2 })
+            .addTo(map)
+            .bindTooltip('Touchdown', { permanent: false });
+    }
+
     // Chart series, thinned to ~300 points so a long flight stays responsive.
+    // One entry per plottable key, so adding a column upstream is the only
+    // change needed to get a chart for it.
+    const SERIES_KEYS = ['alts', 'vs', 'ias', 'pitch', 'roll', 'heading', 'track', 'ground_speed', 'true_airspeed', 'baro', 'magvar', 'g_load', 'oat', 'wind_speed', 'wind_dir', 'fuel_flow', 'fuel_left', 'fuel_right', 'rpm', 'pct_power', 'manifold', 'oil_temp', 'oil_press'];
+
     function buildSeries() {
         const ts = state.timestamps;
         const step = Math.max(1, Math.floor(ts.length / 300));
-        const ad=[], id=[], vd=[], pd=[], sampledTs=[];
-        const t0 = ts[0];
-        for (let i=0; i<ts.length; i+=step) {
+        const out = { sampledTs: [], t0: ts[0] };
+        SERIES_KEYS.forEach(k => { if (hasData(k)) out[k] = []; });
+        for (let i = 0; i < ts.length; i += step) {
             const x = state.axis[i];
-            ad.push({x, y:state.alts[i]||0}); id.push({x, y:state.ias[i]||0});
-            vd.push({x, y:state.vs[i]||0}); pd.push({x, y:state.pitch[i]||0});
-            sampledTs.push(ts[i]);
+            SERIES_KEYS.forEach(k => {
+                if (out[k]) out[k].push({ x, y: state[k][i] || 0 });
+            });
+            out.sampledTs.push(ts[i]);
         }
-        return {ad, id, vd, pd, sampledTs, t0};
+        return out;
     }
 
     function drawCharts() {
@@ -214,9 +353,12 @@ function renderFlightDoc(d) {
         const series = buildSeries();
         if (state.charts.length) {
             // Rebuilding the datasets and updating in place is cheap at these
-            // sizes and avoids tearing down four canvases every poll.
-            const data = [series.ad, series.id, series.vd, series.pd];
-            state.charts.forEach((c, i) => { c.data.datasets[0].data = data[i]; c.update('none'); });
+            // sizes and avoids tearing down the canvases every poll. The chart
+            // order is the order PLOTS created them in.
+            state.charts.forEach((c, i) => {
+                const key = state.chartKeys[i];
+                if (series[key]) { c.data.datasets[0].data = series[key]; c.update('none'); }
+            });
             return;
         }
         const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
@@ -328,17 +470,50 @@ function renderFlightDoc(d) {
                 chart.canvas.style.cursor = shotHit(chart, evt.x, evt.y) >= 0 ? 'pointer' : 'default';
             },
         });
-        const mk = (id2, lbl, data, color) => {
+        const mk = (id2, lbl, data, color, key) => {
             const el = document.createElement('div'); el.className='chart-card';
             el.innerHTML=`<div class="section-title">${lbl}</div><canvas id="${id2}"></canvas><div class="chart-cursor"></div>`;
             document.getElementById('charts-mount').appendChild(el);
             state.charts.push(new Chart(document.getElementById(id2),{type:'line',data:{datasets:[{label:lbl,data,borderColor:color,backgroundColor:color+'22',borderWidth:1.5,pointRadius:0,fill:true,tension:0.2}]},options:opts(),plugins:[eventMarkerPlugin]}));
             state.cursors.push(el.querySelector('.chart-cursor'));
+            state.chartKeys.push(key);
         };
-        mk('ca','Altitude (ft)',series.ad,'#ffb000');
-        mk('ci','Airspeed (kt)',series.id,'#36e3c6');
-        mk('cv','Vert Speed (fpm)',series.vd,'#ff7a8a');
-        mk('cp','Pitch (°)',series.pd,'#ffc23d');
+        // Every per-sample series the track carries, plus ground speed derived
+        // from the fixes. Attitude is paired last so pitch and roll read
+        // together, the way they are flown.
+        // Every per-sample series, in reading order: how high and how fast up,
+        // how fast forward and through what air, where it pointed and how hard
+        // it turned, how it was held, then what the engine and tanks were doing.
+        // A series with no data for this flight is skipped rather than drawn
+        // empty - most of the engine channels only exist on piston singles.
+        const PLOTS = [
+            ['ca', 'Altitude (ft)',        'alts',          '#ffb000'],
+            ['cv', 'Vert Speed (fpm)',     'vs',            '#ff7a8a'],
+            ['ci', 'Airspeed IAS (kt)',    'ias',           '#36e3c6'],
+            ['cg', 'Ground Speed (kt)',    'ground_speed',  '#7aa2f7'],
+            ['cs', 'True Airspeed (kt)',   'true_airspeed', '#5ad6c0'],
+            ['ch', 'Heading (°)',          'heading',       '#9ece6a'],
+            ['ck', 'Ground Track (°)',     'track',         '#8fc866'],
+            ['cp', 'Pitch (°)',            'pitch',         '#ffc23d'],
+            ['cr', 'Roll (°)',             'roll',          '#c9a0ff'],
+            ['cn', 'Load Factor (G)',      'g_load',        '#ff9e64'],
+            ['cb', 'Altimeter (inHg)',     'baro',          '#a5b4c8'],
+            ['co', 'Outside Air Temp (°C)','oat',           '#7dcfff'],
+            ['cws','Wind Speed (kt)',      'wind_speed',    '#89ddff'],
+            ['cwd','Wind Direction (°)',   'wind_dir',      '#6ea8c7'],
+            ['cff','Fuel Flow (gph)',      'fuel_flow',     '#f7a072'],
+            ['cfl','Fuel Left (gal)',      'fuel_left',     '#e0af68'],
+            ['cfr','Fuel Right (gal)',     'fuel_right',    '#d8a25f'],
+            ['crp','Engine RPM',           'rpm',           '#bb9af7'],
+            ['cpw','Power (%)',            'pct_power',     '#c3a6ff'],
+            ['cmp','Manifold (inHg)',      'manifold',      '#9d86d6'],
+            ['cot','Oil Temp (°F)',        'oil_temp',      '#ff7a8a'],
+            ['cop','Oil Pressure (psi)',   'oil_press',     '#e06c8a'],
+        ];
+        PLOTS.forEach(([id2, label, key, color]) => {
+            if (!hasData(key)) return;
+            mk(id2, label, series[key], color, key);
+        });
     }
 
     function drawGallery() {
@@ -353,7 +528,11 @@ function renderFlightDoc(d) {
     drawHeader();
     drawGallery();
     drawMap();
+    drawTouchdownMap();
     drawCharts();
+
+    // Where the replay cursor sits, so re-showing a pane can restore it.
+    let lastProgress = 0;
 
     // Drop a marker at a reported position. Used by the live page for the
     // aircraft's current fix and by replay for the interpolated one.
@@ -399,18 +578,24 @@ function renderFlightDoc(d) {
         enableReplay() {
             if (typeof FlightReplay === 'undefined' || !FlightReplay.attach(state)) return false;
             FlightReplay.subscribe(ev => {
+                lastProgress = ev.progress;
                 const s = ev.sample;
+                // A recorded heading is magnetic once the sim's variation is
+                // taken off - the same rule extract_current applies to the live
+                // snapshot. Without one, fall back to course over ground from
+                // the fixes, and say so rather than passing it off as a heading.
+                const magnetic = s.heading === null ? null
+                    : (((attSign < 0 ? s.heading - (s.magvar || 0) : s.heading) % 360) + 360) % 360;
                 if (typeof renderPFDSample === 'function') renderPFDSample({
-                    pitch: s.pitch, roll: s.roll, ias: s.ias, altitude: s.altitude,
-                    // No sim reports a heading into the sample stream, so this
-                    // is course over ground derived from the fixes - true, not
-                    // magnetic. The display says which.
-                    heading: s.track,
-                    headingLabel: 'GROUND TRACK · TRUE',
+                    pitch: s.pitch, roll: s.roll,
+                    ias: s.ias, altitude: s.altitude, baro: s.baro,
+                    heading: magnetic === null ? s.track : magnetic,
+                    headingLabel: magnetic === null ? 'GROUND TRACK · TRUE' : 'MAGNETIC HEADING',
                     caption: new Date(s.epoch * 1000).toISOString().slice(11, 19) + 'Z',
                     animate: false,
                 });
-                setCurrentPos({ latitude: s.latitude, longitude: s.longitude, altitude: s.altitude, speed: s.ias, heading: s.track });
+                setCurrentPos({ latitude: s.latitude, longitude: s.longitude, altitude: s.altitude,
+                                speed: s.groundSpeed === null ? s.ias : s.groundSpeed, heading: s.track });
                 positionChartCursors(ev.axis);
             });
             return true;
@@ -428,6 +613,24 @@ function renderFlightDoc(d) {
                 state.vs = state.vs.concat(t.vspeed || []);
                 state.pitch = state.pitch.concat(att(t.pitch));
                 state.roll = state.roll.concat(att(t.roll));
+                state.heading = state.heading.concat(t.heading || []);
+                state.track = state.track.concat(t.track || []);
+                state.ground_speed = state.ground_speed.concat(t.ground_speed || []);
+                state.true_airspeed = state.true_airspeed.concat(t.true_airspeed || []);
+                state.baro = state.baro.concat(t.baro || []);
+                state.magvar = state.magvar.concat(t.magvar || []);
+                state.g_load = state.g_load.concat(t.g_load || []);
+                state.oat = state.oat.concat(t.oat || []);
+                state.wind_speed = state.wind_speed.concat(t.wind_speed || []);
+                state.wind_dir = state.wind_dir.concat(t.wind_dir || []);
+                state.fuel_flow = state.fuel_flow.concat(t.fuel_flow || []);
+                state.fuel_left = state.fuel_left.concat(t.fuel_left || []);
+                state.fuel_right = state.fuel_right.concat(t.fuel_right || []);
+                state.rpm = state.rpm.concat(t.rpm || []);
+                state.pct_power = state.pct_power.concat(t.pct_power || []);
+                state.manifold = state.manifold.concat(t.manifold || []);
+                state.oil_temp = state.oil_temp.concat(t.oil_temp || []);
+                state.oil_press = state.oil_press.concat(t.oil_press || []);
                 rebuildAxis();
             }
             if (doc.summary) state.summary = doc.summary;
@@ -446,6 +649,21 @@ function renderFlightDoc(d) {
         /// Drop a marker at the aircraft's reported position, so a viewer sees
         /// where it is even before the next track sample lands.
         setCurrent: setCurrentPos,
+        /// Call when a pane becomes visible. Leaflet and Chart.js both measure
+        /// their container at creation, so anything built inside a hidden pane
+        /// comes back zero-sized until told to measure again.
+        onPaneShown(name) {
+            if (name === 'maps') {
+                drawTouchdownMap();
+                if (state.map) state.map.invalidateSize();
+                if (state.touchdownMap) state.touchdownMap.invalidateSize();
+                if (window.flightDeck) window.flightDeck.redraw(true);
+            } else if (name === 'graphs') {
+                state.charts.forEach(c => c.resize());
+                // Chart pixels just moved, so the replay cursor has to follow.
+                if (typeof FlightReplay !== 'undefined' && FlightReplay.ready()) FlightReplay.seek(lastProgress);
+            }
+        },
     };
 }
 
@@ -548,6 +766,7 @@ function renderFlight3D(d) {
         onViewStateChange: ({ viewState }) => { curView = viewState; pitchSlider.value = Math.round(viewState.pitch); },
         layers: [...statics, ...marker(pts[0])],
     });
+    window.flightDeck = deckgl;
     pitchSlider.oninput = () => { curView = { ...curView, pitch: +pitchSlider.value }; deckgl.setProps({ initialViewState: curView }); };
     document.getElementById('m3d-maxalt').textContent = Math.round(maxAltFt).toLocaleString() + ' ft';
     document.getElementById('m3d-exag').textContent = EXAG > 1.05 ? 'vertical ×' + EXAG.toFixed(1) + ' (exaggerated)' : '';

@@ -146,8 +146,10 @@ fn num_at(v: &serde_json::Value, path: &[&str]) -> f64 {
 }
 
 /// Parse the app's ISO-ish timestamps. It emits both `%Y-%m-%d %H:%M:%S%.f` and
-/// RFC3339 depending on the field, so accept either.
-fn parse_time(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+/// RFC3339 depending on the field, so accept either. Shared with the aircraft
+/// aggregation, which read the same fields with an RFC3339-only parser and
+/// silently scored every flight as zero length.
+pub fn parse_time(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if ts.is_empty() {
         return None;
     }
@@ -359,17 +361,49 @@ pub async fn live_flight_handler(
         return Ok((StatusCode::NOT_MODIFIED, cache_headers(status, &etag)).into_response());
     }
 
-    let points: Vec<(i64, f32, f32, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>)> =
-        sqlx::query_as(
-            "SELECT sample_epoch, latitude, longitude, altitude, ias, vspeed, pitch, roll \
-               FROM flight_track_points \
-              WHERE flight_id = $1 AND sample_epoch > $2 \
-              ORDER BY sample_epoch",
-        )
-        .bind(flight_id)
-        .bind(q.since.unwrap_or(i64::MIN))
-        .fetch_all(&state.db)
-        .await?;
+    // sqlx only derives FromRow for tuples up to 16 elements, so the row is a
+    // named struct. Every added column is nullable: a flight recorded before
+    // the client sent it has none, and the renderer omits that chart.
+    #[derive(sqlx::FromRow)]
+    struct TrackRow {
+        sample_epoch: i64,
+        latitude: f32,
+        longitude: f32,
+        altitude: Option<f32>,
+        ias: Option<f32>,
+        vspeed: Option<f32>,
+        pitch: Option<f32>,
+        roll: Option<f32>,
+        heading: Option<f32>,
+        track: Option<f32>,
+        ground_speed: Option<f32>,
+        true_airspeed: Option<f32>,
+        baro: Option<f32>,
+        magvar: Option<f32>,
+        g_load: Option<f32>,
+        oat: Option<f32>,
+        wind_speed: Option<f32>,
+        wind_dir: Option<f32>,
+        fuel_flow: Option<f32>,
+        fuel_left: Option<f32>,
+        fuel_right: Option<f32>,
+        rpm: Option<f32>,
+        pct_power: Option<f32>,
+        manifold: Option<f32>,
+        oil_temp: Option<f32>,
+        oil_press: Option<f32>,
+    }
+
+    let points: Vec<TrackRow> = sqlx::query_as(
+        "SELECT sample_epoch, latitude, longitude, altitude, ias, vspeed, pitch, roll, heading, track, ground_speed, true_airspeed, baro, magvar, g_load, oat, wind_speed, wind_dir, fuel_flow, fuel_left, fuel_right, rpm, pct_power, manifold, oil_temp, oil_press \
+           FROM flight_track_points \
+          WHERE flight_id = $1 AND sample_epoch > $2 \
+          ORDER BY sample_epoch",
+    )
+    .bind(flight_id)
+    .bind(q.since.unwrap_or(i64::MIN))
+    .fetch_all(&state.db)
+    .await?;
 
     // Transpose back into the columnar wire format the renderer decodes. The
     // first timestamp is absolute and the rest are deltas, matching the share.
@@ -378,16 +412,30 @@ pub async fn live_flight_handler(
     for (i, p) in points.iter().enumerate() {
         transposed
             .timestamps
-            .push(if i == 0 { p.0 } else { p.0 - prev });
-        prev = p.0;
-        transposed.latitudes.push(p.1);
-        transposed.longitudes.push(p.2);
-        transposed.altitudes.push(p.3.unwrap_or(0.0));
-        transposed.ias.push(p.4.unwrap_or(0.0));
-        transposed.vspeed.push(p.5.unwrap_or(0.0));
-        transposed.pitch.push(p.6.unwrap_or(0.0));
-        transposed.roll.push(p.7.unwrap_or(0.0));
+            .push(if i == 0 { p.sample_epoch } else { p.sample_epoch - prev });
+        prev = p.sample_epoch;
+        transposed.latitudes.push(p.latitude);
+        transposed.longitudes.push(p.longitude);
+        transposed.altitudes.push(p.altitude.unwrap_or(0.0));
+        transposed.ias.push(p.ias.unwrap_or(0.0));
+        transposed.vspeed.push(p.vspeed.unwrap_or(0.0));
+        transposed.pitch.push(p.pitch.unwrap_or(0.0));
+        transposed.roll.push(p.roll.unwrap_or(0.0));
     }
+
+    // Send a column only when some sample actually carried it, so the client
+    // can tell "this flight never recorded it" from "it was zero".
+    macro_rules! column {
+        ($($name:ident),* $(,)?) => {
+            $(
+                if points.iter().any(|p| p.$name.is_some()) {
+                    transposed.$name =
+                        points.iter().map(|p| p.$name.unwrap_or(0.0)).collect();
+                }
+            )*
+        };
+    }
+    column!(heading, track, ground_speed, true_airspeed, baro, magvar, g_load, oat, wind_speed, wind_dir, fuel_flow, fuel_left, fuel_right, rpm, pct_power, manifold, oil_temp, oil_press);
 
     // On a delta the client already has the summary and gallery; sending them
     // again on every 10s poll is most of the payload.

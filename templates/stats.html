@@ -3,230 +3,125 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ButterLog Aircraft Stats</title>
-    <meta name="description" content="Most-flown aircraft on ButterLog, ranked by flights, time, and distance.">
+    <title>ButterLog Aircrafts</title>
     {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
     <style>
-        * { box-sizing: border-box; }
-        h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
-
-        body {
-            font-family: var(--font-body);
-            background: var(--bg);
-            color: var(--text-primary);
-            min-height: 100vh;
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 3rem 1rem;
-        }
-
-        .container {
-            max-width: 1080px;
-            width: 100%;
-            background: var(--panel-bg);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius);
-            padding: 3rem;
-            box-shadow: var(--shadow);
-        }
-
-        .header { text-align: center; margin-bottom: 2.5rem; }
-
-        h1 {
-            font-size: 2.5rem;
-            font-weight: 800;
-            margin: 0 0 0.5rem 0;
-            color: var(--text);
-            letter-spacing: -0.02em;
-        }
-
-        .subtitle {
-            color: var(--teal-text);
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            letter-spacing: 0.22em;
-            text-transform: uppercase;
-            margin: 0;
-        }
-
-        .nav-tabs {
-            display: flex;
-            justify-content: center;
-            flex-wrap: wrap;
-            gap: 1rem;
-            margin-bottom: 3rem;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 1rem;
-        }
-
-        .nav-tab {
-            color: var(--text-muted);
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 1rem;
-            padding: 0.5rem 1rem;
-            border-radius: var(--radius);
-            transition: color var(--t), background-color var(--t);
-        }
-        .nav-tab:hover { color: var(--text-primary); background: var(--surface-2); }
-        .nav-tab.active { color: var(--accent-text); background: var(--accent-weak); }
-
-        .boards {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
-        }
-        @media (max-width: 820px) { .boards { grid-template-columns: 1fr; } }
-
-        .board {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius);
-            padding: 1.75rem 1.5rem;
-        }
-
+        .boards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+        .board { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 14px 16px 6px; }
         .board-title {
-            display: flex;
-            align-items: baseline;
-            gap: 0.5rem;
-            margin: 0 0 1.5rem 0;
-            font-size: 1.05rem;
-            font-weight: 700;
+            display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+            margin: 0 0 12px;
+            font-family: var(--font-mono); font-size: 0.68rem; font-weight: 600;
+            letter-spacing: 0.14em; text-transform: uppercase; color: var(--text);
         }
-        .board-title .metric {
-            font-family: var(--font-mono);
-            font-size: 0.65rem;
-            letter-spacing: 0.18em;
-            text-transform: uppercase;
-            color: var(--text-muted);
-        }
+        .board-title .metric { font-weight: 400; letter-spacing: 0.06em; color: var(--text-muted); }
 
-        .srow { padding: 0.85rem 0; border-top: 1px solid var(--border-color); }
-        .srow:first-of-type { border-top: none; }
-
-        .srow-head {
-            display: flex;
-            align-items: baseline;
-            gap: 0.6rem;
+        /* Rows lead to that type's screenshots. Interactive, so they take a
+           hover, but nothing moves - this is a table, not a deck of cards. */
+        .srow {
+            display: block; padding: 7px 4px 9px; border-top: 1px solid var(--border);
+            color: inherit; text-decoration: none; border-radius: var(--radius-sm);
+            transition: background-color var(--t);
         }
-        .rank {
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            min-width: 1.5rem;
+        a.srow:hover { background: var(--surface-2); }
+        a.srow:hover .icao { color: var(--accent-text); }
+        .srow:first-of-type { border-top: 0; }
+        .srow-head { display: flex; align-items: baseline; gap: 8px; }
+        .rank { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); width: 1.4em; flex: none; }
+        .icao { font-family: var(--font-display); font-weight: 700; font-size: 0.92rem; letter-spacing: -0.01em; flex: none; }
+        /* The model behind the code. Takes the slack in the row and clips, so a
+           long name never pushes the figure out of alignment down the column. */
+        .ac-name {
+            min-width: 0; flex: 1 1 auto;
+            font-size: 0.76rem; color: var(--text-muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        .srow:nth-child(1) .rank { color: var(--accent-text); }
-        .icao {
-            font-family: var(--font-mono);
-            font-weight: 700;
-            font-size: 1rem;
-            letter-spacing: 0.03em;
-        }
-        .value {
-            margin-left: auto;
-            font-family: var(--font-mono);
-            font-weight: 500;
-            font-size: 0.9rem;
-            color: var(--text-primary);
-            white-space: nowrap;
-        }
-
-        .bar-track {
-            height: 6px;
-            background: var(--surface-2);
-            border-radius: var(--radius-pill);
-            margin: 0.55rem 0 0.4rem;
-            overflow: hidden;
-        }
-        .bar-fill {
-            height: 100%;
-            border-radius: var(--radius-pill);
-            background: var(--accent);
-        }
-        .srow:nth-child(1) .bar-fill { background: var(--accent); }
-
-        .sub {
-            font-size: 0.72rem;
-            color: var(--text-muted);
-            font-family: var(--font-mono);
-        }
-
-        .no-flights {
-            text-align: center;
-            color: var(--text-muted);
-            padding: 3rem 1rem;
-        }
+        .value { margin-left: auto; padding-left: 8px; flex: none; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-2); }
+        /* The bar is the comparison; keep it thin so the list still reads as a
+           table rather than a chart. */
+        .bar-track { height: 3px; border-radius: 2px; background: var(--surface-2); margin: 6px 0 4px; overflow: hidden; }
+        .bar-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+        .sub { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em; color: var(--text-muted); }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Aircraft Stats</h1>
-            <p class="subtitle">Most-flown types across every pilot</p>
-        </div>
+{% include "_app_shell.html" %}
 
-        <div class="nav-tabs">
-            <a href="/content" class="nav-tab">Flight History</a>
-            <a href="/content/stats" class="nav-tab active">Aircraft Stats</a>
-            <a href="/content/settings" class="nav-tab">Notification Settings</a>
-            <a href="/map" class="nav-tab">Live Map</a>
-        </div>
-
-        {% if by_flights.is_empty() %}
-        <div class="no-flights">
-            <p>No aircraft logged yet. Start the ButterLog client and take off!</p>
-        </div>
-        {% else %}
-        <div class="boards">
-            <div class="board">
-                <h2 class="board-title">By Flights <span class="metric">count</span></h2>
-                {% for r in by_flights %}
-                <div class="srow">
-                    <div class="srow-head">
-                        <span class="rank">{{ r.rank }}</span>
-                        <span class="icao">{{ r.icao }}</span>
-                        <span class="value">{{ r.value }}</span>
-                    </div>
-                    <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
-                    <div class="sub">{{ r.sub }}</div>
+    <div class="view-head">
+        <div class="view-head-inner">
+            <span class="view-title">{% if mine %}My Aircrafts{% else %}Aircrafts{% endif %}</span>
+            <span class="view-sub">{% if mine %}Types you have flown{% else %}Types across every pilot{% endif %}</span>
+            {% if !scope_mine_href.is_empty() %}
+            <div class="view-actions">
+                <div class="seg">
+                    <a href="{{ scope_mine_href }}" class="{% if mine %}is-on{% endif %}">Mine</a>
+                    <a href="{{ scope_all_href }}" class="{% if !mine %}is-on{% endif %}">Everyone</a>
                 </div>
-                {% endfor %}
             </div>
-
-            <div class="board">
-                <h2 class="board-title">By Time <span class="metric">hours flown</span></h2>
-                {% for r in by_time %}
-                <div class="srow">
-                    <div class="srow-head">
-                        <span class="rank">{{ r.rank }}</span>
-                        <span class="icao">{{ r.icao }}</span>
-                        <span class="value">{{ r.value }}</span>
-                    </div>
-                    <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
-                    <div class="sub">{{ r.sub }}</div>
-                </div>
-                {% endfor %}
-            </div>
-
-            <div class="board">
-                <h2 class="board-title">By Distance <span class="metric">nautical miles</span></h2>
-                {% for r in by_distance %}
-                <div class="srow">
-                    <div class="srow-head">
-                        <span class="rank">{{ r.rank }}</span>
-                        <span class="icao">{{ r.icao }}</span>
-                        <span class="value">{{ r.value }}</span>
-                    </div>
-                    <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
-                    <div class="sub">{{ r.sub }}</div>
-                </div>
-                {% endfor %}
-            </div>
+            {% endif %}
         </div>
-        {% endif %}
     </div>
-    {% include "_theme_toggle.html" %}
+
+    <div class="view-body">
+    {% if by_flights.is_empty() %}
+    <div class="empty">
+        <p>{% if mine %}You have not logged an aircraft yet.{% else %}No aircraft logged yet.{% endif %}</p>
+        <p class="hint">Types are deduced from the airframe and livery once a flight lands.</p>
+    </div>
+    {% else %}
+    <div class="boards">
+        <div class="board">
+            <h2 class="board-title">By Flights <span class="metric">count</span></h2>
+            {% for r in by_flights %}
+            <a class="srow" href="{{ r.href }}">
+                <div class="srow-head">
+                    <span class="rank">{{ r.rank }}</span>
+                    <span class="icao">{{ r.icao }}</span>
+                    {% if !r.name.is_empty() %}<span class="ac-name">{{ r.name }}</span>{% endif %}
+                    <span class="value">{{ r.value }}</span>
+                </div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
+                <div class="sub">{{ r.sub }}</div>
+            </a>
+            {% endfor %}
+        </div>
+
+        <div class="board">
+            <h2 class="board-title">By Time <span class="metric">hours flown</span></h2>
+            {% for r in by_time %}
+            <a class="srow" href="{{ r.href }}">
+                <div class="srow-head">
+                    <span class="rank">{{ r.rank }}</span>
+                    <span class="icao">{{ r.icao }}</span>
+                    {% if !r.name.is_empty() %}<span class="ac-name">{{ r.name }}</span>{% endif %}
+                    <span class="value">{{ r.value }}</span>
+                </div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
+                <div class="sub">{{ r.sub }}</div>
+            </a>
+            {% endfor %}
+        </div>
+
+        <div class="board">
+            <h2 class="board-title">By Distance <span class="metric">nautical miles</span></h2>
+            {% for r in by_distance %}
+            <a class="srow" href="{{ r.href }}">
+                <div class="srow-head">
+                    <span class="rank">{{ r.rank }}</span>
+                    <span class="icao">{{ r.icao }}</span>
+                    {% if !r.name.is_empty() %}<span class="ac-name">{{ r.name }}</span>{% endif %}
+                    <span class="value">{{ r.value }}</span>
+                </div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
+                <div class="sub">{{ r.sub }}</div>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    </div>
+
+{% include "_app_shell_foot.html" %}
 </body>
 </html>

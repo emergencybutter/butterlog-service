@@ -57,6 +57,42 @@ pub struct TransposedPoints {
     pub pitch: Vec<f32>,
     #[serde(default)]
     pub roll: Vec<f32>,
+    #[serde(default)]
+    pub heading: Vec<f32>,
+    #[serde(default)]
+    pub track: Vec<f32>,
+    #[serde(default)]
+    pub ground_speed: Vec<f32>,
+    #[serde(default)]
+    pub true_airspeed: Vec<f32>,
+    #[serde(default)]
+    pub baro: Vec<f32>,
+    #[serde(default)]
+    pub magvar: Vec<f32>,
+    #[serde(default)]
+    pub g_load: Vec<f32>,
+    #[serde(default)]
+    pub oat: Vec<f32>,
+    #[serde(default)]
+    pub wind_speed: Vec<f32>,
+    #[serde(default)]
+    pub wind_dir: Vec<f32>,
+    #[serde(default)]
+    pub fuel_flow: Vec<f32>,
+    #[serde(default)]
+    pub fuel_left: Vec<f32>,
+    #[serde(default)]
+    pub fuel_right: Vec<f32>,
+    #[serde(default)]
+    pub rpm: Vec<f32>,
+    #[serde(default)]
+    pub pct_power: Vec<f32>,
+    #[serde(default)]
+    pub manifold: Vec<f32>,
+    #[serde(default)]
+    pub oil_temp: Vec<f32>,
+    #[serde(default)]
+    pub oil_press: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +136,31 @@ pub struct DecodedPoint {
     pub vspeed: Option<f32>,
     pub pitch: Option<f32>,
     pub roll: Option<f32>,
+    pub heading: Option<f32>,
+    pub track: Option<f32>,
+    pub ground_speed: Option<f32>,
+    pub true_airspeed: Option<f32>,
+    pub baro: Option<f32>,
+    pub magvar: Option<f32>,
+    pub g_load: Option<f32>,
+    pub oat: Option<f32>,
+    pub wind_speed: Option<f32>,
+    pub wind_dir: Option<f32>,
+    pub fuel_flow: Option<f32>,
+    pub fuel_left: Option<f32>,
+    pub fuel_right: Option<f32>,
+    pub rpm: Option<f32>,
+    pub pct_power: Option<f32>,
+    pub manifold: Option<f32>,
+    pub oil_temp: Option<f32>,
+    pub oil_press: Option<f32>,
 }
+
+/// The stored per-sample columns in bind order, and the UNNEST placeholders
+/// for the ones added beyond the original nine. Built as constants so the
+/// INSERT cannot drift out of step with the bind sequence under it.
+const TRACK_COLUMNS: &str = "flight_id, sample_epoch, latitude, longitude, altitude, ias, vspeed, pitch, roll, heading, track, ground_speed, true_airspeed, baro, magvar, g_load, oat, wind_speed, wind_dir, fuel_flow, fuel_left, fuel_right, rpm, pct_power, manifold, oil_temp, oil_press";
+const TRACK_UNNEST: &str = "$10::real[], $11::real[], $12::real[], $13::real[], $14::real[], $15::real[], $16::real[], $17::real[], $18::real[], $19::real[], $20::real[], $21::real[], $22::real[], $23::real[], $24::real[], $25::real[], $26::real[], $27::real[]";
 
 /// Expand the columnar batch into absolute-timestamped samples.
 ///
@@ -131,6 +191,24 @@ pub fn decode_batch(batch: &TrackBatch) -> Result<Vec<DecodedPoint>, String> {
         ("vspeed", p.vspeed.len()),
         ("pitch", p.pitch.len()),
         ("roll", p.roll.len()),
+        ("heading", p.heading.len()),
+        ("track", p.track.len()),
+        ("ground_speed", p.ground_speed.len()),
+        ("true_airspeed", p.true_airspeed.len()),
+        ("baro", p.baro.len()),
+        ("magvar", p.magvar.len()),
+        ("g_load", p.g_load.len()),
+        ("oat", p.oat.len()),
+        ("wind_speed", p.wind_speed.len()),
+        ("wind_dir", p.wind_dir.len()),
+        ("fuel_flow", p.fuel_flow.len()),
+        ("fuel_left", p.fuel_left.len()),
+        ("fuel_right", p.fuel_right.len()),
+        ("rpm", p.rpm.len()),
+        ("pct_power", p.pct_power.len()),
+        ("manifold", p.manifold.len()),
+        ("oil_temp", p.oil_temp.len()),
+        ("oil_press", p.oil_press.len()),
     ] {
         if len != 0 && len != n {
             return Err(format!(
@@ -167,6 +245,24 @@ pub fn decode_batch(batch: &TrackBatch) -> Result<Vec<DecodedPoint>, String> {
             vspeed: at(&p.vspeed, i),
             pitch: at(&p.pitch, i),
             roll: at(&p.roll, i),
+            heading: at(&p.heading, i),
+            track: at(&p.track, i),
+            ground_speed: at(&p.ground_speed, i),
+            true_airspeed: at(&p.true_airspeed, i),
+            baro: at(&p.baro, i),
+            magvar: at(&p.magvar, i),
+            g_load: at(&p.g_load, i),
+            oat: at(&p.oat, i),
+            wind_speed: at(&p.wind_speed, i),
+            wind_dir: at(&p.wind_dir, i),
+            fuel_flow: at(&p.fuel_flow, i),
+            fuel_left: at(&p.fuel_left, i),
+            fuel_right: at(&p.fuel_right, i),
+            rpm: at(&p.rpm, i),
+            pct_power: at(&p.pct_power, i),
+            manifold: at(&p.manifold, i),
+            oil_temp: at(&p.oil_temp, i),
+            oil_press: at(&p.oil_press, i),
         });
     }
     Ok(out)
@@ -387,6 +483,24 @@ pub async fn upload_track_handler(
     let mut vs: Vec<Option<f32>> = Vec::with_capacity(submitted);
     let mut pitch: Vec<Option<f32>> = Vec::with_capacity(submitted);
     let mut roll: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut heading: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut track: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut ground_speed: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut true_airspeed: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut baro: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut magvar: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut g_load: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut oat: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut wind_speed: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut wind_dir: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut fuel_flow: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut fuel_left: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut fuel_right: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut rpm: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut pct_power: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut manifold: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut oil_temp: Vec<Option<f32>> = Vec::with_capacity(submitted);
+    let mut oil_press: Vec<Option<f32>> = Vec::with_capacity(submitted);
     for p in &points {
         epochs.push(p.epoch);
         lats.push(p.latitude);
@@ -396,6 +510,24 @@ pub async fn upload_track_handler(
         vs.push(p.vspeed);
         pitch.push(p.pitch);
         roll.push(p.roll);
+        heading.push(p.heading);
+        track.push(p.track);
+        ground_speed.push(p.ground_speed);
+        true_airspeed.push(p.true_airspeed);
+        baro.push(p.baro);
+        magvar.push(p.magvar);
+        g_load.push(p.g_load);
+        oat.push(p.oat);
+        wind_speed.push(p.wind_speed);
+        wind_dir.push(p.wind_dir);
+        fuel_flow.push(p.fuel_flow);
+        fuel_left.push(p.fuel_left);
+        fuel_right.push(p.fuel_right);
+        rpm.push(p.rpm);
+        pct_power.push(p.pct_power);
+        manifold.push(p.manifold);
+        oil_temp.push(p.oil_temp);
+        oil_press.push(p.oil_press);
     }
 
     let mut tx = state.db.begin().await?;
@@ -404,11 +536,13 @@ pub async fn upload_track_handler(
         0
     } else {
         sqlx::query(
-            "INSERT INTO flight_track_points \
-                 (flight_id, sample_epoch, latitude, longitude, altitude, ias, vspeed, pitch, roll) \
-             SELECT $1, * FROM UNNEST($2::bigint[], $3::real[], $4::real[], $5::real[], \
-                                      $6::real[], $7::real[], $8::real[], $9::real[]) \
-             ON CONFLICT (flight_id, sample_epoch) DO NOTHING",
+            &format!(
+                "INSERT INTO flight_track_points ({}) \
+                 SELECT $1, * FROM UNNEST($2::bigint[], $3::real[], $4::real[], $5::real[], \
+                                          $6::real[], $7::real[], $8::real[], $9::real[], {}) \
+                 ON CONFLICT (flight_id, sample_epoch) DO NOTHING",
+                TRACK_COLUMNS, TRACK_UNNEST
+            ),
         )
         .bind(flight_id)
         .bind(&epochs)
@@ -419,6 +553,24 @@ pub async fn upload_track_handler(
         .bind(&vs)
         .bind(&pitch)
         .bind(&roll)
+        .bind(&heading)
+        .bind(&track)
+        .bind(&ground_speed)
+        .bind(&true_airspeed)
+        .bind(&baro)
+        .bind(&magvar)
+        .bind(&g_load)
+        .bind(&oat)
+        .bind(&wind_speed)
+        .bind(&wind_dir)
+        .bind(&fuel_flow)
+        .bind(&fuel_left)
+        .bind(&fuel_right)
+        .bind(&rpm)
+        .bind(&pct_power)
+        .bind(&manifold)
+        .bind(&oil_temp)
+        .bind(&oil_press)
         .execute(&mut *tx)
         .await?
         .rows_affected() as usize

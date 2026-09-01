@@ -1,0 +1,79 @@
+<!-- Application chrome for the /content section: a fixed icon rail on wide
+     screens, a hamburger drawer below 900px, and a sticky view header the page
+     fills in.
+
+     Pages using this include `_app_shell_head.html` in <head> for the styles,
+     open with this partial, and close with `_app_shell_foot.html`. Every page
+     struct carries a `nav` field (see templates::Nav) which drives the active
+     mark and the signed-in state.
+
+     The rail is chrome, not content: it is quiet, it does not scroll with the
+     view, and the current section is marked by a bar and colour rather than by
+     a heading in the page. -->
+<div class="app">
+    <button class="scrim" id="nav-scrim" hidden aria-hidden="true" tabindex="-1"></button>
+
+    <nav class="rail" id="rail" aria-label="Sections">
+        <a class="brand" href="/content" aria-label="ButterLog">
+            <span class="brand-mark">BL</span>
+            <span class="brand-word">ButterLog</span>
+        </a>
+
+        <ul class="rail-nav">
+            <li>
+                <a class="rail-item{% if nav.active == "community" %} is-active{% endif %}" href="/content">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span>Community</span>
+                </a>
+            </li>
+            <li>
+                <a class="rail-item{% if nav.active == "flights" %} is-active{% endif %}" href="{{ nav.my_flights_href }}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                    <span>My Flights</span>
+                </a>
+            </li>
+            <li>
+                <a class="rail-item{% if nav.active == "aircraft" %} is-active{% endif %}" href="{{ nav.my_aircraft_href }}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c.9 0 1.6 1.2 1.6 2.7v4l7.4 4.3v2l-7.4-2.2v4.3l2.5 1.8v1.6L12 19.4l-4.1 1.1v-1.6l2.5-1.8v-4.3L3 15v-2l7.4-4.3v-4C10.4 3.2 11.1 2 12 2z"/></svg>
+                    <span>My Aircrafts</span>
+                </a>
+            </li>
+            <li>
+                <a class="rail-item" href="/map">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z"/><path d="M8 2v16M16 6v16"/></svg>
+                    <span>Live Map</span>
+                </a>
+            </li>
+        </ul>
+
+        <div class="rail-foot">
+            <a class="rail-item is-minor{% if nav.active == "settings" %} is-active{% endif %}" href="/content/settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span>Settings</span>
+            </a>
+            <button class="rail-item is-minor" id="theme-toggle" type="button" aria-label="Toggle light or dark theme">
+                <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+                <span>Theme</span>
+            </button>
+            {% if nav.signed_in %}
+            <div class="rail-user" title="{{ nav.display_name }}">
+                <img src="{{ nav.avatar_url }}" alt="" loading="lazy">
+                <span>{{ nav.display_name }}</span>
+            </div>
+            {% else %}
+            <a class="rail-item is-minor" href="/api/v0/auth/login">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5M15 12H3"/></svg>
+                <span>Sign in</span>
+            </a>
+            {% endif %}
+        </div>
+    </nav>
+
+    <div class="app-main">
+        <header class="topbar">
+            <button class="hamburger" id="nav-open" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="rail">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+            </button>
+            <span class="topbar-section">{{ nav.section }}</span>
+        </header>

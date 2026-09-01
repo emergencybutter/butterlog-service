@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ButterLog {{ icao }}</title>
+    {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
+    <style>
+        /* A contact sheet. The pictures are the content, so they sit on a plain
+           grid with the flight they came from as a caption underneath - close
+           enough to read, quiet enough not to compete with the image. */
+        .sheet {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 14px;
+        }
+        .shot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+        .shot img {
+            width: 100%; aspect-ratio: 16 / 10; object-fit: cover;
+            border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--surface-2); cursor: zoom-in; display: block;
+            transition: border-color var(--t);
+        }
+        .shot img:hover { border-color: var(--border-strong); }
+        .shot-meta {
+            display: flex; align-items: baseline; gap: 6px; min-width: 0;
+            font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em;
+            color: var(--text-muted); text-decoration: none;
+        }
+        a.shot-meta:hover .route { color: var(--accent-text); }
+        .shot-meta .route { color: var(--text-2); white-space: nowrap; }
+        .shot-meta .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .shot-meta .when { margin-left: auto; flex: none; opacity: 0.75; }
+
+        .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.93); z-index: 100; align-items: center; justify-content: center; }
+        .lightbox.open { display: flex; }
+        .lightbox-img { max-width: 92vw; max-height: 86vh; object-fit: contain; border-radius: 4px; }
+        .lb-close, .lb-btn { position: absolute; background: none; border: 0; color: rgba(255,255,255,0.65); cursor: pointer; padding: 10px; line-height: 1; }
+        .lb-close { top: 12px; right: 16px; font-size: 1.4rem; }
+        .lb-btn { top: 50%; transform: translateY(-50%); font-size: 2.4rem; }
+        .lb-prev { left: 8px; } .lb-next { right: 8px; }
+        .lb-close:hover, .lb-btn:hover { color: #fff; }
+        .lightbox-counter { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.1em; color: rgba(255,255,255,0.6); }
+    </style>
+</head>
+<body>
+{% include "_app_shell.html" %}
+
+    <div class="view-head">
+        <div class="view-head-inner">
+            <a class="view-back" href="{% if mine %}/content/aircraft{% else %}/content/stats{% endif %}" aria-label="Back to aircraft" title="Back to aircraft">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            </a>
+            <span class="view-title">{{ icao }}</span>
+            <span class="view-sub">{% if !name.is_empty() %}{{ name }}{% endif %}</span>
+            <div class="view-actions">
+                <span class="view-sub">{{ shots.len() }} shot{% if shots.len() != 1 %}s{% endif %}</span>
+                {% if !scope_mine_href.is_empty() %}
+                <div class="seg">
+                    <a href="{{ scope_mine_href }}" class="{% if mine %}is-on{% endif %}">Mine</a>
+                    <a href="{{ scope_all_href }}" class="{% if !mine %}is-on{% endif %}">Everyone</a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="view-body">
+        {% if shots.is_empty() %}
+        <div class="empty">
+            <p>{% if mine %}You have no screenshots on this type yet.{% else %}Nobody has posted a screenshot on this type yet.{% endif %}</p>
+            <p class="hint">Screenshots are captured by the ButterLog client during a flight.</p>
+        </div>
+        {% else %}
+        <div class="sheet">
+            {% for s in shots %}
+            <div class="shot">
+                <img src="{{ s.url }}" alt="" loading="lazy" onclick="openLb({{ loop.index0 }})">
+                {% if !s.flight_href.is_empty() %}<a class="shot-meta" href="{{ s.flight_href }}">{% else %}<div class="shot-meta">{% endif %}
+                    <span class="route">{{ s.dep }} &#8594; {{ s.arr }}</span>
+                    <span class="who">{{ s.pilot }}</span>
+                    <span class="when">{{ s.date_str }}</span>
+                {% if !s.flight_href.is_empty() %}</a>{% else %}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+
+{% include "_app_shell_foot.html" %}
+
+<div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLb()">
+    <button class="lb-close" onclick="closeLb()" aria-label="Close">&#10005;</button>
+    <button class="lb-btn lb-prev" onclick="lbNav(-1)" aria-label="Previous">&#8249;</button>
+    <img id="lb-img" class="lightbox-img" src="" alt="">
+    <button class="lb-btn lb-next" onclick="lbNav(1)" aria-label="Next">&#8250;</button>
+    <div id="lb-counter" class="lightbox-counter"></div>
+</div>
+<script>
+    const LB_URLS = {{ urls_json|safe }};
+    let lbIdx = 0;
+    function openLb(i) {
+        lbIdx = i;
+        paint();
+        document.getElementById('lightbox').classList.add('open');
+        document.body.style.overflow = 'hidden';
+    }
+    function paint() {
+        document.getElementById('lb-img').src = LB_URLS[lbIdx];
+        document.getElementById('lb-counter').textContent =
+            LB_URLS.length > 1 ? (lbIdx + 1) + ' / ' + LB_URLS.length : '';
+    }
+    function lbNav(d) { lbIdx = (lbIdx + d + LB_URLS.length) % LB_URLS.length; paint(); }
+    function closeLb() {
+        document.getElementById('lightbox').classList.remove('open');
+        document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', e => {
+        if (!document.getElementById('lightbox').classList.contains('open')) return;
+        if (e.key === 'Escape') closeLb();
+        else if (e.key === 'ArrowLeft') lbNav(-1);
+        else if (e.key === 'ArrowRight') lbNav(1);
+    });
+</script>
+</body>
+</html>

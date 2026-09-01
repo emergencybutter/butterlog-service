@@ -86,6 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content/flight/user/:user_id", get(content_user_handler))
         .route("/content/settings", get(settings_handler))
         .route("/content/stats", get(stats_handler))
+        .route("/content/aircraft", get(aircraft_handler))
+        .route("/content/aircraft/:icao", get(aircraft_type_mine_handler))
+        .route("/content/stats/:icao", get(aircraft_type_all_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
@@ -500,7 +503,8 @@ async fn settings_handler(
         })
         .collect();
 
-    let page = templates::SettingsPage { admin_guilds, notified_guilds };
+    let nav = nav_for(&state, &headers, "settings", "Settings").await;
+    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds };
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -534,6 +538,9 @@ async fn flight_detail_handler(
                 .await
                 .ok();
             let page = templates::LiveDetailPage {
+                // A flight you opened from a list is still that list's section;
+                // the route itself is named in the view bar.
+                nav: nav_for(&state, &headers, "community", "Flight").await,
                 flight_id,
                 is_owner: viewer == Some(owner_id),
             };
@@ -598,6 +605,7 @@ async fn flight_detail_handler(
         .unwrap_or_default();
 
     let page = templates::FlightDetailPage {
+        nav: nav_for(&state, &headers, "community", "Flight").await,
         dep,
         arr_display: arr.unwrap_or_else(|| "In Flight".to_string()),
         pilot: global_name.unwrap_or(username),
@@ -676,12 +684,51 @@ fn landing_badge_html(stats: &serde_json::Value) -> Option<String> {
     ))
 }
 
+/// Build the `/content` rail state for the current session. A signed-out
+/// visitor still gets the full menu; the personal entries route through login.
+async fn nav_for(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    active: &str,
+    section: &str,
+) -> templates::Nav {
+    let user_id = match handlers::get_user_id_from_session(&state.db, headers).await.ok() {
+        Some(id) => id,
+        None => return templates::Nav::anonymous(active, section),
+    };
+    let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT username, global_name, avatar, discord_id FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (name, avatar) = match row {
+        Some((username, global_name, avatar_hash, discord_id)) => (
+            global_name.unwrap_or(username),
+            discord_avatar_url(&discord_id, avatar_hash.as_deref()),
+        ),
+        None => (String::new(), discord_avatar_url("", None)),
+    };
+    templates::Nav::signed_in(active, section, user_id, name, avatar)
+}
+
+/// Discord's CDN URL for a user's avatar, or their default when unset.
+fn discord_avatar_url(discord_id: &str, avatar_hash: Option<&str>) -> String {
+    match avatar_hash {
+        Some(hash) if !hash.is_empty() => {
+            format!("https://cdn.discordapp.com/avatars/{}/{}.png", discord_id, hash)
+        }
+        _ => "https://cdn.discordapp.com/embed/avatars/0.png".to_string(),
+    }
+}
+
 async fn content_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
-
     // Latest flights across every pilot
     let flights: Vec<FlightListRow> = sqlx::query_as(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
@@ -692,7 +739,8 @@ async fn content_handler(
     .fetch_all(&state.db)
     .await?;
 
-    render_flights_page(&state, flights, logged_in_user_id, None, "Telemetry records from every pilot").await
+    let nav = nav_for(&state, &headers, "community", "Community").await;
+    render_flights_page(&state, flights, "Every pilot", nav).await
 }
 
 async fn content_user_handler(
@@ -713,15 +761,24 @@ async fn content_user_handler(
     .fetch_all(&state.db)
     .await?;
 
-    render_flights_page(&state, flights, logged_in_user_id, Some(user_id), "Telemetry records and landing reports").await
+    // Someone else's log is still the community view - only your own flights
+    // light up My Flights in the rail.
+    let own = logged_in_user_id == Some(user_id);
+    let nav = nav_for(
+        &state,
+        &headers,
+        if own { "flights" } else { "community" },
+        if own { "My Flights" } else { "Community" },
+    )
+    .await;
+    render_flights_page(&state, flights, "Single pilot", nav).await
 }
 
 async fn render_flights_page(
     state: &AppState,
     flights: Vec<FlightListRow>,
-    logged_in_user_id: Option<i64>,
-    filter_user_id: Option<i64>,
     subtitle: &str,
+    nav: templates::Nav,
 ) -> Result<Response, AppError> {
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
 
@@ -818,13 +875,8 @@ async fn render_flights_page(
         .collect();
 
     let page = templates::FlightsPage {
+        nav,
         subtitle: subtitle.to_string(),
-        history_active: filter_user_id.is_none(),
-        show_my_flights: logged_in_user_id.is_some(),
-        my_flights_href: logged_in_user_id
-            .map(|uid| format!("/content/flight/user/{}", uid))
-            .unwrap_or_default(),
-        my_flights_active: logged_in_user_id.is_some() && filter_user_id == logged_in_user_id,
         flights: cards,
     };
 
@@ -978,13 +1030,35 @@ struct AircraftAgg {
 async fn aircraft_stats_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    Ok(axum::Json(aggregate_aircraft_stats(&state.db).await?))
+    Ok(axum::Json(aggregate_aircraft_stats(&state.db, None).await?))
+}
+
+/// How long a flight lasted, in seconds: takeoff→landing when both are known,
+/// otherwise the block times. Only positive spans count — clock skew and rows
+/// where the sim reported a landing a second before the takeoff must not
+/// subtract from the total.
+///
+/// The app writes these as `%Y-%m-%d %H:%M:%S%.f`, not RFC3339, so this leans
+/// on the shared parser rather than the strict one.
+fn flight_span_seconds(
+    takeoff: &Option<String>,
+    landing: &Option<String>,
+    start: &Option<String>,
+    end: &Option<String>,
+) -> Option<i64> {
+    let p = |s: &Option<String>| s.as_deref().and_then(live::parse_time);
+    p(landing)
+        .zip(p(takeoff))
+        .or_else(|| p(end).zip(p(start)))
+        .map(|(b, a)| (b - a).num_seconds())
+        .filter(|&s| s > 0)
 }
 
 /// Shared aggregation behind both the JSON endpoint and the `/content/stats`
 /// page. See `aircraft_stats_handler` for the field semantics.
 async fn aggregate_aircraft_stats(
     db: &sqlx::PgPool,
+    owner: Option<i64>,
 ) -> Result<AircraftStatsResponse, AppError> {
     // Project just the sub-fields we need out of the JSONB blob so we never
     // haul whole snapshot arrays across the wire. Coordinates come back as text
@@ -1012,16 +1086,12 @@ async fn aggregate_aircraft_stats(
             statistics->'landing_snapshot'->>'Longitude' AS ld_lon \
          FROM flights \
          WHERE statistics->>'resolved_icao' IS NOT NULL \
-           AND TRIM(statistics->>'resolved_icao') <> ''",
+           AND TRIM(statistics->>'resolved_icao') <> ''            AND ($1::bigint IS NULL OR user_id = $1)",
     )
+    .bind(owner)
     .fetch_all(db)
     .await?;
 
-    let parse_time = |s: &Option<String>| -> Option<chrono::DateTime<chrono::FixedOffset>> {
-        s.as_deref()
-            .filter(|v| !v.is_empty())
-            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-    };
     let parse_coord = |s: &Option<String>| -> Option<f64> {
         s.as_deref().and_then(|v| v.parse::<f64>().ok())
     };
@@ -1031,14 +1101,7 @@ async fn aggregate_aircraft_stats(
         let agg = aggs.entry(icao).or_default();
         agg.flights += 1;
 
-        // Duration: prefer takeoff→landing, fall back to start→end. Only
-        // positive spans count (clock skew / bad rows shouldn't subtract).
-        let span = parse_time(&landing)
-            .zip(parse_time(&takeoff))
-            .or_else(|| parse_time(&end).zip(parse_time(&start)))
-            .map(|(b, a)| (b - a).num_seconds())
-            .filter(|&s| s > 0);
-        if let Some(secs) = span {
+        if let Some(secs) = flight_span_seconds(&takeoff, &landing, &start, &end) {
             agg.total_seconds += secs;
         }
 
@@ -1100,11 +1163,78 @@ fn group_thousands(n: i64) -> String {
 /// Turn a ranked `AircraftStat` list into display rows: bars are sized against
 /// the leader's `metric`, and each row's caption carries the two off-axis
 /// figures. `metric` selects which value drives the bar for this list.
+/// Percent-encode a value for use as a single path segment. Type codes are
+/// alphanumeric in practice, but they arrive inside a client-submitted
+/// statistics blob, so nothing here assumes that.
+fn percent_encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Split one CSV line, honouring quoted fields. The characteristics table
+/// quotes any value containing a comma (`"602,500"`), so a naive split would
+/// shift every column after the first such field.
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// ICAO type code to the model name a pilot would recognise.
+///
+/// Read from the same FAA characteristics table the client resolves types
+/// against, vendored into the binary so the service needs no data file
+/// alongside it. Parsed once, on first use.
+fn aircraft_names() -> &'static std::collections::HashMap<String, String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        const TABLE: &str = include_str!("../data/aircraft-characteristics.csv");
+        let mut out = std::collections::HashMap::new();
+        for line in TABLE.lines().skip(1) {
+            let fields = split_csv_line(line);
+            // 0 = ICAO_Code, 3 = Model_FAA, the generic name ("Airbus A320 Neo")
+            // rather than the BADA variant ("Airbus A320-271N").
+            let (Some(icao), Some(model)) = (fields.first(), fields.get(3)) else {
+                continue;
+            };
+            let (icao, model) = (icao.trim(), model.trim());
+            if !icao.is_empty() && !model.is_empty() {
+                out.entry(icao.to_string()).or_insert_with(|| model.to_string());
+            }
+        }
+        out
+    })
+}
+
 fn to_stat_rows(
     stats: &[AircraftStat],
     metric: impl Fn(&AircraftStat) -> f64,
     value: impl Fn(&AircraftStat) -> String,
     sub: impl Fn(&AircraftStat) -> String,
+    // Row links stay inside the board's own scope: a row on "mine" opens my
+    // shots of that type, a row on "everyone" opens everyone's.
+    base: &str,
 ) -> Vec<templates::StatRow> {
     let top = stats.first().map(&metric).filter(|&m| m > 0.0);
     stats
@@ -1112,6 +1242,9 @@ fn to_stat_rows(
         .enumerate()
         .map(|(i, s)| templates::StatRow {
             rank: i + 1,
+            // Unknown codes keep an empty name rather than echoing the code.
+            name: aircraft_names().get(&s.icao).cloned().unwrap_or_default(),
+            href: format!("{}/{}", base, percent_encode_segment(&s.icao)),
             icao: s.icao.clone(),
             value: value(s),
             sub: sub(s),
@@ -1124,8 +1257,116 @@ fn to_stat_rows(
 
 /// Public aircraft-usage leaderboard page (`/content/stats`): the same three
 /// rankings as `GET /api/v0/stats/aircraft`, rendered as bar charts.
-async fn stats_handler(State(state): State<AppState>) -> Result<Response, AppError> {
-    let s = aggregate_aircraft_stats(&state.db).await?;
+async fn stats_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    render_aircraft_page(&state, &headers, false).await
+}
+
+/// `/content/aircraft` - the same boards limited to the signed-in pilot. A
+/// visitor who is not signed in has no "mine" to show, so they get everyone's.
+async fn aircraft_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    render_aircraft_page(&state, &headers, true).await
+}
+
+async fn aircraft_type_mine_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(icao): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    render_aircraft_type_page(&state, &headers, icao, true).await
+}
+
+async fn aircraft_type_all_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(icao): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    render_aircraft_type_page(&state, &headers, icao, false).await
+}
+
+/// Every screenshot taken on one aircraft type, newest first, in the requested
+/// scope. A visitor who is not signed in has no "mine", so they get everyone's.
+async fn render_aircraft_type_page(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    icao: String,
+    mine: bool,
+) -> Result<Response, AppError> {
+    let viewer = handlers::get_user_id_from_session(&state.db, headers).await.ok();
+    let mine = mine && viewer.is_some();
+    let icao = icao.trim().to_uppercase();
+
+    let rows: Vec<(String, i64, String, Option<String>, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT s.url, f.id, f.departure, f.arrival, u.username, u.global_name, u.avatar,                     u.discord_id, s.created_at, f.share_id                FROM screenshots s                JOIN flights f ON f.id = s.flight_id                JOIN users u ON u.id = f.user_id               WHERE UPPER(TRIM(f.statistics->>'resolved_icao')) = $1                 AND ($2::bigint IS NULL OR f.user_id = $2)               ORDER BY s.created_at DESC               LIMIT 500",
+        )
+        .bind(&icao)
+        .bind(if mine { viewer } else { None })
+        .fetch_all(&state.db)
+        .await?;
+
+    let shots: Vec<templates::TypeShot> = rows
+        .into_iter()
+        .map(|(url, flight_id, dep, arr, username, global_name, avatar, discord_id, created_at, share_id)| {
+            let _ = (avatar, discord_id);
+            templates::TypeShot {
+                url,
+                // A share is the page a screenshot belongs on; without one the
+                // flight page still works for whoever can see it.
+                flight_href: match share_id {
+                    Some(sid) => format!("/content/flights/share/{}", sid),
+                    None => format!("/content/flights/{}", flight_id),
+                },
+                dep,
+                arr: arr.unwrap_or_else(|| "In Flight".to_string()),
+                pilot: global_name.unwrap_or(username),
+                date_str: created_at.format("%d %b %Y").to_string(),
+            }
+        })
+        .collect();
+
+    let urls: Vec<&str> = shots.iter().map(|s| s.url.as_str()).collect();
+    let page = templates::AircraftTypePage {
+        nav: nav_for(
+            state,
+            headers,
+            "aircraft",
+            if mine { "My Aircrafts" } else { "Aircrafts" },
+        )
+        .await,
+        name: aircraft_names().get(&icao).cloned().unwrap_or_default(),
+        mine,
+        scope_all_href: if viewer.is_some() {
+            format!("/content/stats/{}", percent_encode_segment(&icao))
+        } else {
+            String::new()
+        },
+        scope_mine_href: if viewer.is_some() {
+            format!("/content/aircraft/{}", percent_encode_segment(&icao))
+        } else {
+            String::new()
+        },
+        urls_json: serde_json::to_string(&urls).unwrap_or_else(|_| "[]".to_string()),
+        shots,
+        icao,
+    };
+    Ok(Html(page.render()?).into_response())
+}
+
+async fn render_aircraft_page(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    mine: bool,
+) -> Result<Response, AppError> {
+    let viewer = handlers::get_user_id_from_session(&state.db, headers).await.ok();
+    let mine = mine && viewer.is_some();
+    let base = if mine { "/content/aircraft" } else { "/content/stats" };
+    let s = aggregate_aircraft_stats(&state.db, if mine { viewer } else { None }).await?;
 
     let hours = |a: &AircraftStat| format!("{:.1} h", a.total_hours);
     let dist = |a: &AircraftStat| format!("{} nm", group_thousands(a.total_distance_nm.round() as i64));
@@ -1134,23 +1375,37 @@ async fn stats_handler(State(state): State<AppState>) -> Result<Response, AppErr
     };
 
     let page = templates::StatsPage {
+        nav: nav_for(
+            state,
+            headers,
+            "aircraft",
+            if mine { "My Aircrafts" } else { "Aircrafts" },
+        )
+        .await,
+        mine,
+        // The scope switch only appears for someone who has a "mine" to switch to.
+        scope_all_href: if viewer.is_some() { "/content/stats".to_string() } else { String::new() },
+        scope_mine_href: if viewer.is_some() { "/content/aircraft".to_string() } else { String::new() },
         by_flights: to_stat_rows(
             &s.by_flights,
             |a| a.flights as f64,
             &count,
             |a| format!("{} · {}", hours(a), dist(a)),
+            base,
         ),
         by_time: to_stat_rows(
             &s.by_time,
             |a| a.total_seconds as f64,
             &hours,
             |a| format!("{} · {}", count(a), dist(a)),
+            base,
         ),
         by_distance: to_stat_rows(
             &s.by_distance,
             |a| a.total_distance_nm,
             &dist,
             |a| format!("{} · {}", count(a), hours(a)),
+            base,
         ),
     };
     Ok(Html(page.render()?).into_response())
@@ -1281,6 +1536,7 @@ async fn flight_share_detail_handler(
     };
 
     let page = templates::ShareDetailPage {
+        nav: nav_for(&state, &headers, "community", "Flight").await,
         share_id,
         is_owner,
         simulator: simulator.unwrap_or_default(),
@@ -1363,6 +1619,46 @@ mod tests {
         assert_eq!(landing_rating(-300.0).1, "FIRM");
         assert_eq!(landing_rating(-350.0).1, "FIRM");
         assert_eq!(landing_rating(-500.0).1, "HARD");
+    }
+
+    /// The app writes `2026-08-05 06:36:35.351`, not RFC3339. An RFC3339-only
+    /// parser rejected every one, so every aircraft scored 0.0 h.
+    #[test]
+    fn flight_hours_come_from_the_timestamp_format_the_app_actually_writes() {
+        let t = |s: &str| Some(s.to_string());
+        let secs = flight_span_seconds(
+            &t("2026-08-05 06:36:35.351"),
+            &t("2026-08-05 07:03:05.148"),
+            &t("2026-08-05 06:28:33.487"),
+            &t("2026-08-05 07:04:37.230"),
+        );
+        // 06:36:35 -> 07:03:05. The shared parser drops the fractional part, so
+        // spans land on whole seconds rather than the .351/.148 in the source.
+        assert_eq!(secs, Some(1590), "takeoff to landing, in the app's format");
+
+        // No landing filed: fall back to the block times.
+        let blocks = flight_span_seconds(
+            &t("2026-08-01 20:16:53.757"),
+            &None,
+            &t("2026-08-01 20:16:53.757"),
+            &t("2026-08-01 20:26:57.560"),
+        );
+        assert_eq!(blocks, Some(604));
+
+        // A landing stamped a second before the takeoff must not subtract.
+        let backwards = flight_span_seconds(
+            &t("2026-08-17 06:45:22.183"),
+            &t("2026-08-17 06:45:21.173"),
+            &None,
+            &None,
+        );
+        assert_eq!(backwards, None);
+
+        // RFC3339 still parses, since some fields are written that way.
+        assert_eq!(
+            flight_span_seconds(&t("2026-08-05T06:00:00Z"), &t("2026-08-05T07:30:00Z"), &None, &None),
+            Some(5400)
+        );
     }
 
     #[test]

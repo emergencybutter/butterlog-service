@@ -1,431 +1,201 @@
 <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>ButterLog Flight Log</title>
-            <meta name="description" content="View your latest telemetry logs on ButterLog.">
-            {% include "_theme_head.html" %}
-            <style>
-                * { box-sizing: border-box; }
-                h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ButterLog</title>
+    <meta name="description" content="Flight logs and landing reports on ButterLog.">
+    {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
+    <style>
+        /* One flight per row. The route is the identifier, so it leads and is
+           set in the display face; everything else is supporting mono detail
+           on a single line, which keeps rows a predictable height and lets the
+           eye scan down the departure column. */
+        .flight {
+            display: grid;
+            grid-template-columns: 26px minmax(0, 1fr) auto auto;
+            align-items: center; gap: 12px;
+            padding: 11px 14px;
+        }
+        .flight-avatar { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--border); display: block; }
+        .flight-body { min-width: 0; }
 
-                body {
-                    font-family: var(--font-body);
-                    background: var(--bg);
-                    color: var(--text-primary);
-                    min-height: 100vh;
-                    margin: 0;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    justify-content: flex-start;
-                    padding: 3rem 1rem;
-                }
+        .flight-route {
+            display: flex; align-items: baseline; gap: 7px;
+            font-family: var(--font-display); font-size: 1rem; font-weight: 700;
+            letter-spacing: -0.01em; color: var(--text);
+        }
+        .flight-route .arrow { color: var(--accent-text); font-weight: 400; }
+        .flight-route .pilot {
+            font-family: var(--font-mono); font-size: 0.68rem; font-weight: 400;
+            letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted);
+            margin-left: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
 
-                .container {
-                    max-width: 750px;
-                    width: 100%;
-                    background: var(--panel-bg);
-                    border: 1px solid var(--border-color);
-                    border-radius: var(--radius);
-                    padding: 3rem;
-                    box-shadow: var(--shadow);
-                }
+        /* One line, clipped rather than wrapped: rows stay the same height, so
+           the list scans as a table instead of a ragged stack. */
+        .flight-meta {
+            margin-top: 2px;
+            font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.03em;
+            color: var(--text-muted);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .flight-meta > span { margin-right: 6px; }
+        .flight-meta .craft { color: var(--text-2); }
+        .flight-meta .sep { opacity: 0.4; }
 
-                .header {
-                    text-align: center;
-                    margin-bottom: 2.5rem;
-                }
+        .flight-right { display: flex; align-items: center; gap: 8px; }
+        .flight-date {
+            font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.02em;
+            color: var(--text-muted); white-space: nowrap; text-align: right;
+        }
+        .flight-shots { display: flex; gap: 3px; }
+        .flight-shots img {
+            width: 34px; height: 24px; object-fit: cover; border-radius: 2px;
+            border: 1px solid var(--border); cursor: zoom-in; display: block;
+        }
+        .flight-shots .more {
+            font-family: var(--font-mono); font-size: 0.64rem; color: var(--text-muted);
+            align-self: center; padding-left: 2px;
+        }
 
-                h1 {
-                    font-size: 2.5rem;
-                    font-weight: 800;
-                    margin: 0 0 0.5rem 0;
-                    color: var(--text);
-                    letter-spacing: -0.02em;
-                }
+        /* Badges are set by the server; keep them compact in a dense row. */
+        .flight-right .badge {
+            font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700;
+            letter-spacing: 0.06em; text-transform: uppercase;
+            padding: 3px 7px; border-radius: var(--radius-sm); white-space: nowrap;
+        }
+        .flight-right .badge-detail { font-weight: 400; opacity: 0.85; margin-left: 4px; }
+        /* The server's badge carries a <br> so it stacks on the detail page.
+           In a dense row that break is what made rows with a landing taller
+           than rows without, so fold it back onto one line here. */
+        .flight-right .badge br { display: none; }
 
-                .subtitle {
-                    color: var(--teal-text);
-                    font-family: var(--font-mono);
-                    font-size: 0.75rem;
-                    letter-spacing: 0.22em;
-                    text-transform: uppercase;
-                    margin: 0;
-                }
+        /* Narrow: the row folds rather than shrinking - the badge and the date
+           join the supporting line under the route instead of competing with it
+           for a few dozen pixels. */
+        @media (max-width: 700px) {
+            .flight { grid-template-columns: 22px minmax(0, 1fr); row-gap: 7px; }
+            .flight-avatar { width: 22px; height: 22px; }
+            .flight-right { grid-column: 2; justify-content: flex-start; }
+            .flight-date { grid-column: 2; text-align: left; }
+        }
 
-                .nav-tabs {
-                    display: flex;
-                    justify-content: center;
-                    gap: 1rem;
-                    margin-bottom: 3rem;
-                    border-bottom: 1px solid var(--border-color);
-                    padding-bottom: 1rem;
-                }
+        /* Lightbox */
+        .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.93); z-index: 100; align-items: center; justify-content: center; }
+        .lightbox.open { display: flex; }
+        .lightbox-img { max-width: 92vw; max-height: 86vh; object-fit: contain; border-radius: 4px; }
+        .lb-close, .lb-btn {
+            position: absolute; background: none; border: 0; color: rgba(255,255,255,0.65);
+            cursor: pointer; padding: 10px; line-height: 1;
+        }
+        .lb-close { top: 12px; right: 16px; font-size: 1.4rem; }
+        .lb-btn { top: 50%; transform: translateY(-50%); font-size: 2.4rem; }
+        .lb-prev { left: 8px; } .lb-next { right: 8px; }
+        .lb-close:hover, .lb-btn:hover { color: #fff; }
+        .lightbox-counter {
+            position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+            font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.1em;
+            color: rgba(255,255,255,0.6);
+        }
+    </style>
+</head>
+<body>
+{% include "_app_shell.html" %}
 
-                .nav-tab {
-                    color: var(--text-muted);
-                    text-decoration: none;
-                    font-weight: 500;
-                    font-size: 1rem;
-                    padding: 0.5rem 1rem;
-                    border-radius: var(--radius);
-                    transition: color var(--t), background-color var(--t);
-                }
-
-                .nav-tab:hover {
-                    color: var(--text-primary);
-                    background: var(--surface-2);
-                }
-
-                .nav-tab.active {
-                    color: var(--accent-text);
-                    background: var(--accent-weak);
-                }
-
-                .flight-list {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 1.5rem;
-                }
-
-                .flight-card-link {
-                    text-decoration: none;
-                    color: inherit;
-                    display: block;
-                }
-
-                .flight-card {
-                    background: var(--card-bg);
-                    border: 1px solid var(--border-color);
-                    border-radius: 6px;
-                    padding: 1.5rem 2rem;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0;
-                    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
-                }
-
-                .flight-card:hover {
-                    transform: translateY(-2px);
-                    border-color: var(--border-strong);
-                }
-
-                .flight-top {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                }
-
-                .screenshot-gallery {
-                    display: flex;
-                    gap: 8px;
-                    overflow-x: auto;
-                    padding-top: 1rem;
-                    margin-top: 1rem;
-                    border-top: 1px solid var(--border-color);
-                    scrollbar-width: thin;
-                    scrollbar-color: var(--border-color) transparent;
-                }
-
-                .screenshot-gallery::-webkit-scrollbar {
-                    height: 4px;
-                }
-
-                .screenshot-gallery::-webkit-scrollbar-thumb {
-                    background: var(--border-color);
-                    border-radius: 2px;
-                }
-
-                .screenshot-thumb {
-                    width: 140px;
-                    height: 88px;
-                    object-fit: cover;
-                    border-radius: var(--radius-sm);
-                    cursor: pointer;
-                    flex-shrink: 0;
-                    border: 1px solid var(--border-color);
-                    transition: transform var(--t), border-color var(--t);
-                }
-
-                .screenshot-thumb:hover {
-                    transform: scale(1.03);
-                    border-color: var(--border-strong);
-                }
-
-                .lightbox {
-                    display: none;
-                    position: fixed;
-                    inset: 0;
-                    background: rgba(0, 0, 0, 0.92);
-                    z-index: 1000;
-                    align-items: center;
-                    justify-content: center;
-                    flex-direction: column;
-                    gap: 1rem;
-                }
-
-                .lightbox.open {
-                    display: flex;
-                }
-
-                .lightbox-img {
-                    max-width: 90vw;
-                    max-height: 82vh;
-                    object-fit: contain;
-                    border-radius: 10px;
-                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-                }
-
-                .lightbox-counter {
-                    color: rgba(255,255,255,0.6);
-                    font-size: 0.9rem;
-                }
-
-                .lb-btn {
-                    position: absolute;
-                    top: 50%;
-                    transform: translateY(-50%);
-                    background: rgba(255,255,255,0.08);
-                    border: 1px solid rgba(255,255,255,0.12);
-                    color: white;
-                    font-size: 1.8rem;
-                    width: 3rem;
-                    height: 3rem;
-                    border-radius: 50%;
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    transition: background 0.2s;
-                    line-height: 1;
-                }
-
-                .lb-btn:hover { background: rgba(255,255,255,0.15); }
-                .lb-prev { left: 1.5rem; }
-                .lb-next { right: 1.5rem; }
-
-                .lb-close {
-                    position: absolute;
-                    top: 1rem;
-                    right: 1rem;
-                    background: none;
-                    border: none;
-                    color: rgba(255,255,255,0.6);
-                    font-size: 1.5rem;
-                    cursor: pointer;
-                    padding: 0.5rem;
-                    transition: color 0.2s;
-                }
-
-                .lb-close:hover { color: white; }
-
-                .flight-main {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0.5rem;
-                }
-
-                .flight-pilot {
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                    margin-bottom: 0.25rem;
-                }
-
-                .pilot-avatar {
-                    width: 28px;
-                    height: 28px;
-                    border-radius: 50%;
-                    border: 1px solid var(--border-color);
-                    object-fit: cover;
-                }
-
-                .pilot-name {
-                    font-size: 0.9rem;
-                    color: var(--text-secondary);
-                    font-weight: 500;
-                }
-
-                .flight-route {
-                    display: flex;
-                    align-items: center;
-                    gap: 0.75rem;
-                }
-
-                .route-icao {
-                    font-size: 1.6rem;
-                    font-weight: 700;
-                    letter-spacing: -0.5px;
-                    color: var(--text-primary);
-                }
-
-                .route-arrow {
-                    font-size: 1.4rem;
-                    color: var(--primary-color);
-                }
-
-                .flight-meta {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0.25rem;
-                }
-
-                .airframe {
-                    font-size: 1.1rem;
-                    font-weight: 500;
-                    color: var(--accent-pink);
-                }
-
-                .details {
-                    font-size: 0.9rem;
-                    color: var(--text-secondary);
-                }
-
-                .date {
-                    font-size: 0.85rem;
-                    color: var(--text-muted);
-                }
-
-                .flight-right {
-                    display: flex;
-                    flex-direction: column;
-                    align-items: flex-end;
-                    gap: 0.75rem;
-                }
-
-                .badge {
-                    padding: 0.55rem 1rem;
-                    border-radius: var(--radius-sm);
-                    font-family: var(--font-mono);
-                    font-weight: 700;
-                    font-size: 0.78rem;
-                    letter-spacing: 0.06em;
-                    text-transform: uppercase;
-                    text-align: center;
-                    line-height: 1.2;
-                }
-
-                .badge-detail {
-                    font-size: 0.75rem;
-                    font-weight: 400;
-                    opacity: 0.9;
-                }
-
-                /* landing-grade badge colors are defined in _theme_head.html */
-
-                .no-flights {
-                    text-align: center;
-                    padding: 4rem 2rem;
-                    color: var(--text-muted);
-                }
-
-                .no-flights svg {
-                    margin-bottom: 1.5rem;
-                    opacity: 0.5;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>ButterLog history</h1>
-                    <p class="subtitle">{{ subtitle }}</p>
-                </div>
-
-                <div class="nav-tabs">
-                    <a href="/content" class="nav-tab{% if history_active %} active{% endif %}">Flight History</a>
-                    {% if show_my_flights %}<a href="{{ my_flights_href }}" class="nav-tab{% if my_flights_active %} active{% endif %}">My Flights</a>{% endif %}
-                    <a href="/content/stats" class="nav-tab">Aircraft Stats</a>
-                    <a href="/content/settings" class="nav-tab">Notification Settings</a>
-                    <a href="/map" class="nav-tab">Live Map</a>
-                </div>
-
-                {% if flights.is_empty() %}
-            <div class="no-flights">
-                <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5A2.13 2.13 0 1 0 16.5 4L13 7.5l-8.2-1.8L3 7l7.5 4L7 15l-3-1L3 15l3 2 2 3 1-1-1-3 4-3.5 4 7.5z"></path></svg>
-                <p>No flights logged yet. Start the ButterLog client and take off!</p>
+    <div class="view-head">
+        <div class="view-head-inner">
+            <span class="view-title">{% if nav.active == "flights" %}My Flights{% else %}Community{% endif %}</span>
+            <span class="view-sub">{{ subtitle }}</span>
+            <div class="view-actions">
+                <span class="view-sub">{{ flights.len() }} flight{% if flights.len() != 1 %}s{% endif %}</span>
             </div>
-            {% else %}
-            <div class="flight-list">
-                {% for flight in flights %}
-                {% if !flight.live_href.is_empty() %}<a href="{{ flight.live_href }}" class="flight-card-link">{% else if !flight.share_href.is_empty() %}<a href="{{ flight.share_href }}" class="flight-card-link">{% else %}<div class="flight-card-link" style="cursor:default">{% endif %}
-                <div class="flight-card">
-                    <div class="flight-top">
-                        <div class="flight-main">
-                            <div class="flight-pilot">
-                                <img class="pilot-avatar" src="{{ flight.avatar_url }}" alt="{{ flight.pilot }}" loading="lazy">
-                                <span class="pilot-name">{{ flight.pilot }}</span>
-                            </div>
-                            <div class="flight-route">
-                                <span class="route-icao">{{ flight.dep }}</span>
-                                <span class="route-arrow">&#8594;</span>
-                                <span class="route-icao">{{ flight.arr }}</span>
-                            </div>
-                            <div class="flight-meta">
-                                <div class="airframe">{{ flight.airframe }}</div>
-                                {% if !flight.resolved_icao.is_empty() || !flight.resolved_airline.is_empty() %}
-                                <div class="details">Deduced:{% if !flight.resolved_icao.is_empty() %} {{ flight.resolved_icao }}{% endif %}{% if !flight.resolved_icao.is_empty() && !flight.resolved_airline.is_empty() %} ·{% endif %}{% if !flight.resolved_airline.is_empty() %} {{ flight.resolved_airline }}{% endif %}</div>
-                                {% endif %}
-                                <div class="details">{{ flight.simulator }}</div>
-                                <div class="date">{{ flight.date_str }}</div>
-                            </div>
+        </div>
+    </div>
+
+    <div class="view-body">
+        {% if flights.is_empty() %}
+        <div class="empty">
+            <p>No flights here yet.</p>
+            <p class="hint">Run the ButterLog client and take off — logs appear as they land.</p>
+        </div>
+        {% else %}
+        <div class="rows">
+            {% for flight in flights %}
+            {% if !flight.live_href.is_empty() %}<a class="row" href="{{ flight.live_href }}">{% else if !flight.share_href.is_empty() %}<a class="row" href="{{ flight.share_href }}">{% else %}<div class="row">{% endif %}
+                <div class="flight">
+                    <img class="flight-avatar" src="{{ flight.avatar_url }}" alt="" loading="lazy">
+                    <div class="flight-body">
+                        <div class="flight-route">
+                            <span>{{ flight.dep }}</span>
+                            <span class="arrow">&#8594;</span>
+                            <span>{{ flight.arr }}</span>
+                            <span class="pilot">{{ flight.pilot }}</span>
                         </div>
-                        <div class="flight-right">
-                            {{ flight.landing_badge|safe }}
+                        <div class="flight-meta">
+                            <span class="craft">{{ flight.airframe }}</span>
+                            {% if !flight.resolved_icao.is_empty() || !flight.resolved_airline.is_empty() %}
+                            <span class="sep">/</span>
+                            <span>{% if !flight.resolved_icao.is_empty() %}{{ flight.resolved_icao }}{% endif %}{% if !flight.resolved_icao.is_empty() && !flight.resolved_airline.is_empty() %} · {% endif %}{% if !flight.resolved_airline.is_empty() %}{{ flight.resolved_airline }}{% endif %}</span>
+                            {% endif %}
+                            <span class="sep">/</span>
+                            <span>{{ flight.simulator }}</span>
                         </div>
                     </div>
-                    {% if !flight.screenshots.is_empty() %}
-                    <div class="screenshot-gallery">{% for url in flight.screenshots %}<img class="screenshot-thumb" src="{{ url }}" alt="Screenshot {{ loop.index }}" loading="lazy" onclick='openLightbox({{ flight.urls_json|safe }}, {{ loop.index0 }})'>{% endfor %}</div>
-                    {% endif %}
+                    <div class="flight-right">
+                        {% if !flight.screenshots.is_empty() %}
+                        <div class="flight-shots">
+                            {% for url in flight.screenshots %}{% if loop.index0 < 3 %}<img src="{{ url }}" alt="" loading="lazy" onclick='event.preventDefault();event.stopPropagation();openLightbox({{ flight.urls_json|safe }}, {{ loop.index0 }})'>{% endif %}{% endfor %}
+                            {% if flight.screenshots.len() > 3 %}<span class="more">+{{ flight.screenshots.len() - 3 }}</span>{% endif %}
+                        </div>
+                        {% endif %}
+                        {{ flight.landing_badge|safe }}
+                    </div>
+                    <time class="flight-date">{{ flight.date_str }}</time>
                 </div>
-                {% if !flight.live_href.is_empty() || !flight.share_href.is_empty() %}</a>{% else %}</div>{% endif %}
-                {% endfor %}
-            </div>
-            {% endif %}
-            </div>
+            {% if !flight.live_href.is_empty() || !flight.share_href.is_empty() %}</a>{% else %}</div>{% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
 
-            <div id="lightbox" class="lightbox" onclick="lbBackdropClick(event)">
-                <button class="lb-close" onclick="closeLightbox()" aria-label="Close">✕</button>
-                <button class="lb-btn lb-prev" id="lb-prev" onclick="lbNav(-1)" aria-label="Previous">‹</button>
-                <img id="lb-img" class="lightbox-img" src="" alt="">
-                <button class="lb-btn lb-next" id="lb-next" onclick="lbNav(1)" aria-label="Next">›</button>
-                <div id="lb-counter" class="lightbox-counter"></div>
-            </div>
-            <script>
-                var lbImages = [], lbIdx = 0;
-                function openLightbox(urls, idx) {
-                    lbImages = urls; lbIdx = idx;
-                    updateLb();
-                    document.getElementById('lightbox').classList.add('open');
-                    document.body.style.overflow = 'hidden';
-                }
-                function closeLightbox() {
-                    document.getElementById('lightbox').classList.remove('open');
-                    document.body.style.overflow = '';
-                }
-                function lbNav(dir) {
-                    lbIdx = (lbIdx + dir + lbImages.length) % lbImages.length;
-                    updateLb();
-                }
-                function lbBackdropClick(e) {
-                    if (e.target === document.getElementById('lightbox')) closeLightbox();
-                }
-                function updateLb() {
-                    document.getElementById('lb-img').src = lbImages[lbIdx];
-                    var multi = lbImages.length > 1;
-                    document.getElementById('lb-prev').style.display = multi ? '' : 'none';
-                    document.getElementById('lb-next').style.display = multi ? '' : 'none';
-                    document.getElementById('lb-counter').textContent = multi ? (lbIdx + 1) + ' / ' + lbImages.length : '';
-                }
-                document.addEventListener('keydown', function(e) {
-                    if (!document.getElementById('lightbox').classList.contains('open')) return;
-                    if (e.key === 'ArrowLeft') lbNav(-1);
-                    else if (e.key === 'ArrowRight') lbNav(1);
-                    else if (e.key === 'Escape') closeLightbox();
-                });
-            </script>
-            {% include "_theme_toggle.html" %}
-        </body>
-        </html>
+{% include "_app_shell_foot.html" %}
+
+<div id="lightbox" class="lightbox" onclick="lbBackdropClick(event)">
+    <button class="lb-close" onclick="closeLightbox()" aria-label="Close">&#10005;</button>
+    <button class="lb-btn lb-prev" id="lb-prev" onclick="lbNav(-1)" aria-label="Previous">&#8249;</button>
+    <img id="lb-img" class="lightbox-img" src="" alt="">
+    <button class="lb-btn lb-next" id="lb-next" onclick="lbNav(1)" aria-label="Next">&#8250;</button>
+    <div id="lb-counter" class="lightbox-counter"></div>
+</div>
+<script>
+    var lbImages = [], lbIdx = 0;
+    function openLightbox(urls, idx) {
+        lbImages = urls; lbIdx = idx;
+        updateLb();
+        document.getElementById('lightbox').classList.add('open');
+        document.body.style.overflow = 'hidden';
+    }
+    function updateLb() {
+        document.getElementById('lb-img').src = lbImages[lbIdx];
+        document.getElementById('lb-counter').textContent = lbImages.length > 1 ? (lbIdx + 1) + ' / ' + lbImages.length : '';
+        var multi = lbImages.length > 1;
+        document.getElementById('lb-prev').style.display = multi ? '' : 'none';
+        document.getElementById('lb-next').style.display = multi ? '' : 'none';
+    }
+    function lbNav(d) { lbIdx = (lbIdx + d + lbImages.length) % lbImages.length; updateLb(); }
+    function closeLightbox() {
+        document.getElementById('lightbox').classList.remove('open');
+        document.body.style.overflow = '';
+    }
+    function lbBackdropClick(e) { if (e.target.id === 'lightbox') closeLightbox(); }
+    document.addEventListener('keydown', function (e) {
+        if (!document.getElementById('lightbox').classList.contains('open')) return;
+        if (e.key === 'Escape') closeLightbox();
+        else if (e.key === 'ArrowLeft') lbNav(-1);
+        else if (e.key === 'ArrowRight') lbNav(1);
+    });
+</script>
+</body>
+</html>

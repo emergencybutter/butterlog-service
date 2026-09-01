@@ -8,12 +8,13 @@
     <meta property="og:description" content="{{ airframe }} • {{ pilot }} • {{ date_str }}">
     <meta property="og:site_name" content="ButterLog">
     {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
     <style>
         * { box-sizing: border-box; }
         body { font-family: 'Hanken Grotesk', sans-serif; background: var(--bg); color: var(--text-primary);
                 min-height: 100vh; margin: 0; display: flex; flex-direction: column; align-items: center;
                 justify-content: flex-start; padding: 3rem 1rem; }
-        .container { max-width: 750px; width: 100%; background: var(--panel-bg);
+        .container-unused { max-width: 750px; width: 100%; background: var(--panel-bg);
                       border: 1px solid var(--border-color); border-radius: var(--radius); padding: 3rem;
                       box-shadow: var(--shadow); }
         .icao { font-family: var(--font-display); letter-spacing: -0.02em; }
@@ -79,8 +80,19 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="/content" class="back">← Flight History</a>
+{% include "_app_shell.html" %}
+
+    <div class="view-head">
+        <div class="view-head-inner">
+            <a class="view-back" href="/content" aria-label="Back to flights" title="Back to flights">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            </a>
+            <span class="view-title">{{ dep }} &#8594; {{ arr_display }}</span>
+            <span class="view-sub">{{ date_str }}</span>
+        </div>
+    </div>
+
+    <div class="view-body">
         <div class="route">
             <span class="icao">{{ dep }}</span>
             <span class="arrow">→</span>
@@ -121,7 +133,6 @@
         <button class="lb-btn lb-next" id="lb-next" onclick="lbNav(1)">›</button>
         <div id="lb-counter" class="lightbox-counter"></div>
     </div>
-    {% include "_theme_toggle.html" %}
     <script>
         var lbImages = [], lbIdx = 0;
         function openLightbox(urls, idx) { lbImages = urls; lbIdx = idx; updateLb(); document.getElementById('lightbox').classList.add('open'); document.body.style.overflow = 'hidden'; }
