@@ -736,7 +736,22 @@ function renderFlight3D(d) {
         const x = Math.cos(a[1] * r) * Math.sin(b[1] * r) - Math.sin(a[1] * r) * Math.cos(b[1] * r) * Math.cos(dLon);
         return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
     })();
-    const initView = { longitude: fit.longitude, latitude: fit.latitude, zoom: Math.max(1, fit.zoom - 0.6), pitch: 58, bearing, maxPitch: 85 };
+    // Open on a side elevation: the camera looks across the route, not along
+    // it, with the eye near the horizon. Down the route the climb and descent
+    // are foreshortened to nothing; across it they are the shape of the flight.
+    // Turning a quarter left of the route direction puts departure on the left
+    // and arrival on the right.
+    const SIDE_PITCH = 78;
+    const initView = {
+        longitude: fit.longitude,
+        latitude: fit.latitude,
+        // A near-horizontal eye sees much further, so the fitted zoom leaves
+        // less margin than it does looking down.
+        zoom: Math.max(1, fit.zoom - 0.15),
+        pitch: SIDE_PITCH,
+        bearing: (bearing - 90 + 360) % 360,
+        maxPitch: 85,
+    };
 
     const terrain = new deck.TerrainLayer({
         id: 'terrain', minZoom: 0, maxZoom: 14,
@@ -767,6 +782,7 @@ function renderFlight3D(d) {
         layers: [...statics, ...marker(pts[0])],
     });
     window.flightDeck = deckgl;
+    pitchSlider.value = SIDE_PITCH;
     pitchSlider.oninput = () => { curView = { ...curView, pitch: +pitchSlider.value }; deckgl.setProps({ initialViewState: curView }); };
     document.getElementById('m3d-maxalt').textContent = Math.round(maxAltFt).toLocaleString() + ' ft';
     document.getElementById('m3d-exag').textContent = EXAG > 1.05 ? 'vertical ×' + EXAG.toFixed(1) + ' (exaggerated)' : '';
@@ -789,7 +805,7 @@ function renderFlight3D(d) {
         // aircraft stays parked at the start rather than offering dead controls.
         playBtn.closest('.m3d-panel').style.display = 'none';
     }
-    document.getElementById('m3d-reset').onclick = () => { curView = { ...initView }; pitchSlider.value = 58; deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } }); };
+    document.getElementById('m3d-reset').onclick = () => { curView = { ...initView }; pitchSlider.value = SIDE_PITCH; deckgl.setProps({ initialViewState: { ...initView, transitionDuration: 600 } }); };
 }
 
 function openLb(i){ document.getElementById('lb-img').src=window._lbUrls[i]; document.getElementById('lightbox').classList.add('open'); document.body.style.overflow='hidden'; }
