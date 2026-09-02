@@ -1,0 +1,8 @@
+# sqlx checksums each migration byte for byte and refuses to start if one
+# changes after it has been applied. Line-ending translation counts as a
+# change: core.autocrlf rewrote a migration on checkout once and the service
+# crash-looped on VersionMismatch until it was put back.
+#
+# `-text` freezes these files exactly as committed, in whichever ending each
+# was applied with, so a checkout can never rewrite them again.
+migrations/*.sql -text
