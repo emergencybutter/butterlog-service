@@ -30,6 +30,14 @@
        runway rather than a route. */
     #map-touchdown { height: 340px; border-radius: 6px; margin-bottom: 2rem; border: 1px solid var(--border); }
     #touchdown-section { margin-bottom: 0; }
+    /* Cockpit view: same frame as the 3D path, no controls of its own - the
+       replay transport above it is the control. */
+    /* deck clears to transparent, so the sky is this background showing through
+       above the terrain. Without it a sunlit landscape sits under a black void. */
+    #cockpit { position: relative; height: 420px; border-radius: 6px; overflow: hidden;
+               border: 1px solid var(--border); margin-bottom: 2rem;
+               background: linear-gradient(180deg, #2f6ea8 0%, #6ea3cc 62%, #9dc0d8 100%); }
+    #cockpit-canvas { display: block; width: 100%; height: 100%; }
     #map3d-section { margin-bottom: 2rem; }
     #map3d { position: relative; height: 480px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); background: #05070a; }
     #deck3d { display: block; width: 100%; height: 100%; }

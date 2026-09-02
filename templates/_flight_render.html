@@ -61,7 +61,7 @@ function renderFlightDoc(d) {
         oil_press: (td.oil_press || []).slice(),
         summary: d.summary || {},
         screenshots: d.screenshots || [],
-        map: null, path: null, planeMarker: null, touchdownMap: null, charts: [], chartKeys: [], cursors: [], userMoved: false,
+        map: null, path: null, planeMarker: null, touchdownMap: null, cockpit: null, charts: [], chartKeys: [], cursors: [], userMoved: false,
     };
 
     function headerHtml() {
@@ -257,6 +257,78 @@ function renderFlightDoc(d) {
     function hasData(key) {
         const a = state[key];
         return Array.isArray(a) && a.length > 0;
+    }
+
+    /// The view from the aeroplane, following the replay cursor.
+    ///
+    /// A first-person camera sitting at the aircraft's own position and
+    /// altitude, looking along its heading over real terrain. Unlike the path
+    /// view this uses true vertical scale: exaggerated terrain is what makes a
+    /// climb legible from outside, and what makes the world wrong from inside.
+    ///
+    /// Built the first time the pane is shown rather than on load - it pulls
+    /// its own terrain and imagery tiles, and most visits never open it.
+    function buildCockpit() {
+        const host = document.getElementById('cockpit');
+        if (!host || state.cockpit || typeof deck === 'undefined' || !deck.TerrainLayer) return;
+        if (state.lats.length < 2) return;
+
+        // Terrain only. The route line was drawn here at first and it passes
+        // through the camera by definition, so the segment at the eye filled
+        // half the frame as a wedge - out of the window you look at the world,
+        // not at your own track.
+        const statics = [
+            new deck.TerrainLayer({
+                id: 'cockpit-terrain', minZoom: 0, maxZoom: 14,
+                elevationDecoder: { rScaler: 256, gScaler: 1, bScaler: 1 / 256, offset: -32768 },
+                elevationData: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+                texture: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                operation: 'terrain+draw',
+            }),
+        ];
+
+        const deckgl = new deck.Deck({
+            canvas: 'cockpit-canvas',
+            views: new deck.FirstPersonView({ id: 'fp', fovy: 65, near: 5, far: 400000 }),
+            initialViewState: cockpitViewState(0),
+            controller: false,
+            layers: statics,
+        });
+        state.cockpit = { deckgl, statics };
+        if (typeof FlightReplay !== 'undefined' && FlightReplay.ready()) {
+            FlightReplay.subscribe(ev => updateCockpit(ev.sample));
+        }
+    }
+
+    /// Camera state for one replay sample: at the aircraft, facing where it
+    /// points. Heading is true here - the compass on the flight display is
+    /// magnetic, but a camera bearing is not.
+    function cockpitViewState(i, sample) {
+        const s = sample || {
+            latitude: state.lats[i], longitude: state.lons[i],
+            altitude: state.alts[i] || 0, heading: null, magvar: 0, track: null,
+        };
+        const M = 0.3048;
+        let bearing = s.track;
+        if (typeof s.heading === 'number') {
+            // X-Plane reports magnetic, MSFS true; put both back to true.
+            bearing = attSign < 0 ? s.heading : s.heading + (s.magvar || 0);
+        }
+        return {
+            longitude: s.longitude,
+            latitude: s.latitude,
+            // A few metres above the reported altitude: the fix is the
+            // aeroplane's origin, and sitting exactly on it buries the camera
+            // in the terrain on the ground roll.
+            position: [0, 0, Math.max(2, (s.altitude || 0) * M + 3)],
+            bearing: ((bearing || 0) % 360 + 360) % 360,
+            pitch: 0,
+        };
+    }
+
+    function updateCockpit(sample) {
+        if (!state.cockpit) return;
+        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0, sample) });
     }
 
     /// A close satellite view of where the flight actually touched down.
@@ -658,6 +730,9 @@ function renderFlightDoc(d) {
                 if (state.map) state.map.invalidateSize();
                 if (state.touchdownMap) state.touchdownMap.invalidateSize();
                 if (window.flightDeck) window.flightDeck.redraw(true);
+            } else if (name === 'replay') {
+                buildCockpit();
+                if (state.cockpit) state.cockpit.deckgl.redraw(true);
             } else if (name === 'graphs') {
                 state.charts.forEach(c => c.resize());
                 // Chart pixels just moved, so the replay cursor has to follow.

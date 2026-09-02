@@ -24,6 +24,7 @@
             <span class="view-title" id="view-route">Flight</span>
             <nav class="subnav" role="tablist" aria-label="Flight views">
                 <button class="subnav-tab" data-pane="summary" role="tab" type="button">Summary</button>
+                <button class="subnav-tab" data-pane="replay" role="tab" type="button">Replay</button>
                 <button class="subnav-tab" data-pane="maps" role="tab" type="button">Maps</button>
                 <button class="subnav-tab" data-pane="graphs" role="tab" type="button">Graphs</button>
             </nav>
@@ -37,14 +38,22 @@
     <div class="view-body">
         <div id="live-handoff"></div>
         {% if is_owner %}<div id="controls-mount"></div>{% endif %}
-        <div id="replay-mount" class="rp is-hidden"></div>
         <div id="header-mount"></div>
         <div id="gallery-mount"></div>
 
         <section data-pane="summary">
-            <div id="pfd-mount" class="pfd is-hidden"></div>
             <div id="stats-mount"></div>
             <div id="landing-mount"></div>
+        </section>
+
+        <section data-pane="replay" hidden>
+            <div id="replay-mount" class="rp is-hidden"></div>
+            <div id="pfd-mount" class="pfd is-hidden"></div>
+            <div class="section-title" style="margin-bottom:0.75rem">Cockpit View</div>
+            <div id="cockpit">
+                <canvas id="cockpit-canvas"></canvas>
+                <div class="m3d-panel m3d-hint">the view from the aeroplane, following the replay</div>
+            </div>
         </section>
 
         <section data-pane="maps">
