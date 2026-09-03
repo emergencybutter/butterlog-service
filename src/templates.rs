@@ -54,7 +54,9 @@ pub struct HomePage;
 
 #[derive(Template)]
 #[template(path = "map.html")]
-pub struct MapPage;
+pub struct MapPage {
+    pub nav: Nav,
+}
 
 /// The live variant of the flight detail page. Carries only the flight id: the
 /// page fetches the document itself from `/api/v0/flights/:id/live` and then
@@ -261,6 +263,7 @@ mod tests {
             "flights" => "My Flights",
             "aircraft" => "My Aircrafts",
             "settings" => "Settings",
+            "map" => "Live Map",
             _ => "Community",
         };
         Nav::signed_in(active, section, 7, "Pilot".into(), "https://example.invalid/a.png".into())
@@ -269,7 +272,7 @@ mod tests {
     #[test]
     fn static_pages_render() {
         assert!(HomePage.render().unwrap().contains("ButterLog Backend"));
-        assert!(MapPage.render().unwrap().contains("ButterLog Live Traffic Map"));
+        assert!(MapPage { nav: nav("map") }.render().unwrap().contains("ButterLog Live Traffic Map"));
     }
 
     #[test]
@@ -530,6 +533,8 @@ mod tests {
             }],
         };
         std::fs::write(format!("{}/shell_settings.html", out), settings.render().unwrap()).unwrap();
+
+        std::fs::write(format!("{}/shell_map.html", out), MapPage { nav: nav("map") }.render().unwrap()).unwrap();
 
         let empty = FlightsPage { nav: nav("flights"), subtitle: "Single pilot".into(), flights: vec![] };
         std::fs::write(format!("{}/shell_empty.html", out), empty.render().unwrap()).unwrap();

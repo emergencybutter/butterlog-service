@@ -1490,8 +1490,12 @@ async fn user_current_flight_by_discord_handler(
     Ok(axum::Json(flight_row.map(|row| build_current_flight(row, now))))
 }
 
-async fn map_handler() -> Result<Response, AppError> {
-    Ok(Html(templates::MapPage.render()?).into_response())
+async fn map_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    let nav = nav_for(&state, &headers, "map", "Live Map").await;
+    Ok(Html(templates::MapPage { nav }.render()?).into_response())
 }
 
 async fn flight_share_detail_handler(

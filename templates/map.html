@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
 
     <style>
         h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
@@ -26,6 +27,10 @@
             overflow: hidden;
         }
 
+        /* The map fills the shell's column. The rail is fixed and takes no
+           vertical space; the narrow layout's top bar does. */
+        #map-wrap { position: relative; height: 100vh; }
+        @media (max-width: 899px) { #map-wrap { height: calc(100vh - 52px); } }
         #map {
             width: 100%;
             height: 100%;
@@ -36,60 +41,18 @@
         }
 
         /* Glassmorphic Navbar Overlay */
-        .top-navbar {
-            position: absolute;
-            top: 1.5rem;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 10;
-            display: flex;
-            align-items: center;
-            gap: 2rem;
-            padding: 0.75rem 2rem;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-        }
 
-        .navbar-brand {
-            font-family: var(--font-display);
-            font-size: 1.25rem;
-            font-weight: 800;
-            color: var(--text);
-            letter-spacing: -0.03em;
-            text-decoration: none;
-        }
 
-        .nav-links {
-            display: flex;
-            gap: 0.75rem;
-        }
 
-        .nav-link {
-            color: var(--text-muted);
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 0.9rem;
-            padding: 0.4rem 0.8rem;
-            border-radius: var(--radius);
-            transition: color var(--t), background-color var(--t);
-        }
 
-        .nav-link:hover {
-            color: var(--text-primary);
-            background: var(--surface-2);
-        }
 
-        .nav-link.active {
-            color: var(--accent-text);
-            background: var(--accent-weak);
-        }
+
+        #theme-toggle { display: none; }
 
         /* Glassmorphic Sidebar Overlay */
         .sidebar {
             position: absolute;
-            top: 6rem;
+            top: 1.5rem;
             right: 1.5rem;
             bottom: 1.5rem;
             width: 380px;
@@ -336,38 +299,16 @@
                 bottom: 1rem;
             }
 
-            .top-navbar {
-                width: calc(100% - 2rem);
-                padding: 0.5rem 1rem;
-                gap: 0.5rem;
-                justify-content: space-between;
-            }
-
-            .nav-links {
-                gap: 0.25rem;
-            }
-
-            .nav-link {
-                font-size: 0.8rem;
-                padding: 0.3rem 0.5rem;
-            }
         }
     </style>
 </head>
 <body>
+{% include "_app_shell.html" %}
 
-    <nav class="top-navbar">
-        <a href="/content" class="navbar-brand">ButterLog</a>
-        <div class="nav-links">
-            <a href="/content" class="nav-link">Flight History</a>
-            <a href="/content/settings" class="nav-link">Notification Settings</a>
-            <a href="/map" class="nav-link active">Live Map</a>
-        </div>
-    </nav>
+    <div id="map-wrap">
+        <div id="map"></div>
 
-    <div id="map"></div>
-
-    <aside class="sidebar">
+        <aside class="sidebar">
         <header class="sidebar-header">
             <div class="sidebar-title">
                 <span class="pulse-dot"></span>
@@ -385,7 +326,8 @@
                 <span style="font-size: 0.8rem; color: var(--text-muted);">Start the client and fly to see yourself on the map!</span>
             </div>
         </div>
-    </aside>
+        </aside>
+    </div>
 
     <script>
         // Init map
@@ -550,5 +492,6 @@
         updateMap();
         setInterval(updateMap, 5000);
     </script>
+{% include "_app_shell_foot.html" %}
 </body>
 </html>
