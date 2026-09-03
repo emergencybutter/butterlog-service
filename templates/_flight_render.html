@@ -17,6 +17,49 @@ function fmtDate(s) {
     try { return new Date(s.replace(' ','T')+'Z').toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'}); } catch { return s; }
 }
 
+/// Height of the real-world terrain model at one point, in metres, or null.
+///
+/// The cockpit camera flies over a real-world height model while the altitudes
+/// in the log come from the simulator's own terrain, and the two disagree: at
+/// UMMG the DEM sits 3.5 m above the field, at LGKR 11 m below it. Sampling the
+/// same tiles deck draws from is the only way to learn the difference.
+///
+/// Bilinear across the four posts, which is what the mesh does between them.
+function sampleTerrainM(lat, lon, z) {
+    return new Promise(resolve => {
+        const n = Math.pow(2, z), rad = lat * Math.PI / 180;
+        const x = (lon + 180) / 360 * n;
+        const y = (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n;
+        const xt = Math.floor(x), yt = Math.floor(y);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onerror = () => resolve(null);
+        img.onload = () => {
+            try {
+                const c = document.createElement('canvas');
+                c.width = img.width; c.height = img.height;
+                const ctx = c.getContext('2d', { willReadFrequently: true });
+                ctx.drawImage(img, 0, 0);
+                const clamp = (v, hi) => Math.max(0, Math.min(hi, v));
+                const px = (x - xt) * img.width - 0.5, py = (y - yt) * img.height - 0.5;
+                const x0 = clamp(Math.floor(px), img.width - 1), y0 = clamp(Math.floor(py), img.height - 1);
+                const x1 = Math.min(img.width - 1, x0 + 1), y1 = Math.min(img.height - 1, y0 + 1);
+                const w = x1 - x0 + 1;
+                const d = ctx.getImageData(x0, y0, w, y1 - y0 + 1).data;
+                const at = (ix, iy) => {
+                    const o = ((iy - y0) * w + (ix - x0)) * 4;
+                    return d[o] * 256 + d[o + 1] + d[o + 2] / 256 - 32768;
+                };
+                const fx = clamp(px - x0, 1), fy = clamp(py - y0, 1);
+                resolve(at(x0, y0) * (1 - fx) * (1 - fy) + at(x1, y0) * fx * (1 - fy)
+                      + at(x0, y1) * (1 - fx) * fy + at(x1, y1) * fx * fy);
+            } catch (e) { resolve(null); }
+        };
+        img.src = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/'
+            + z + '/' + xt + '/' + yt + '.png';
+    });
+}
+
 // Renders the document and returns a handle the live page uses to keep it
 // current without tearing the page down on every poll.
 function renderFlightDoc(d) {
@@ -289,21 +332,59 @@ function renderFlightDoc(d) {
 
         const deckgl = new deck.Deck({
             canvas: 'cockpit-canvas',
-            views: new deck.FirstPersonView({ id: 'fp', fovy: 65, near: 5, far: 400000 }),
+            // near must clear the eye height, not exceed it: at 5 m the ground
+            // under a camera 3 m up was clipped away, leaving sky in the bottom
+            // of the frame through the whole landing.
+            views: new deck.FirstPersonView({ id: 'fp', fovy: 65, near: 1, far: 400000 }),
             initialViewState: cockpitViewState(0),
             controller: false,
             layers: statics,
         });
         state.cockpit = { deckgl, statics };
+        measureGroundFix();
         if (typeof FlightReplay !== 'undefined' && FlightReplay.ready()) {
-            FlightReplay.subscribe(ev => updateCockpit(ev.sample));
+            FlightReplay.subscribe(ev => updateCockpit(ev.sample, ev.progress));
         }
+    }
+
+    /// How far the drawn terrain sits above the simulator's field elevation, at
+    /// each end of the flight.
+    ///
+    /// The aeroplane is on the ground in the first and last samples, so its
+    /// reported altitude there *is* the field elevation the sim believes in.
+    /// The difference against the DEM is the amount the camera has to move to
+    /// sit on the surface the viewer can actually see. Measured rather than
+    /// assumed: a flat clearance can only ever be right at one airport.
+    function measureGroundFix() {
+        const last = state.lats.length - 1, M = 0.3048;
+        Promise.all([
+            sampleTerrainM(state.lats[0], state.lons[0], 14),
+            sampleTerrainM(state.lats[last], state.lons[last], 14),
+        ]).then(([dep, arr]) => {
+            const TOL = 150;
+            const fix = (dem, i) => {
+                if (dem === null) return null;
+                const d = dem - (state.alts[i] || 0) * M;
+                // An end that is not on the ground - a flight still in the air,
+                // a log that starts mid-climb - would hand back its whole
+                // altitude as an offset. A DEM disagreement is metres.
+                return Math.abs(d) > TOL ? null : d;
+            };
+            let d = fix(dep, 0), a = fix(arr, last);
+            if (d === null && a === null) return; // no usable end: keep the old floor
+            if (d === null) d = a;
+            if (a === null) a = d;
+            state.groundFix = { dep: d, arr: a };
+            const l = state.cockpitLast;
+            if (l) updateCockpit(l.sample, l.progress);
+            else if (state.cockpit) state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0) });
+        });
     }
 
     /// Camera state for one replay sample: at the aircraft, facing where it
     /// points. Heading is true here - the compass on the flight display is
     /// magnetic, but a camera bearing is not.
-    function cockpitViewState(i, sample) {
+    function cockpitViewState(i, sample, progress) {
         const s = sample || {
             latitude: state.lats[i], longitude: state.lons[i],
             altitude: state.alts[i] || 0, heading: null, magvar: 0, track: null,
@@ -314,21 +395,30 @@ function renderFlightDoc(d) {
             // X-Plane reports magnetic, MSFS true; put both back to true.
             bearing = attSign < 0 ? s.heading : s.heading + (s.magvar || 0);
         }
+        // Each end's offset is exact at that end and blended in between,
+        // where the aeroplane is high enough for a few metres not to show.
+        // EYE lifts the camera off the aircraft's origin, which is the fix.
+        const EYE = 3;
+        const gf = state.groundFix
+            ? state.groundFix.dep + (state.groundFix.arr - state.groundFix.dep) * (progress || 0)
+            : 0;
+        const z = (s.altitude || 0) * M + gf + EYE;
         return {
             longitude: s.longitude,
             latitude: s.latitude,
-            // A few metres above the reported altitude: the fix is the
-            // aeroplane's origin, and sitting exactly on it buries the camera
-            // in the terrain on the ground roll.
-            position: [0, 0, Math.max(2, (s.altitude || 0) * M + 3)],
+            // Unmeasured, the old floor still guards the ground roll; measured,
+            // the offset already puts the camera on the surface and a floor
+            // above sea level would only lift it off airports below it.
+            position: [0, 0, state.groundFix ? z : Math.max(2, z)],
             bearing: ((bearing || 0) % 360 + 360) % 360,
             pitch: 0,
         };
     }
 
-    function updateCockpit(sample) {
+    function updateCockpit(sample, progress) {
         if (!state.cockpit) return;
-        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0, sample) });
+        state.cockpitLast = { sample, progress };
+        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0, sample, progress) });
     }
 
     /// A close satellite view of where the flight actually touched down.
