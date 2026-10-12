@@ -21,7 +21,13 @@
     .rp-time .sep, .rp-time .total { color: var(--dim); }
     .rp-rate { flex: none; font-family: var(--font-mono); font-size: 0.66rem; color: var(--dim); letter-spacing: 0.08em;
                border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.15rem 0.4rem; }
-    @media (max-width: 600px) { .rp-rate { display: none; } .rp { gap: 0.6rem; padding: 0.5rem 0.6rem; } }
+    .rp-link { flex: none; height: 34px; display: inline-flex; align-items: center; gap: 0.35rem; padding: 0 0.6rem;
+               background: transparent; color: var(--dim); border: 1px solid var(--border);
+               border-radius: var(--radius); cursor: pointer; font-family: var(--font-mono); font-size: 0.66rem;
+               letter-spacing: 0.08em; text-transform: uppercase; }
+    .rp-link:hover { border-color: var(--purple); color: var(--purple); }
+    .rp-link svg { width: 14px; height: 14px; }
+    @media (max-width: 600px) { .rp-rate, .rp-link span { display: none; } .rp { gap: 0.6rem; padding: 0.5rem 0.6rem; } }
 
     /* Replay cursor drawn over each chart. A positioned div rather than a
        canvas repaint: four Chart.js redraws per animation frame is the one
@@ -199,12 +205,28 @@ window.FlightReplay = (function () {
             `<button class="rp-play" id="rp-play" aria-label="Play replay" title="Play / pause (space)">▶</button>
              <input class="rp-scrub" id="rp-scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Replay position">
              <span class="rp-time"><span id="rp-elapsed">0:00</span><span class="sep"> / </span><span class="total">${fmt(realSpan)}</span></span>
-             <span class="rp-rate" title="Average speed-up. Idle gaps in the log are skipped, so this is not a constant rate.">~${Math.round(realSpan * rate / span)}× real time</span>`;
+             <span class="rp-rate" title="Average speed-up. Idle gaps in the log are skipped, so this is not a constant rate.">~${Math.round(realSpan * rate / span)}× real time</span>
+             <button class="rp-link" id="rp-link" type="button" title="Copy a link that opens this flight's replay and starts playing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg><span>Copy link</span></button>`;
         playBtn = document.getElementById('rp-play');
         scrub = document.getElementById('rp-scrub');
         elapsedEl = document.getElementById('rp-elapsed');
         playBtn.addEventListener('click', () => playing ? pause() : play());
         scrub.addEventListener('input', () => seek(scrub.value / 1000));
+        const linkBtn = document.getElementById('rp-link');
+        const linkLabel = linkBtn.querySelector('span');
+        linkBtn.addEventListener('click', async () => {
+            const url = location.origin + location.pathname + location.search + '#replay';
+            try {
+                await navigator.clipboard.writeText(url);
+                linkLabel.textContent = 'Copied';
+            } catch (e) {
+                // No clipboard (insecure origin, denied permission): leave the
+                // link in the address bar for a manual copy instead.
+                history.replaceState(history.state, '', url);
+                linkLabel.textContent = 'Link in address bar';
+            }
+            setTimeout(() => { linkLabel.textContent = 'Copy link'; }, 2000);
+        });
     }
 
     document.addEventListener('keydown', e => {

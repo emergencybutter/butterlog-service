@@ -24,18 +24,36 @@
         try { sessionStorage.setItem(KEY, name); } catch (e) {}
     }
 
+    const known = function (name) { return tabs.some(function (t) { return t.dataset.pane === name; }); };
+
+    // Mirror the open tab into the URL so the address bar is always a link to
+    // what is on screen. replaceState, not a hash assignment: tab flips should
+    // not pile up in the back button.
+    function setHash(name) {
+        const url = location.origin + location.pathname + location.search + (name === 'summary' ? '' : '#' + name);
+        try { history.replaceState(history.state, '', url); } catch (e) {}
+    }
+
     tabs.forEach(function (t) {
-        t.addEventListener('click', function () { show(t.dataset.pane); });
+        t.addEventListener('click', function () { show(t.dataset.pane); setHash(t.dataset.pane); });
     });
 
-    // Carry the choice between flights: someone comparing traces down a list
-    // should not have to re-pick Graphs on every one.
+    // A linked tab (`#replay`) wins. Otherwise carry the choice between
+    // flights: someone comparing traces down a list should not have to re-pick
+    // Graphs on every one.
+    const linked = location.hash.slice(1);
+    window.flightPaneLinked = known(linked) ? linked : null;
     let initial = 'summary';
-    try {
-        const stored = sessionStorage.getItem(KEY);
-        if (stored && tabs.some(function (t) { return t.dataset.pane === stored; })) initial = stored;
-    } catch (e) {}
+    if (window.flightPaneLinked) {
+        initial = window.flightPaneLinked;
+    } else {
+        try {
+            const stored = sessionStorage.getItem(KEY);
+            if (stored && known(stored)) initial = stored;
+        } catch (e) {}
+    }
     show(initial);
+    setHash(initial);
 
     // The renderer may not exist yet on the live page, which builds its view
     // from the first poll. Re-announce once it does.

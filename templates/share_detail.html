@@ -123,5 +123,15 @@ async function deleteShare() {
 {% endif %}
 </script>
 {% include "_flight_panes.html" %}
+<script>
+// A link straight to the replay (`#replay`) is someone saying "watch this", so
+// start it. Wait for the page's own load so the first seconds of the flight
+// aren't spent while the map and cockpit tiles are still arriving.
+if (window.flightPaneLinked === 'replay') {
+    window.addEventListener('load', function () {
+        if (FlightReplay.ready()) FlightReplay.play();
+    });
+}
+</script>
 </body>
 </html>
