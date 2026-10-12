@@ -803,15 +803,18 @@ fn assemble_embeds(
     // printed literally; the embed's native timestamp below renders alongside it
     // in each viewer's local timezone.
     let now = chrono::Utc::now();
+    // The site serves no apple-touch-icon - nothing links one - so the logo the
+    // page itself uses is the icon that actually exists. Discord caches a fetch
+    // failure, so a 404 here is a blank square until its cache turns over.
     let footer = CreateEmbedFooter::new(format!("ButterLog • Updated {}", now.format("%H%MZ")))
-        .icon_url(format!("{}/apple-touch-icon.png", base_url));
+        .icon_url(format!("{}/images/icon.png", base_url));
 
     // The shared url is what lets Discord group the screenshot image embeds into
     // this embed's gallery; when the flight is shared it doubles as the title link.
     let primary_embed = CreateEmbed::new()
         .title(title)
         .url(gallery_url)
-        .thumbnail(format!("{}/apple-touch-icon.png", base_url))
+        .thumbnail(format!("{}/images/icon.png", base_url))
         .color(color)
         .author(author)
         .description(description)
