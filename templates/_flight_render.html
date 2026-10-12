@@ -105,6 +105,12 @@ function renderFlightDoc(d) {
         summary: d.summary || {},
         screenshots: d.screenshots || [],
         map: null, path: null, planeMarker: null, touchdownMap: null, cockpit: null, charts: [], chartKeys: [], cursors: [], userMoved: false,
+        // Cockpit view: whether the pane has asked for it, the newest live fix
+        // to point it at, and whether the replay cursor has taken it over.
+        cockpitWanted: false, liveCurrent: null, cockpitOnReplay: false,
+        // The camera pose on screen, the fix it is being reckoned forward from,
+        // how stale that fix was, and the correction decaying out of it.
+        cockpitCam: null, dr: null, liveAge: 0, drErr: null, drErrT0: 0, camRaf: null,
     };
 
     function headerHtml() {
@@ -336,15 +342,97 @@ function renderFlightDoc(d) {
             // under a camera 3 m up was clipped away, leaving sky in the bottom
             // of the frame through the whole landing.
             views: new deck.FirstPersonView({ id: 'fp', fovy: 65, near: 1, far: 400000 }),
-            initialViewState: cockpitViewState(0),
+            initialViewState: cockpitViewState(cockpitCam(0)),
             controller: false,
             layers: statics,
         });
         state.cockpit = { deckgl, statics };
         measureGroundFix();
-        if (typeof FlightReplay !== 'undefined' && FlightReplay.ready()) {
-            FlightReplay.subscribe(ev => updateCockpit(ev.sample, ev.progress));
+        wireCockpitToReplay();
+        // No replay to follow yet means the flight is still flying: sit at the
+        // aeroplane rather than at the first sample of the track, which is the
+        // departure gate and stays there for the whole flight.
+        followLiveCockpit();
+    }
+
+    /// Hand the cockpit camera to the replay cursor, once both of them exist.
+    ///
+    /// The two are built in either order. The share page attaches the replay up
+    /// front and builds the cockpit whenever its pane is first opened; a live
+    /// flight may have had that pane open for an hour before the replay
+    /// attaches at touchdown. Called from both sides, subscribing once - the
+    /// subscription emits immediately, so whichever call is second positions
+    /// the camera straight away.
+    function wireCockpitToReplay() {
+        if (state.cockpitOnReplay || !state.cockpit) return;
+        if (typeof FlightReplay === 'undefined' || !FlightReplay.ready()) return;
+        state.cockpitOnReplay = true;
+        stopLiveCockpit();
+        setCockpitHint('the view from the aeroplane, following the replay');
+        FlightReplay.subscribe(ev => updateCockpit(ev.sample, ev.progress));
+    }
+
+    /// Point the cockpit camera at the aeroplane, and keep it there.
+    ///
+    /// While a flight is still flying there is no replay cursor to follow - it
+    /// attaches only once the track is complete - so the live page's polled
+    /// snapshot is what the camera flies on. A client that sends no snapshot
+    /// still sends a track, so the newest sample is the fallback.
+    ///
+    /// Heading on the snapshot carries the sim's own convention - true on MSFS,
+    /// magnetic on X-Plane - which is the same convention the track's heading
+    /// array uses, so cockpitCam reads both with one rule. The variation it
+    /// needs to undo comes from the newest sample: the snapshot has none.
+    ///
+    /// The fix is stamped with when it was true, not when it arrived. The
+    /// service reports how long ago the flight last reported, and that is often
+    /// several seconds before the poll that carried it, so reckoning from the
+    /// arrival would leave the camera permanently that much further behind.
+    ///
+    /// `cut` jumps rather than easing, for a move the aeroplane did not make -
+    /// the ground offset landing under a camera that is otherwise where it
+    /// already was.
+    function followLiveCockpit(cut) {
+        if (!state.cockpit || state.cockpitOnReplay) return;
+        const n = state.lats.length - 1;
+        const mv = state.magvar.length ? state.magvar[state.magvar.length - 1] : 0;
+        const pos = state.liveCurrent;
+        let sample, gs, vs;
+        if (pos) {
+            sample = { latitude: pos.latitude, longitude: pos.longitude, altitude: pos.altitude,
+                       heading: pos.heading, magvar: mv, track: pos.heading,
+                       pitch: pos.pitch, roll: pos.roll };
+            gs = pos.speed;
+            vs = pos.verticalSpeed;
+        } else if (n >= 0) {
+            sample = { latitude: state.lats[n], longitude: state.lons[n], altitude: state.alts[n] || 0,
+                       heading: state.heading[n], magvar: mv, track: state.track[n],
+                       pitch: state.pitch[n], roll: state.roll[n] };
+            gs = state.ground_speed[n];
+            vs = state.vs[n];
+        } else {
+            return;
         }
+        const num = v => (typeof v === 'number' && isFinite(v) ? v : 0);
+        // Where it is going, as against where it is pointing. The reported
+        // ground track is the honest answer; without one the nose is the only
+        // thing left to fly along, which is right in still air and crabbed in
+        // wind by however much the wind is doing.
+        const cam = cockpitCam(0, sample, 1);
+        const course = typeof state.track[n] === 'number' ? state.track[n] : cam.bearing;
+        state.dr = {
+            sample, course,
+            gs: num(gs),
+            vs: num(vs),
+            t0: performance.now() - num(state.liveAge) * 1000,
+        };
+        setCockpitHint('the view from the aeroplane, following the flight');
+        reseatLiveCockpit(cut);
+    }
+
+    function setCockpitHint(text) {
+        const el = document.querySelector('#cockpit .m3d-hint');
+        if (el) el.textContent = text;
     }
 
     /// How far the drawn terrain sits above the simulator's field elevation, at
@@ -377,17 +465,28 @@ function renderFlightDoc(d) {
             state.groundFix = { dep: d, arr: a };
             const l = state.cockpitLast;
             if (l) updateCockpit(l.sample, l.progress);
-            else if (state.cockpit) state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0) });
+            else if (state.cockpitOnReplay) applyCockpitCam(cockpitCam(0));
+            // Live: re-seat the camera on the surface without a tween, since the
+            // aeroplane has not moved - only the ground under it has.
+            else followLiveCockpit(true);
         });
     }
 
-    /// Camera state for one replay sample: at the aircraft, facing where it
-    /// points. Heading is true here - the compass on the flight display is
-    /// magnetic, but a camera bearing is not.
-    function cockpitViewState(i, sample, progress) {
+    /// Where the camera sits and how it is held, for one sample: at the
+    /// aircraft, facing where it points, banked and pitched with it.
+    ///
+    /// Heading is true here - the compass on the flight display is magnetic,
+    /// but a camera bearing is not. Attitude arrives in the aviation
+    /// convention, nose-up and right-wing-down positive, because both the track
+    /// arrays and the live snapshot are normalised to it upstream.
+    ///
+    /// Plain numbers rather than a deck view state, so that two of these can be
+    /// reckoned forward and corrected - see reckon and renderLiveCockpit.
+    function cockpitCam(i, sample, progress) {
         const s = sample || {
             latitude: state.lats[i], longitude: state.lons[i],
             altitude: state.alts[i] || 0, heading: null, magvar: 0, track: null,
+            pitch: state.pitch[i], roll: state.roll[i],
         };
         const M = 0.3048;
         let bearing = s.track;
@@ -409,16 +508,208 @@ function renderFlightDoc(d) {
             // Unmeasured, the old floor still guards the ground roll; measured,
             // the offset already puts the camera on the surface and a floor
             // above sea level would only lift it off airports below it.
-            position: [0, 0, state.groundFix ? z : Math.max(2, z)],
+            z: state.groundFix ? z : Math.max(2, z),
             bearing: ((bearing || 0) % 360 + 360) % 360,
-            pitch: 0,
+            pitch: typeof s.pitch === 'number' ? s.pitch : 0,
+            roll: typeof s.roll === 'number' ? s.roll : 0,
         };
     }
 
+    /// deck's FirstPersonView state for one camera pose.
+    ///
+    /// Its `pitch` is measured downwards - the viewport hands `90 + pitch` to a
+    /// spherical angle off the zenith - so the aeroplane's nose-up pitch goes in
+    /// negated. Roll it has no prop for at all: the view matrix is a lookAt
+    /// along the bearing with an `up` of [0, 0, 1], so banking means giving it
+    /// an up vector rolled about the line of sight.
+    ///
+    /// Pitch is clamped short of the vertical, where the direction lines up with
+    /// world up and the lookAt is degenerate. No aeroplane this logs holds 85
+    /// degrees nose-up, so the clamp only ever catches bad data.
+    function cockpitViewState(cam) {
+        const p = Math.max(-85, Math.min(85, cam.pitch));
+        return {
+            longitude: cam.longitude,
+            latitude: cam.latitude,
+            position: [0, 0, cam.z],
+            bearing: cam.bearing,
+            pitch: -p,
+            up: rolledUp(cam.bearing, p, cam.roll),
+        };
+    }
+
+    /// World up, rolled about the line of sight, so the horizon tilts with the
+    /// wings.
+    ///
+    /// The rotation that puts the right wing down also leans the aeroplane's own
+    /// up vector to the right, so a positive (right-wing-down) roll rotates by
+    /// +roll. The world then appears to turn the other way and the horizon rises
+    /// on the right, which is what the flight display draws for the same number.
+    function rolledUp(bearing, pitchDeg, rollDeg) {
+        if (!rollDeg) return [0, 0, 1];
+        const R = Math.PI / 180;
+        const b = bearing * R, p = pitchDeg * R, a = rollDeg * R;
+        // The direction the viewport will look along, in the east/north/up frame
+        // deck works in - the same one its own bearing/pitch resolve to.
+        const d = [Math.cos(p) * Math.sin(b), Math.cos(p) * Math.cos(b), Math.sin(p)];
+        // Rodrigues about d, applied to [0, 0, 1]. With up along z the cross
+        // product is just the camera's right vector, and the d(d.u)(1-cos) term
+        // is what keeps it correct once the nose is off the horizon and d and up
+        // are no longer perpendicular.
+        const c = Math.cos(a), s = Math.sin(a), k = d[2] * (1 - c);
+        return [d[1] * s + d[0] * k, -d[0] * s + d[1] * k, c + d[2] * k];
+    }
+
+    function applyCockpitCam(cam) {
+        if (!state.cockpit) return;
+        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(cam) });
+    }
+
+    const shortArc = (a, b) => ((b - a) % 360 + 540) % 360 - 180;
+
+    const KT = 0.514444;      // knots -> metres per second
+    const FPS = 1 / 60;       // feet per minute -> feet per second
+    const MPD = 111320;       // metres per degree of latitude
+    const EARTH_M = 6371008.8;
+
+    // How far past its fix the camera will reckon. Beyond this the aeroplane has
+    // gone quiet - the page says "Signal lost" - and flying on would carry the
+    // view somewhere it has no reason to believe the aeroplane went.
+    const DR_HORIZON_S = 60;
+    // How long a new fix's disagreement with the reckoning takes to blend away.
+    const DR_CORRECT_MS = 2500;
+    // Past this a fix is not a correction but a different place - a slew, a
+    // repositioned flight - and easing into it would be a long swoop over the
+    // terrain. Well clear of the few hundred metres that ordinary drift is.
+    const DR_CUT_M = 20000;
+
+    /// The camera pose implied by the last fix, flown forward to `ms`.
+    ///
+    /// The snapshot is already several seconds old when it arrives and the next
+    /// one is a poll behind that, so a camera that only ever showed fixes sits
+    /// visibly behind the aeroplane. There is nothing ahead to interpolate
+    /// towards, so carry the fix forward on what it reported: constant ground
+    /// speed along the ground track, constant vertical speed, constant attitude.
+    /// Wrong the moment the aeroplane manoeuvres, which is what the correction
+    /// in renderLiveCockpit is for.
+    ///
+    /// Ground track, not heading: in a crosswind the aeroplane moves along one
+    /// and points along the other, and the camera has to do both - travel with
+    /// the track while looking down the nose. cockpitCam works out the bearing,
+    /// so this only has to carry the position.
+    function reckon(ms) {
+        const d = state.dr;
+        const dt = Math.min(DR_HORIZON_S, Math.max(0, (ms - d.t0) / 1000));
+        // Along a great circle. Stepping the degrees flat instead drifts tens
+        // of metres over a long reckoning at high latitude, and costs the same
+        // handful of trig calls as doing it properly.
+        const R = Math.PI / 180;
+        const ang = d.gs * KT * dt / EARTH_M;
+        const b = d.course * R, la = d.sample.latitude * R, lo = d.sample.longitude * R;
+        const sinLa = Math.sin(la), cosLa = Math.cos(la);
+        const sinD = Math.sin(ang), cosD = Math.cos(ang);
+        const la2 = Math.asin(sinLa * cosD + cosLa * sinD * Math.cos(b));
+        const lo2 = lo + Math.atan2(Math.sin(b) * sinD * cosLa, cosD - sinLa * Math.sin(la2));
+        const sample = {
+            ...d.sample,
+            latitude: la2 / R,
+            // Back into -180..180, so a reckoning across the antimeridian stays
+            // somewhere the rest of the renderer recognises.
+            longitude: ((lo2 / R + 540) % 360) - 180,
+            altitude: d.sample.altitude + d.vs * FPS * dt,
+        };
+        // Progress 1: the camera is at the newest end of the track, so that is
+        // the end whose measured ground offset is the one that applies.
+        return cockpitCam(0, sample, 1);
+    }
+
+    function camDelta(a, b) {
+        return {
+            // Shortest way round for the two that wrap, so a turn through north
+            // and a crossing of the antimeridian both take the short path
+            // instead of sweeping the whole compass or the whole world.
+            longitude: shortArc(b.longitude, a.longitude),
+            latitude: a.latitude - b.latitude,
+            z: a.z - b.z,
+            bearing: shortArc(b.bearing, a.bearing),
+            pitch: a.pitch - b.pitch,
+            roll: a.roll - b.roll,
+        };
+    }
+
+    function camPlus(base, d, k) {
+        return {
+            longitude: base.longitude + d.longitude * k,
+            latitude: base.latitude + d.latitude * k,
+            z: base.z + d.z * k,
+            bearing: base.bearing + d.bearing * k,
+            pitch: base.pitch + d.pitch * k,
+            roll: base.roll + d.roll * k,
+        };
+    }
+
+    function camGapM(a, b) {
+        const dLat = (b.latitude - a.latitude) * MPD;
+        const dLon = shortArc(a.longitude, b.longitude) * MPD * Math.cos(a.latitude * Math.PI / 180);
+        return Math.hypot(dLat, dLon);
+    }
+
+    /// Take up a new fix without a jump.
+    ///
+    /// The reckoning will have drifted by the time a fix lands - the aeroplane
+    /// turned, or the wind is not what the last track said - so the fix almost
+    /// never agrees with where the camera is. Snapping to it twitches once a
+    /// poll. Instead keep rendering the reckoning and add the whole
+    /// disagreement back as an offset that decays to nothing: the pose on
+    /// screen does not move at the instant the fix arrives, and converges on the
+    /// new truth over a couple of seconds.
+    function reseatLiveCockpit(cut) {
+        const now = performance.now();
+        const target = reckon(now);
+        state.drErr = (!cut && state.cockpitCam && camGapM(state.cockpitCam, target) <= DR_CUT_M)
+            ? camDelta(state.cockpitCam, target)
+            : null;
+        state.drErrT0 = now;
+        renderLiveCockpit(now);
+        if (!state.camRaf) state.camRaf = requestAnimationFrame(stepLiveCockpit);
+    }
+
+    function renderLiveCockpit(ms) {
+        let cam = reckon(ms);
+        if (state.drErr) {
+            const u = (ms - state.drErrT0) / DR_CORRECT_MS;
+            if (u >= 1) state.drErr = null;
+            // Raised cosine: flat where the correction starts and flat where it
+            // runs out, so neither end of it shows as a kink in the motion.
+            else cam = camPlus(cam, state.drErr, 0.5 * (1 + Math.cos(Math.PI * u)));
+        }
+        state.cockpitCam = cam;
+        applyCockpitCam(cam);
+    }
+
+    function stepLiveCockpit(ms) {
+        state.camRaf = null;
+        if (state.cockpitOnReplay || !state.cockpit || !state.dr) return;
+        renderLiveCockpit(ms);
+        // Once the reckoning has run out of road and the correction has finished
+        // nothing is moving, so stop drawing. The next fix starts it again.
+        if (!state.drErr && ms - state.dr.t0 > DR_HORIZON_S * 1000) return;
+        state.camRaf = requestAnimationFrame(stepLiveCockpit);
+    }
+
+    function stopLiveCockpit() {
+        if (state.camRaf) { cancelAnimationFrame(state.camRaf); state.camRaf = null; }
+        state.dr = null;
+        state.drErr = null;
+    }
+
+    /// The replay drives the camera straight: it already emits every animation
+    /// frame, and tweening on top of that would only add lag.
     function updateCockpit(sample, progress) {
         if (!state.cockpit) return;
         state.cockpitLast = { sample, progress };
-        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(0, sample, progress) });
+        state.cockpitCam = cockpitCam(0, sample, progress);
+        applyCockpitCam(state.cockpitCam);
     }
 
     /// A close satellite view of where the flight actually touched down.
@@ -698,7 +989,16 @@ function renderFlightDoc(d) {
 
     // Drop a marker at a reported position. Used by the live page for the
     // aircraft's current fix and by replay for the interpolated one.
-    function setCurrentPos(pos) {
+    function setCurrentPos(pos, ageSecs) {
+        // Remembered even while the cockpit pane has never been opened, so
+        // opening it mid-flight starts at the aeroplane. Once the replay owns
+        // the camera this is the replay's own interpolated fix, not a live one,
+        // and followLiveCockpit ignores it.
+        if (!state.cockpitOnReplay) {
+            if (typeof ageSecs === 'number') state.liveAge = ageSecs;
+            if (pos) state.liveCurrent = pos;
+            followLiveCockpit();
+        }
         if (!pos || !state.map) return;
         const ll = [pos.latitude, pos.longitude];
         if (!state.planeMarker) {
@@ -739,6 +1039,10 @@ function renderFlightDoc(d) {
         /// calls it straight away. Returns false if there is nothing to replay.
         enableReplay() {
             if (typeof FlightReplay === 'undefined' || !FlightReplay.attach(state)) return false;
+            // Before the subscription below: `subscribe` emits on the spot, and
+            // that emit calls setCurrentPos with a replay fix, which must not be
+            // mistaken for a live one.
+            wireCockpitToReplay();
             FlightReplay.subscribe(ev => {
                 lastProgress = ev.progress;
                 const s = ev.sample;
@@ -807,6 +1111,15 @@ function renderFlightDoc(d) {
                 if (state.remapMarks) state.remapMarks();
                 drawCharts();
             }
+            if (ts.length) {
+                // The pane may have been opened before the flight had the two
+                // samples the cockpit needs; this is the retry.
+                if (state.cockpitWanted) buildCockpit();
+                // Only for a client that sends track but no snapshot: with one,
+                // the setCurrent later in the same poll is both fresher and
+                // stamped with its age.
+                if (!state.liveCurrent) followLiveCockpit();
+            }
         },
         /// Drop a marker at the aircraft's reported position, so a viewer sees
         /// where it is even before the next track sample lands.
@@ -821,6 +1134,7 @@ function renderFlightDoc(d) {
                 if (state.touchdownMap) state.touchdownMap.invalidateSize();
                 if (window.flightDeck) window.flightDeck.redraw(true);
             } else if (name === 'replay') {
+                state.cockpitWanted = true;
                 buildCockpit();
                 if (state.cockpit) state.cockpit.deckgl.redraw(true);
             } else if (name === 'graphs') {

@@ -52,7 +52,7 @@
             <div class="section-title" style="margin-bottom:0.75rem">Cockpit View</div>
             <div id="cockpit">
                 <canvas id="cockpit-canvas"></canvas>
-                <div class="m3d-panel m3d-hint">the view from the aeroplane, following the replay</div>
+                <div class="m3d-panel m3d-hint">the view from the aeroplane, following the flight</div>
             </div>
         </section>
 
@@ -160,7 +160,10 @@
         if (typeof renderControls === 'function') renderControls(doc);
         renderPFD(doc);
         if (doc.lastEpoch != null) lastEpoch = doc.lastEpoch;
-        handle.setCurrent(doc.current);
+        // The age goes with the fix: the flight last reported some seconds
+        // before this poll carried it, and the cockpit camera reckons from
+        // when the fix was true rather than from when it arrived.
+        handle.setCurrent(doc.current, doc.updatedAgoSecs);
         setStatus(doc);
 
         if (doc.status === 'ended') {
