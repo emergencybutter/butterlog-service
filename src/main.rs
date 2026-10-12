@@ -17,6 +17,7 @@ mod handlers;
 mod discord;
 mod telemetry;
 mod commands;
+mod feed;
 mod live;
 mod templates;
 mod track;
@@ -152,6 +153,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v0/flights/:id/end", post(track::end_flight_handler))
         // Public, like the map and the flight history pages it mirrors.
         .route("/api/v0/flights/:id/live", get(live::live_flight_handler))
+        // Public too: every finished flight, paged, for logbooks kept elsewhere.
+        .route("/api/v0/flights/ended", get(feed::ended_flights_handler))
         // Owner-only in both directions — the one non-public part of the
         // live-flight feature.
         .route(
@@ -1709,6 +1712,7 @@ mod tests {
             .route("/api/v0/flights/:id/track/cursor", get(|| async {}))
             .route("/api/v0/flights/:id/end", post(|| async {}))
             .route("/api/v0/flights/:id/live", get(|| async {}))
+            .route("/api/v0/flights/ended", get(|| async {}))
             .route("/api/v0/flights/:id/commands", get(|| async {}).post(|| async {}))
             .route("/api/v0/flights/:id/commands/:cid", get(|| async {}))
             .route("/api/v0/flights/:id/commands/:cid/ack", post(|| async {}))

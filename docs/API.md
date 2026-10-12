@@ -301,6 +301,52 @@ The in-progress equivalent of a share: the same document shape (`summary`, `tran
     ```
     `active` means reporting; `stale` means no update for over 120s (a frozen track, not a stopped aeroplane); `ended` means the app said so or the reaper gave up. Sends an `ETag`; an unchanged poll answers `304`.
 
+#### Ended Flights Feed (public)
+`GET /api/v0/flights/ended`
+
+Every finished flight, oldest ending first, paged by cursor. Meant for a service that keeps its own logbook (vhangar) and polls for what is new: each flight appears exactly once, and a consumer that was offline resumes from its cursor without missing anything. Public, like the flight history pages.
+
+*   **Query:**
+    *   `after` (string, optional): the `next` of the previous page. Opaque; hand back exactly what you were given. A malformed one is a `400`, never a restart from the beginning.
+    *   `since` (RFC 3339, optional): where to start when you have no cursor yet, e.g. a week ago. Ignored when `after` is given. Omit both to start from the first flight ever recorded.
+    *   `limit` (number, optional): 1–500, default 100.
+*   **Response:** `200 OK`
+    ```json
+    {
+      "data": [
+        {
+          "id": 123,
+          "user_id": 1,
+          "discord_id": "123456789012345678",
+          "pilot_name": "string",
+          "departure": "LFPG",
+          "arrival": "EGLL",
+          "aircraft_icao": "A320",
+          "aircraft_title": "Airbus A320neo",
+          "tail_number": "F-HBNA",
+          "simulator": "MSFS",
+          "start_time": "2026-10-10T08:40:00Z",
+          "end_time": "2026-10-10T10:05:00Z",
+          "takeoff_time": "2026-10-10T08:55:00Z",
+          "landing_time": "2026-10-10T09:58:00Z",
+          "flight_seconds": 3780,
+          "distance_nm": 188.4,
+          "fuel_consumed": 2450.5,
+          "landing_vs_fpm": -142.0,
+          "end_reason": "landed",
+          "ended_at": "2026-10-10T10:05:12.345678Z"
+        }
+      ],
+      "next": "1760090712345678_123",
+      "has_more": false
+    }
+    ```
+    Every field from `aircraft_icao` to `landing_vs_fpm` is `null` when the app did not report it. `flight_seconds` is takeoff to landing, falling back to the block times. `distance_nm` is the great circle between the takeoff and landing fixes, not the path flown. `next` is always set, even on an empty page. Keep calling with it while `has_more` is true.
+*   **Things to know:**
+    *   A flight is listed about 10 seconds after it ends, so that one ending a moment earlier cannot commit behind a cursor that has already passed it.
+    *   A client too old to call `POST /flights/:id/end` has its flights ended by the reaper 30 minutes after the last update, with `end_reason: "abandoned"` whether or not the aircraft landed. Use `landing_time` to tell whether it landed.
+    *   Listing happens once, when the flight ends. A late `PUT /flights/:id` after that (notes, a corrected arrival) changes the flight but does not list it again.
+
 ---
 
 ### Sim Commands
