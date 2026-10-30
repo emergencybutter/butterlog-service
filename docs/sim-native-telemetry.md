@@ -8,6 +8,8 @@ and instead streams nearly everything the simulator exposes, in the simulator's 
 over a protocol compact enough for the network and for long-term storage. The web gets
 richer visualisation, including watching a flight as it happens. Normalisation and analysis
 move server-side, so every past flight can be re-analysed when the analyser improves.
+**Scope:** the app requires a login and has no offline mode. Every product of a flight —
+web views, analysis and the FlySto/CloudAhoy export — is built by the service.
 
 ## 1. Where we are today
 
@@ -42,6 +44,9 @@ Principles:
 3. **Quantisation is the only lossy step.** No time-thinning on the client.
 4. **One pipeline below the sampler.** MSFS and X-Plane differ only in how a frame is
    sampled; chunking, compression, spooling and upload are shared.
+5. **The client only captures and uploads.** Decoding, normalisation, segmentation, analysis
+   and export exist in one place, the service. No logic is shared across the two repos
+   except the wire format.
 
 ## 3. Wire format
 
@@ -130,8 +135,12 @@ deltas. Expect roughly 0.5–1 MB for a 2-hour flight including high-rate phases
 ### 3.5 Transport
 
 - App → service: WebSocket, or HTTP POST per chunk; each chunk acked by `seq`.
-- The app appends every chunk to a local **spool** before sending and deletes it only once
-  acked. Offline, app crash, and service downtime all reduce to "send the spool later".
+- The app appends every chunk to a local **spool** before sending and deletes it once
+  acked. The spool is a crash-safe send buffer, not an archive and not an offline mode: it
+  covers a dropped connection, an app crash or a service restart mid-flight, which all
+  reduce to "send the spool later". It is bounded (a few hundred MB, tunable); the app warns
+  when it is growing and, once full, stops recording rather than evicting unsent chunks.
+- No login, no recording: a session only starts with a valid token.
 - Idempotent by `(session_id, seq)`, as `flight_track_points` is today by sample epoch.
 - Authenticated with the existing Bearer API token.
 
@@ -176,7 +185,7 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
 ```
 
 - **The plugin only samples.** It does not chunk, compress, spool or talk to the service.
-  The app remains the single uploader for both sims (token, spool, retries, FlySto export).
+  The app remains the single uploader for both sims (token, spool, retries).
 - **TCP, not UDP, to the app.** A dropped datagram in a recording that is kept for ever is a
   silent hole. UDP stays for traffic injection, where only the newest value matters.
 - **Safety in the sim process.** No allocation and no I/O on the flight loop. Every
@@ -209,10 +218,23 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
 - Flight segmentation, landing analysis (`flight_analyzer.rs`), airport/runway resolution and
   ICAO/airline identification move server-side. The airports CSV dependency on the client
   disappears.
-- Derived products — map track, chart series, events, landing scorecard, stats — are cached
-  per `(flight, analyser_version)` and rebuilt on version bump.
+- Derived products — map track, chart series, events, landing scorecard, stats, exports —
+  are cached per `(flight, analyser_version)` and rebuilt on version bump.
 
-### 5.3 Live
+### 5.3 Export (FlySto, CloudAhoy)
+
+- The Garmin-style CSV export that `export_flight_to_csv` (app,
+  `flight_log_manager.rs`) writes today becomes a derived product:
+  `GET /flights/{id}/export/flysto.csv`, with an Export button on the flight page.
+- Built from the canonical model, so the export and the web never disagree about what a
+  field means, and old flights get better exports when the normalisers improve.
+- Garmin logs are 1 Hz; the exporter resamples the high-rate data down to that, so nothing
+  is lost against today's 1 Hz export. Migrated `capture=legacy_1hz` flights export too.
+- The CSV writer ports almost unchanged (both sides are Rust); it reads the canonical model
+  instead of the per-flight SQLite file.
+- Later, if FlySto offers an upload API, the service can push flights directly.
+
+### 5.4 Live
 
 - Each active session keeps its last N minutes decoded in memory.
 - Viewers subscribe over SSE or WebSocket: catch-up snapshot (from the last keyframe), then
@@ -227,17 +249,27 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
 |---|---|
 | Sim adapters (SimConnect, X-Plane plugin link, Web API fallback) | Flight list, flight details, charts, map |
 | Encoder, spool, uploader | Screenshot gallery (capture and upload stay) |
-| FlySto export — works without login | Aircraft stats, `flight_analyzer.rs` |
-| SimVar / dataref introspection, debugging | Airport, runway, ICAO, airline indexes |
-| Traffic injection (`multiplayer.rs`), sim commands | Share and webhook formatting |
+| SimVar / dataref introspection, debugging | FlySto export (moves to the service, §5.3) |
+| Traffic injection (`multiplayer.rs`), sim commands | Aircraft stats, `flight_analyzer.rs` |
+| | Airport, runway, ICAO, airline indexes |
+| | Share and webhook formatting |
+| | Offline / not-logged-in recording |
 
-**Not logged in:** the app records locally and offers FlySto export; nothing is sent.
-**Logged in:** everything streams to the service.
+The app requires a login. With a token, everything streams to the service; without one, it
+records nothing.
 
-FlySto export needs flight boundaries and normalised fields locally. Rather than keep a
-second implementation, the decoders, normalisers and segmentation live in a shared crate,
-**`butterlog-core`**, used by both the service and the app. The wire stays sim-native; the
-FlySto CSV and the web never disagree about what a field means.
+The app carries no decoder, normaliser or segmentation: it only needs the encoder. The wire
+format (schema, chunk encoding) lives in a small crate, **`butterlog-wire`**, used by the
+app to encode and by the service to decode. Normalisers and analysis are service-only, so a
+fix to them ships with a service deploy, never an app release, and the two never need to
+agree on anything beyond `protocol_version`.
+
+Trade-offs accepted:
+
+- Users who only wanted a local logger plus FlySto now need an account, and their telemetry
+  is stored on the service.
+- A long service outage eventually fills the bounded spool and stops recording.
+- Export adds a little service load; it is cheap and cached.
 
 ## 7. Web UX this enables
 
@@ -250,7 +282,7 @@ FlySto CSV and the web never disagree about what a field means.
 
 ## 8. Plan
 
-1. **Measure.** Write the encoder in `butterlog-core`; replay existing SQLite logs through
+1. **Measure.** Write the encoder in `butterlog-wire`; replay existing SQLite logs through
    it to measure sizes and tune quanta. In parallel, a sampler spike in the plugin logging
    frame timing and payload per flight, side by side with Web API message rate and jitter
    (settles the "verify" items in §4.1).
@@ -259,14 +291,20 @@ FlySto CSV and the web never disagree about what a field means.
 3. **Plugin capture.** Flight-loop sampler, TCP link, handshake, CI builds for all three
    platforms, app-managed install.
 4. **Normalise and analyse server-side**; web views read derived products.
-5. **Live** over SSE/WS from the hot buffer.
-6. **Strip the client UI.**
+5. **Export on the service** (§5.3): FlySto CSV endpoint and web button. Must ship before the
+   client export is removed, so users never lose it in between.
+6. **Live** over SSE/WS from the hot buffer.
 7. **Migrate history:** bulk importer converting local `.db` logs into sessions and
-   uploading them (flagged `capture=legacy_1hz`).
+   uploading them (flagged `capture=legacy_1hz`). For users who never logged in this is the
+   only way to keep their flights, so it ships before the client loses its flight list, and
+   the app prompts them to log in and import.
+8. **Strip the client:** flight UI, analyser, indexes, FlySto export, not-logged-in recording.
 
 ## 9. Open questions
 
-- After the service acks a session, does the client keep a local copy (N days) or delete it?
-- When client segmentation (for FlySto) and server segmentation disagree, the server is the
-  authority — is that acceptable for users who export and also upload?
 - Screenshots: keep the current upload path, or attach them to sessions by `sim_time`?
+
+Settled:
+
+- The client deletes spooled chunks once acked; the service is the only archive.
+- Segmentation exists only on the service, so client and server cannot disagree.
