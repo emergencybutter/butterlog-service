@@ -46,7 +46,8 @@ Principles:
    sampled; chunking, compression, spooling and upload are shared.
 5. **The client only captures and uploads.** Decoding, normalisation, segmentation, analysis
    and export exist in one place, the service. No logic is shared across the two repos
-   except the wire format.
+   except the wire format. The one exception is the small traffic model peers exchange for
+   traffic injection (§6.1), which is a live-display concern, not analysis.
 
 ## 3. Wire format
 
@@ -251,7 +252,8 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
 | Encoder, spool, uploader | Screenshot gallery (capture and upload stay) |
 | SimVar / dataref introspection, debugging | FlySto export (moves to the service, §5.3) |
 | Traffic injection (`multiplayer.rs`), sim commands | Aircraft stats, `flight_analyzer.rs` |
-| | Airport, runway, ICAO, airline indexes |
+| `TrafficState` conversion per sim (§6.1) | Airport, runway, ICAO, airline indexes |
+| Local model matching (`aircraft-characteristics.csv`) | ICAO type / airline resolution (moves to the service) |
 | | Share and webhook formatting |
 | | Offline / not-logged-in recording |
 
@@ -270,6 +272,30 @@ Trade-offs accepted:
   is stored on the service.
 - A long service outage eventually fills the bounded spool and stops recording.
 - Export adds a little service load; it is cheap and cached.
+
+### 6.1 Traffic injection
+
+Peers exchange state directly over UDP (`multiplayer.rs`); the service is only the
+matchmaker. An MSFS pilot sees an X-Plane pilot, so peers need a sim-neutral model. Today
+that is the full `FlightMetrics`; it becomes a small **`TrafficState`** in `butterlog-wire`:
+
+- Position, MSL altitude, heading, pitch, bank, ground speed, on-ground, and for animation
+  gear, flaps, lights and engines running. Versioned with `protocol_version`.
+- Each sim adapter converts its own values into `TrafficState` to send, and back out to
+  inject. That is a few lines per sim, not the analysis normalisers.
+- It is deliberately separate from the service normalisers (calibration, capture quality,
+  segmentation). If the two drift, a peer may look slightly different in your sim, but no
+  recorded data changes — an acceptable cost for not sharing a crate.
+- Traffic stays peer-to-peer, not relayed through the service: relaying adds latency and
+  load, and the direct path with STUN/NAT traversal is deliberate
+  (`docs/multiplayer-same-nat.md`, `docs/multiplayer-proximity-peers.md` in the app).
+
+**Identity comes from the service.** The sender no longer resolves its own ICAO type and
+airline. The service already does that from the session header (§5.2); it returns the
+result in the session-open ack — ICAO type, airline ICAO and airline name — and the app
+forwards it to peers. The receiver matches local models with `aircraft-characteristics.csv`
+and local livery titles with the airline name it was sent, so the client drops the airport,
+runway, ICAO and airline tables.
 
 ## 7. Web UX this enables
 
@@ -290,7 +316,9 @@ Trade-offs accepted:
    upload path.
 3. **Plugin capture.** Flight-loop sampler, TCP link, handshake, CI builds for all three
    platforms, app-managed install.
-4. **Normalise and analyse server-side**; web views read derived products.
+4. **Normalise and analyse server-side**; web views read derived products. The session-open
+   ack returns the resolved identity, and peers switch to `TrafficState` (§6.1); both land
+   before the client's indexes are removed.
 5. **Export on the service** (§5.3): FlySto CSV endpoint and web button. Must ship before the
    client export is removed, so users never lose it in between.
 6. **Live** over SSE/WS from the hot buffer.
