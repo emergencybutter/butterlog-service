@@ -253,10 +253,19 @@ in the per-flight SQLite file (`find_closest_metrics` in `screenshot_manager.rs`
 it to `POST /flights/:id/screenshots`. After the change the client knows neither: flights are
 segmented on the service, and the local metrics file is gone.
 
-- The app uploads each screenshot against its session: `POST /sessions/{id}/screenshots`
-  with the image and its wall time (UTC). Wall time, not sim time: ticks carry it, the
+- The app records every screenshot it sees during a session in its local `screenshots.db`,
+  whether or not it is uploaded: file path, `session_id`, and wall time (UTC, the file's
+  creation time). The table exists today; `flight_id`, latitude and longitude give way to
+  `session_id` and wall time. Nothing about a screenshot reaches the service until it is
+  uploaded, so a screenshot the user keeps private stays private, path and all.
+- An upload, automatic or chosen later, is `POST /sessions/{id}/screenshots` with the image
+  and the wall time from `screenshots.db`. Wall time, not sim time: ticks carry it, the
   screenshot file has it, and the history importer can match old screenshots to
   `legacy_1hz` sessions by file time.
+- With auto-upload off, the app lists the screenshots it has recorded but not uploaded, to
+  upload or forget. It is the only screenshot view left in the app (§6).
+- If the session no longer exists on the service (an anonymous session swept after 14 days,
+  §6.2), the upload is refused and the app says so.
 - The service places it: the flight is the segment containing that time, and the position
   comes from the recorded track. Like any derived product, the placement is redone when
   segmentation changes, so a re-analysed session never leaves a screenshot on the wrong
@@ -272,7 +281,8 @@ segmented on the service, and the local metrics file is gone.
 | Keeps | Loses |
 |---|---|
 | Sim adapters (SimConnect, X-Plane plugin link, Web API fallback) | Flight list, flight details, charts, map |
-| Encoder, spool, uploader | Screenshot gallery and position lookup (capture and upload stay, §5.5) |
+| Encoder, spool, uploader | Screenshot gallery and position lookup (§5.5) |
+| `screenshots.db`, screenshot upload, list of screenshots not yet uploaded (§5.5) | |
 | SimVar / dataref introspection, debugging | FlySto export (moves to the service, §5.3) |
 | Traffic injection (`multiplayer.rs`), sim commands | Aircraft stats, `flight_analyzer.rs` |
 | `TrafficState` conversion per sim (§6.1) | Airport, runway, ICAO, airline indexes |
@@ -416,4 +426,6 @@ Settled:
 - The client deletes spooled chunks once acked; the service is the only archive, including
   for anonymous users (§6.2).
 - Segmentation exists only on the service, so client and server cannot disagree.
-- Screenshots attach to sessions by wall time and the service places them (§5.5).
+- Screenshots attach to sessions by wall time and the service places them (§5.5). The app
+  remembers session and time locally in `screenshots.db`, so nothing about a screenshot is
+  sent before it is uploaded.
