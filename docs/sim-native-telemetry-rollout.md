@@ -21,8 +21,9 @@ requires first.
    `lin.xpl`. That needs GitHub Actions, and an Apple Developer account for notarisation.
 4. **The client does more than display flights.** It creates flights with their summaries
    (`POST /api/v0/flights`), and formats shares and webhooks (`webhook_manager.rs`), which
-   drive the Discord posts. All of this moves to the service before the client is stripped,
-   or Discord posts and shares stop.
+   drive the Discord posts. It also attributes screenshots to a flight and finds their
+   position in the local metrics file. All of this moves to the service before the client is
+   stripped, or Discord posts, shares and screenshots stop.
 5. **Traffic peers exchange `FlightMetrics`.** `multiplayer.rs` sends its own aircraft as
    `FlightMetrics` JSON, which the client stops building when its monitors are stripped. The
    packet becomes a versioned `TrafficState` (design §6.1), and old and new clients fly
@@ -47,12 +48,12 @@ Each phase ships on its own. Nothing user-visible changes until phase 5.
 | 2. Ingest, shadow mode (MSFS) | Service: session and chunk endpoints, schemas by hash, hot chunks in `bytea`, compaction to R2. App: SimConnect `CHANGED\|TAGGED` sampler, chunker, bounded spool, uploader, running beside `live_track.rs` | Hidden setting, on for the author; then an opt-in "beta telemetry" toggle | A week of flights with no `seq` gaps; spool replay proven by killing the app mid-flight and taking the service down |
 | 3. Server analysis with parity check | Normalisers and `flight_analyzer.rs` moved into the service; derived products cached by `(flight, analyser_version)`; diff of service vs client summary for every flight uploaded both ways; web reads derived products, falls back to `flight_track_points`. Session-open ack returns the resolved ICAO type and airline; peers switch to `TrafficState`, new clients still sending and accepting `FlightMetrics` for old peers | Beta users | Parity within agreed tolerances (times, airports, runway, landing rate, distance), differences due to higher sample rate written down; old and new clients see each other as traffic, MSFS ↔ X-Plane, with the right models |
 | 4. X-Plane plugin capture (Windows) | Flight-loop sampler, SPSC ring, TCP link with handshake, `catch_unwind` on every entry point; app-managed install via `x-plane_install_12.txt`; Web API kept as `xp_webapi` fallback; sim commands over TCP; UDP RREF dropped (UDP stays for traffic only) | Beta toggle; manual plugin zip releases stop | Beta X-Plane flights pass the phase 3 parity check |
-| 5. Service owns side effects, then default on | Flight creation, Discord posts, shares, the ended-flights feed and the FlySto export (design §5.3) come from the service; then the new pipeline is on for every logged-in user and the old track upload is off | App 0.4.0, the first release users notice | Discord posts, shares and exports unchanged for new-pipeline flights |
+| 5. Service owns side effects, then default on | Flight creation, Discord posts, shares, the ended-flights feed and the FlySto export (design §5.3) come from the service; screenshots upload against the session and the service places them (design §5.5); then the new pipeline is on for every logged-in user and the old track upload is off | App 0.4.0, the first release users notice | Discord posts, shares and exports unchanged for new-pipeline flights; screenshots land on the right flight at the right position |
 | 6. Live | In-memory buffer per session; SSE with catch-up from the last keyframe; visibility per flight | All users | Viewer joining mid-flight catches up within one keyframe |
 | 7. Anonymous accounts | Design §6.2: anonymous accounts, secret link, 14-day sweeper, claim on sign-up, rate limits and quotas | First-run screen; existing logged-out users see it once on update, before anything is sent | Anonymous flight visible through its link; swept after 14 days; kept after claim, both into a new and an existing Discord account |
-| 8. History import, then strip the client | First the bulk importer uploads local `.db` logs as `capture=legacy_1hz` sessions, prompting users who aren't signed up to sign up first; one or two releases later the flight UI, analyser, indexes, client export and local-only recording are removed | Announced on Discord: the logbook moves to the web, through the secret link for users who aren't signed up | Imported history visible on the web before the strip release |
+| 8. History import, then strip the client | First the bulk importer uploads local `.db` logs as `capture=legacy_1hz` sessions, with their screenshots matched by file time, prompting users who aren't signed up to sign up first; one or two releases later the flight UI, analyser, indexes, client export and local-only recording are removed | Announced on Discord: the logbook moves to the web, through the secret link for users who aren't signed up | Imported history visible on the web before the strip release |
 | 9. macOS and Linux | SimConnect behind `cfg(windows)`; app and plugin built, signed and notarised; platforms added to `latest.json` | All users | X-Plane flights recorded from macOS and Linux |
-| 10. Retire the old path | `flight_track_points` and v0 track endpoints removed; `FlightMetrics` traffic packet dropped; Web API fallback kept or dropped based on `xp_webapi` share | — | No clients older than 0.4.x in `client_version` |
+| 10. Retire the old path | `flight_track_points`, v0 track endpoints and `POST /flights/:id/screenshots` removed; `FlightMetrics` traffic packet dropped; Web API fallback kept or dropped based on `xp_webapi` share | — | No clients older than 0.4.x in `client_version` |
 
 Phase 6 can move later if phase 5 runs long: live already works through `/live` today.
 Phase 7 must ship before phase 8: once the client is stripped, the secret link is the only
@@ -73,8 +74,3 @@ The design is in design §6.2. What matters for shipping it:
   before importing, and imports only the last 14 days if they decline.
 - **Swept flights are gone.** The app deletes acked chunks (design §3.5), so the "Kept until"
   date on the link page is the real deadline; the copy says so.
-
-## 4. Proposed answer to design §9
-
-- **Screenshots:** keep the current upload path for now and add `sim_time` to each one, so
-  they can be attached to sessions later without a protocol change.

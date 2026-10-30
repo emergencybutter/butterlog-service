@@ -246,12 +246,33 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
   serves traffic, fan-out goes through Postgres `LISTEN/NOTIFY`.
 - Visibility per flight: private, link-only, public; optional broadcast delay.
 
+### 5.5 Screenshots
+
+Today the app attributes a screenshot to the flight it is recording and looks up its position
+in the per-flight SQLite file (`find_closest_metrics` in `screenshot_manager.rs`), then posts
+it to `POST /flights/:id/screenshots`. After the change the client knows neither: flights are
+segmented on the service, and the local metrics file is gone.
+
+- The app uploads each screenshot against its session: `POST /sessions/{id}/screenshots`
+  with the image and its wall time (UTC). Wall time, not sim time: ticks carry it, the
+  screenshot file has it, and the history importer can match old screenshots to
+  `legacy_1hz` sessions by file time.
+- The service places it: the flight is the segment containing that time, and the position
+  comes from the recorded track. Like any derived product, the placement is redone when
+  segmentation changes, so a re-analysed session never leaves a screenshot on the wrong
+  flight.
+- A screenshot taken outside any session (sim menus, no aircraft loaded) is not uploaded.
+- Anonymous retention (§6.2) covers screenshots with their flight.
+- The auto-upload setting and its filename filter stay on the client, unchanged.
+- `POST /flights/:id/screenshots` keeps serving old clients until they are gone; those
+  screenshots keep their flight link.
+
 ## 6. Client after the change
 
 | Keeps | Loses |
 |---|---|
 | Sim adapters (SimConnect, X-Plane plugin link, Web API fallback) | Flight list, flight details, charts, map |
-| Encoder, spool, uploader | Screenshot gallery (capture and upload stay) |
+| Encoder, spool, uploader | Screenshot gallery and position lookup (capture and upload stay, §5.5) |
 | SimVar / dataref introspection, debugging | FlySto export (moves to the service, §5.3) |
 | Traffic injection (`multiplayer.rs`), sim commands | Aircraft stats, `flight_analyzer.rs` |
 | `TrafficState` conversion per sim (§6.1) | Airport, runway, ICAO, airline indexes |
@@ -388,10 +409,11 @@ shown in the app and kept 14 days; signing up keeps them for good.
 
 ## 9. Open questions
 
-- Screenshots: keep the current upload path, or attach them to sessions by `sim_time`?
+None at the moment.
 
 Settled:
 
 - The client deletes spooled chunks once acked; the service is the only archive, including
   for anonymous users (§6.2).
 - Segmentation exists only on the service, so client and server cannot disagree.
+- Screenshots attach to sessions by wall time and the service places them (§5.5).
