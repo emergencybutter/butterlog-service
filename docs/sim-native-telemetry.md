@@ -8,8 +8,9 @@ and instead streams nearly everything the simulator exposes, in the simulator's 
 over a protocol compact enough for the network and for long-term storage. The web gets
 richer visualisation, including watching a flight as it happens. Normalisation and analysis
 move server-side, so every past flight can be re-analysed when the analyser improves.
-**Scope:** the app requires a login and has no offline mode. Every product of a flight —
-web views, analysis and the FlySto/CloudAhoy export — is built by the service.
+**Scope:** the app requires an account and has no offline mode; a user who hasn't signed up
+gets an anonymous one (§6.2). Every product of a flight — web views, analysis and the
+FlySto/CloudAhoy export — is built by the service.
 
 ## 1. Where we are today
 
@@ -141,7 +142,8 @@ deltas. Expect roughly 0.5–1 MB for a 2-hour flight including high-rate phases
   covers a dropped connection, an app crash or a service restart mid-flight, which all
   reduce to "send the spool later". It is bounded (a few hundred MB, tunable); the app warns
   when it is growing and, once full, stops recording rather than evicting unsent chunks.
-- No login, no recording: a session only starts with a valid token.
+- No token, no recording: a session only starts with a valid token. On first run the app
+  gets one by creating an anonymous account (§6.2).
 - Idempotent by `(session_id, seq)`, as `flight_track_points` is today by sample epoch.
 - Authenticated with the existing Bearer API token.
 
@@ -255,10 +257,10 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
 | `TrafficState` conversion per sim (§6.1) | Airport, runway, ICAO, airline indexes |
 | Local model matching (`aircraft-characteristics.csv`) | ICAO type / airline resolution (moves to the service) |
 | | Share and webhook formatting |
-| | Offline / not-logged-in recording |
+| | Offline / local-only recording |
 
-The app requires a login. With a token, everything streams to the service; without one, it
-records nothing.
+The app requires an account, signed in or anonymous (§6.2). With a token, everything streams
+to the service; without one, it records nothing.
 
 The app carries no decoder, normaliser or segmentation: it only needs the encoder. The wire
 format (schema, chunk encoding) lives in a small crate, **`butterlog-wire`**, used by the
@@ -268,8 +270,8 @@ agree on anything beyond `protocol_version`.
 
 Trade-offs accepted:
 
-- Users who only wanted a local logger plus FlySto now need an account, and their telemetry
-  is stored on the service.
+- Users who only wanted a local logger plus FlySto now have their telemetry stored on the
+  service, if only for 14 days anonymously.
 - A long service outage eventually fills the bounded spool and stops recording.
 - Export adds a little service load; it is cheap and cached.
 
@@ -297,6 +299,59 @@ forwards it to peers. The receiver matches local models with `aircraft-character
 and local livery titles with the airline name it was sent, so the client drops the airport,
 runway, ICAO and airline tables.
 
+### 6.2 Anonymous accounts
+
+A user who hasn't signed up still streams. Their flights are reachable through a secret link
+shown in the app and kept 14 days; signing up keeps them for good.
+
+**Identity.**
+
+- An anonymous user is an ordinary `users` row with no Discord identity: `discord_id`
+  becomes nullable (`UNIQUE` is unaffected by NULLs), plus `anonymous_since TIMESTAMPTZ
+  NULL`. Display name is generated (`Pilot 4F2A`).
+- On first run the app calls `POST /api/v0/anonymous` (unauthenticated) and receives an API
+  token and a link secret. From then on it uses the same Bearer path as a signed-up user, so
+  ingest, analysis, export and live need no anonymous special case.
+- **The token writes, the link only reads.** They are separate secrets. The link secret is
+  128 bits, stored hashed like `api_tokens`; the app keeps the plaintext so it can show the
+  link any time, and can rotate it, which invalidates the old one.
+
+**The link.**
+
+- `/l/<secret>` shows the user's flights, each flight page, replay, export and live follow,
+  read-only. Each page shows "Kept until <date> — sign up to keep your flights".
+- `noindex`, `Referrer-Policy: no-referrer`, and excluded from the public map, the
+  ended-flights feed, aircraft stats and any Discord posting.
+- Share links (`flight_shares`) still work for individual flights, and expire with them.
+
+**Retention.**
+
+- Each flight of an anonymous user gets `expires_at = ended_at + 14 days`; its sessions,
+  chunks, R2 segments, derived products and screenshots go with it.
+- Deletion is a sweeper next to `track::spawn_reaper`, not an R2 lifecycle rule, so a claim
+  can cancel it without moving objects.
+- An anonymous user with no flights and a token unused for 14 days is deleted.
+- The app keeps no copy (§3.5), so a swept flight is gone for good, even after sign-up.
+
+**Sign-up (claim).**
+
+- The Discord login flow is unchanged. Once the app holds the new token it calls `POST
+  /api/v0/account/claim` with the new token as Bearer and the anonymous token in the body.
+- If the Discord account is new to the service, the anonymous row becomes it: `discord_id`
+  set, `anonymous_since` and every `expires_at` cleared.
+- If the Discord account already exists, the anonymous user's flights, sessions and
+  screenshots are reassigned to it and the anonymous row is deleted.
+
+**Consent and abuse.**
+
+- Uploading without signing in is a change from "nothing is sent unless logged in", so it is
+  never silent. First run says flights are uploaded to a private link and kept 14 days, and
+  offers *Continue* or *Sign in with Discord*. Existing logged-out users see the same screen
+  once, before anything is sent.
+- An anonymous user can delete their flights from the app or the link page at any time.
+- `POST /api/v0/anonymous` is rate-limited per IP. Anonymous users get an ingest quota (bytes
+  per day) and a cap on concurrent live sessions. Storage cost is bounded by the 14 days.
+
 ## 7. Web UX this enables
 
 - Replay with a scrubber driving map, 3D cockpit view, attitude and charts in sync.
@@ -322,11 +377,14 @@ runway, ICAO and airline tables.
 5. **Export on the service** (§5.3): FlySto CSV endpoint and web button. Must ship before the
    client export is removed, so users never lose it in between.
 6. **Live** over SSE/WS from the hot buffer.
-7. **Migrate history:** bulk importer converting local `.db` logs into sessions and
+7. **Anonymous accounts** (§6.2): must ship before the strip, when the secret link becomes
+   the only logbook of a user who hasn't signed up.
+8. **Migrate history:** bulk importer converting local `.db` logs into sessions and
    uploading them (flagged `capture=legacy_1hz`). For users who never logged in this is the
    only way to keep their flights, so it ships before the client loses its flight list, and
-   the app prompts them to log in and import.
-8. **Strip the client:** flight UI, analyser, indexes, FlySto export, not-logged-in recording.
+   the app prompts them to sign up and import — imported into an anonymous account, flights
+   older than 14 days would be swept at once.
+9. **Strip the client:** flight UI, analyser, indexes, FlySto export, local-only recording.
 
 ## 9. Open questions
 
@@ -334,5 +392,6 @@ runway, ICAO and airline tables.
 
 Settled:
 
-- The client deletes spooled chunks once acked; the service is the only archive.
+- The client deletes spooled chunks once acked; the service is the only archive, including
+  for anonymous users (§6.2).
 - Segmentation exists only on the service, so client and server cannot disagree.
