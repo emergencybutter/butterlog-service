@@ -68,8 +68,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let r2_client = r2::R2Client::new(&config);
 
-    // Initialize Discord Bot
-    let discord_http = discord::start_discord_bot(&config.discord_bot_token).await?;
+    // Initialize Discord Bot. Set but empty, it is skipped, for running locally without
+    // connecting as the real bot: Discord calls then fail and are logged.
+    let discord_http = if config.discord_bot_token.is_empty() {
+        tracing::warn!("DISCORD_BOT_TOKEN is empty; running without the Discord bot");
+        std::sync::Arc::new(serenity::http::Http::new(""))
+    } else {
+        discord::start_discord_bot(&config.discord_bot_token).await?
+    };
 
     let state = AppState {
         db: db_pool,
