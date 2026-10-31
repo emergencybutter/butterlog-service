@@ -30,7 +30,9 @@ requires first.
    together during the rollout.
 6. **Every user is a Discord user.** `users.discord_id` is `NOT NULL` and 44 places in the
    service read it. Anonymous accounts (design §6.2) need it nullable and every reader
-   checked.
+   checked. *Done on the service:* the column is nullable, every reader handles NULL, and the
+   public pages, map, feed, stats and Discord posting skip anonymous users. The app side
+   (first-run screen, claim after sign-in) is still phase 7.
 7. **Old clients stay around.** The updater spreads new versions over time, so the v0 track
    and flight endpoints keep working until `client_version` shows old clients are gone.
 8. **Hot chunks live in Postgres (`bytea`), not on local disk**, so the Cloud Run standby can

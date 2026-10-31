@@ -336,6 +336,9 @@ pub async fn live_flight_handler(
         stored_status,
         track_points,
     ) = row.ok_or_else(|| AppError::NotFound("Flight not found".to_string()))?;
+    if !crate::anonymous::can_view(&state.db, &headers, user_id).await? {
+        return Err(AppError::NotFound("Flight not found".to_string()));
+    }
 
     let updated_ago_secs = chrono::Utc::now()
         .signed_duration_since(updated_at)

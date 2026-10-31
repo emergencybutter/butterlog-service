@@ -22,6 +22,7 @@ mod live;
 mod templates;
 mod track;
 mod sessions;
+mod anonymous;
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -86,6 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             r2: state.r2.clone(),
             bucket,
         }),
+    );
+    anonymous::spawn_sweeper(
+        state.db.clone(),
+        anonymous::R2Objects {
+            r2: state.r2.clone(),
+            telemetry_bucket: state.config.r2_telemetry_bucket.clone(),
+        },
     );
 
     // Build the router with trace logging
@@ -172,6 +180,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(axum::extract::DefaultBodyLimit::max(sessions::MAX_CHUNK_BYTES)),
         )
         .route("/api/v0/sessions/:id/end", post(sessions::end_session_handler))
+        // Anonymous accounts (docs/sim-native-telemetry.md §6.2).
+        .route("/api/v0/anonymous", post(anonymous::create_handler))
+        .route("/api/v0/anonymous/link", post(anonymous::rotate_link_handler))
+        .route("/api/v0/account/claim", post(anonymous::claim_handler))
+        .route("/content/l/:secret", get(anonymous::link_handler))
         .route("/api/v0/flights/:id/end", post(track::end_flight_handler))
         // Public, like the map and the flight history pages it mirrors.
         .route("/api/v0/flights/:id/live", get(live::live_flight_handler))
@@ -424,7 +437,7 @@ async fn settings_handler(
     };
 
     // Fetch user's Discord ID from the database
-    let user_discord_id_str: String = match sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+    let user_discord_id_str: Option<String> = match sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&state.db)
         .await
@@ -439,7 +452,7 @@ async fn settings_handler(
         }
     };
 
-    let user_discord_id = user_discord_id_str.parse::<u64>().ok();
+    let user_discord_id = user_discord_id_str.and_then(|id| id.parse::<u64>().ok());
 
     // Fetch all guilds the bot is in and details about the user's admin status
     let guilds_info = match discord::get_bot_guilds_and_channels(&state.discord_http, user_discord_id).await {
@@ -543,7 +556,33 @@ async fn settings_handler(
     }
 }
 
+/// An anonymous user's flight is only shown to its own token or link (see `anonymous.rs`),
+/// and kept out of search engines.
 async fn flight_detail_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(flight_id): axum::extract::Path<i64>,
+) -> Result<Response, AppError> {
+    let owner: Option<i64> = sqlx::query_scalar("SELECT user_id FROM flights WHERE id = $1")
+        .bind(flight_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let private = match owner {
+        Some(owner) if anonymous::can_view(&state.db, &headers, owner).await? => {
+            anonymous::private_headers(&state.db, owner).await?
+        }
+        Some(_) => {
+            return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Flight not found</h1>".to_string())).into_response());
+        }
+        None => Vec::new(),
+    };
+    let mut response =
+        flight_detail_page(State(state), headers, axum::extract::Path(flight_id)).await?;
+    response.headers_mut().extend(private);
+    Ok(response)
+}
+
+async fn flight_detail_page(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(flight_id): axum::extract::Path<i64>,
@@ -666,7 +705,8 @@ type FlightListRow = (
     String,
     Option<String>,
     Option<String>,
-    String,
+    // discord_id: none for an anonymous user
+    Option<String>,
     // status
     String,
     // track_points
@@ -721,7 +761,7 @@ async fn nav_for(
         Some(id) => id,
         None => return templates::Nav::anonymous(active, section),
     };
-    let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT username, global_name, avatar, discord_id FROM users WHERE id = $1",
     )
     .bind(user_id)
@@ -733,7 +773,7 @@ async fn nav_for(
     let (name, avatar) = match row {
         Some((username, global_name, avatar_hash, discord_id)) => (
             global_name.unwrap_or(username),
-            discord_avatar_url(&discord_id, avatar_hash.as_deref()),
+            discord_avatar_url(discord_id.as_deref().unwrap_or_default(), avatar_hash.as_deref()),
         ),
         None => (String::new(), discord_avatar_url("", None)),
     };
@@ -759,6 +799,7 @@ async fn content_handler(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.created_at, \
                 u.id, u.username, u.global_name, u.avatar, u.discord_id, f.status, f.track_points \
          FROM flights f JOIN users u ON f.user_id = u.id \
+         WHERE u.anonymous_since IS NULL \
          ORDER BY f.created_at DESC LIMIT 50"
     )
     .fetch_all(&state.db)
@@ -774,6 +815,20 @@ async fn content_user_handler(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+
+    // An anonymous pilot's flights are read through their link (see `anonymous.rs`).
+    if !anonymous::can_view(&state.db, &headers, user_id).await? {
+        return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Pilot not found</h1>".to_string())).into_response());
+    }
+    let private = anonymous::private_headers(&state.db, user_id).await?;
+    let subtitle = if private.is_empty() {
+        "Single pilot".to_string()
+    } else {
+        format!(
+            "Each flight is kept {} days after it ends. Sign in with Discord from the app to keep them.",
+            anonymous::RETENTION_DAYS
+        )
+    };
 
     // Latest flights for a single pilot
     let flights: Vec<FlightListRow> = sqlx::query_as(
@@ -796,7 +851,9 @@ async fn content_user_handler(
         if own { "My Flights" } else { "Community" },
     )
     .await;
-    render_flights_page(&state, flights, "Single pilot", nav).await
+    let mut response = render_flights_page(&state, flights, &subtitle, nav).await?;
+    response.headers_mut().extend(private);
+    Ok(response)
 }
 
 async fn render_flights_page(
@@ -849,7 +906,7 @@ async fn render_flights_page(
             let stats = flight.3;
             let avatar_url = match flight.8.as_deref() {
                 Some(hash) if !hash.is_empty() => {
-                    format!("https://cdn.discordapp.com/avatars/{}/{}.png", flight.9, hash)
+                    format!("https://cdn.discordapp.com/avatars/{}/{}.png", flight.9.as_deref().unwrap_or_default(), hash)
                 }
                 _ => "https://cdn.discordapp.com/embed/avatars/0.png".to_string(),
             };
@@ -973,7 +1030,8 @@ async fn map_data_handler(
         "SELECT f.id, f.departure, f.arrival, f.statistics, f.updated_at, u.username, u.global_name, f.track_points \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
-         WHERE f.updated_at > NOW() - INTERVAL '5 minutes'"
+         WHERE f.updated_at > NOW() - INTERVAL '5 minutes' \
+           AND u.anonymous_since IS NULL"
     )
     .fetch_all(&state.db)
     .await?;
@@ -1111,7 +1169,8 @@ async fn aggregate_aircraft_stats(
             statistics->'landing_snapshot'->>'Longitude' AS ld_lon \
          FROM flights \
          WHERE statistics->>'resolved_icao' IS NOT NULL \
-           AND TRIM(statistics->>'resolved_icao') <> ''            AND ($1::bigint IS NULL OR user_id = $1)",
+           AND TRIM(statistics->>'resolved_icao') <> ''            AND ($1::bigint IS NULL OR user_id = $1) \
+           AND ($1::bigint IS NOT NULL OR user_id IN (SELECT id FROM users WHERE anonymous_since IS NULL))",
     )
     .bind(owner)
     .fetch_all(db)
@@ -1328,7 +1387,7 @@ async fn render_aircraft_type_page(
 
     let rows: Vec<(String, i64, String, Option<String>, String, Option<String>, Option<String>, String, chrono::DateTime<chrono::Utc>, Option<String>)> =
         sqlx::query_as(
-            "SELECT s.url, f.id, f.departure, f.arrival, u.username, u.global_name, u.avatar,                     u.discord_id, s.created_at, f.share_id                FROM screenshots s                JOIN flights f ON f.id = s.flight_id                JOIN users u ON u.id = f.user_id               WHERE UPPER(TRIM(f.statistics->>'resolved_icao')) = $1                 AND ($2::bigint IS NULL OR f.user_id = $2)               ORDER BY s.created_at DESC               LIMIT 500",
+            "SELECT s.url, f.id, f.departure, f.arrival, u.username, u.global_name, u.avatar,                     COALESCE(u.discord_id, ''), s.created_at, f.share_id                FROM screenshots s                JOIN flights f ON f.id = s.flight_id                JOIN users u ON u.id = f.user_id               WHERE UPPER(TRIM(f.statistics->>'resolved_icao')) = $1                 AND ($2::bigint IS NULL OR f.user_id = $2)                 AND (u.anonymous_since IS NULL OR f.user_id = $2)               ORDER BY s.created_at DESC               LIMIT 500",
         )
         .bind(&icao)
         .bind(if mine { viewer } else { None })
@@ -1479,6 +1538,7 @@ async fn user_current_flight_handler(
         "SELECT id, departure, arrival, statistics, updated_at \
          FROM flights \
          WHERE user_id = $1 AND updated_at > NOW() - INTERVAL '5 minutes' \
+           AND user_id IN (SELECT id FROM users WHERE anonymous_since IS NULL) \
          ORDER BY updated_at DESC \
          LIMIT 1"
     )
@@ -1740,5 +1800,125 @@ mod tests {
             .route("/api/v0/flights/:id/commands/:cid/ack", post(|| async {}))
             .route("/api/v0/multiplayer/ping", post(|| async {}))
             .route("/api/v0/user/:user_id/current", get(|| async {}));
+    }
+
+    /// The public pages hide anonymous pilots, and their link opens them. Against a real
+    /// Postgres, given by `TEST_DATABASE_URL` (skipped without it), as in `sessions.rs`.
+    #[tokio::test]
+    async fn anonymous_pilots_are_only_seen_through_their_link() {
+        use axum::http::{header, HeaderMap, StatusCode};
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let config = Config {
+            database_url: url,
+            discord_client_id: String::new(),
+            discord_client_secret: String::new(),
+            discord_redirect_uri: String::new(),
+            discord_bot_token: String::new(),
+            port: 0,
+            r2_bucket: "test".into(),
+            r2_endpoint: "http://127.0.0.1:9".into(),
+            r2_access_key_id: "test".into(),
+            r2_secret_access_key: "test".into(),
+            r2_public_url: String::new(),
+            r2_telemetry_bucket: None,
+            public_base_url: String::new(),
+            predetermined_channels: None,
+        };
+        let state = AppState {
+            db: db.clone(),
+            r2: r2::R2Client::new(&config),
+            config,
+            http_client: reqwest::Client::new(),
+            discord_http: std::sync::Arc::new(serenity::http::Http::new("")),
+        };
+
+        let account = anonymous::create(&db, &format!("test-{}", uuid::Uuid::new_v4())).await.unwrap();
+        let signed_in: i64 = sqlx::query_scalar(
+            "INSERT INTO users (discord_id, username) VALUES ($1, 'signed-in pilot') RETURNING id",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let flight = |user_id: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO flights (user_id, departure, statistics, status, ended_at, created_at) \
+                     VALUES ($1, 'KTYS', '{}', 'ended', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 hour') \
+                     RETURNING id",
+                )
+                .bind(user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let hidden = flight(account.user_id).await;
+        let public = flight(signed_in).await;
+
+        async fn body(response: Response) -> String {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        let detail = |headers: HeaderMap, id: i64| {
+            flight_detail_handler(State(state.clone()), headers, axum::extract::Path(id))
+        };
+        let pilot = |headers: HeaderMap, id: i64| {
+            content_user_handler(State(state.clone()), axum::extract::Path(id), headers)
+        };
+
+        // Nobody else sees them: not by id, not in the community list or the feed.
+        assert_eq!(detail(HeaderMap::new(), hidden).await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(pilot(HeaderMap::new(), account.user_id).await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(detail(HeaderMap::new(), public).await.unwrap().status(), StatusCode::OK);
+        let community = body(content_handler(State(state.clone()), HeaderMap::new()).await.unwrap()).await;
+        assert!(community.contains("signed-in pilot"));
+        assert!(!community.contains(&account.username));
+        let feed = body(
+            feed::ended_flights_handler(
+                State(state.clone()),
+                Query(feed::EndedQuery {
+                    after: None,
+                    since: Some((chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339()),
+                    limit: Some(500),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response(),
+        )
+        .await;
+        assert!(feed.contains(&format!("\"id\":{public}")));
+        assert!(!feed.contains(&format!("\"id\":{hidden}")));
+
+        // The link sets a cookie that opens them, kept out of search engines.
+        let wrong = anonymous::link_handler(State(state.clone()), axum::extract::Path("nope".into()))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+        let link = anonymous::link_handler(
+            State(state.clone()),
+            axum::extract::Path(account.link_secret.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(link.status(), StatusCode::SEE_OTHER);
+        assert_eq!(link.headers()[header::REFERRER_POLICY], "no-referrer");
+        let set_cookie = link.headers()[header::SET_COOKIE].to_str().unwrap();
+        let mut with_link = HeaderMap::new();
+        with_link.insert(header::COOKIE, set_cookie.split(';').next().unwrap().parse().unwrap());
+
+        let page = detail(with_link.clone(), hidden).await.unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(page.headers()["x-robots-tag"], "noindex");
+        let list = pilot(with_link.clone(), account.user_id).await.unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        assert!(body(list).await.contains("kept 14 days"));
+        // A link opens its own pilot only.
+        let other = anonymous::create(&db, &format!("test-{}", uuid::Uuid::new_v4())).await.unwrap();
+        assert_eq!(pilot(with_link, other.user_id).await.unwrap().status(), StatusCode::NOT_FOUND);
     }
 }

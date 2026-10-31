@@ -878,10 +878,11 @@ pub async fn add_allowlist_channel_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = get_user_id_from_session(&state.db, &headers).await?;
 
-    let user_discord_id: String = sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+    let user_discord_id: String = sqlx::query_scalar::<_, Option<String>>("SELECT discord_id FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&state.db)
-        .await?;
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Sign in with Discord to manage channels".to_string()))?;
 
     let user_discord_id_u64 = user_discord_id.parse::<u64>()
         .map_err(|_| AppError::BadRequest("Invalid user Discord ID".to_string()))?;
@@ -922,10 +923,11 @@ pub async fn delete_allowlist_channel_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = get_user_id_from_session(&state.db, &headers).await?;
 
-    let user_discord_id: String = sqlx::query_scalar("SELECT discord_id FROM users WHERE id = $1")
+    let user_discord_id: String = sqlx::query_scalar::<_, Option<String>>("SELECT discord_id FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&state.db)
-        .await?;
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Sign in with Discord to manage channels".to_string()))?;
 
     let user_discord_id_u64 = user_discord_id.parse::<u64>()
         .map_err(|_| AppError::BadRequest("Invalid user Discord ID".to_string()))?;

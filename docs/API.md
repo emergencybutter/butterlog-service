@@ -23,6 +23,38 @@ Authorization: Bearer <token>
 
 The authenticated endpoints below exist under both base urls with identical request/response shapes. Endpoints marked **public** require no authentication and exist only under `/api/v0`.
 
+### Anonymous accounts
+
+A user who hasn't signed in with Discord gets an anonymous account (`docs/sim-native-telemetry.md` §6.2). Its token is an ordinary API token: every authenticated endpoint takes it. What it uploads is reachable only through its own token and a secret link, never on the public pages, map, feed, stats or Discord, and each flight or telemetry session is deleted 14 days after it ends. Signing in with Discord and claiming keeps it for good.
+
+#### Create an Anonymous Account (public)
+`POST /anonymous`
+
+*   **Response:**
+    *   `201 Created`: `{ "userId", "token", "linkSecret", "username", "retentionDays" }`. `token` is the Bearer for everything else. `linkSecret` only reads: the link is `https://butterlog.flyvoyager.net/content/l/<linkSecret>`. Keep both; the service stores only their hashes.
+    *   `429 Too Many Requests`: more than 5 accounts from one address in the last hour, or 500 in all.
+
+#### Replace the Link
+`POST /anonymous/link`
+
+*   **Response:** `200 OK` with `{ "linkSecret" }`. The old link stops working. `403 Forbidden` for a signed-in account, which has no link.
+
+#### Claim an Anonymous Account
+`POST /account/claim`
+
+Called with the new Discord token as Bearer, once the user has signed in.
+
+*   **Request Body:** `{ "anonymousToken": "<the anonymous account's token>" }`
+*   **Response:**
+    *   `200 OK`: `{ "flights", "sessions" }`, how many moved. Everything the anonymous account held moves to the signed-in account and is kept for good; the anonymous account is deleted, so its token and link stop working.
+    *   `403 Forbidden`: the Bearer is itself anonymous.
+    *   `404 Not Found`: no anonymous account for that token, including one already claimed.
+
+#### The Link (web)
+`GET /content/l/:linkSecret`
+
+Sets a `link` cookie and redirects to the pilot's flight list, so the flight pages and live updates behind it can be read. Pages of anonymous pilots carry `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`.
+
 ## Endpoints
 
 ### Flight Management

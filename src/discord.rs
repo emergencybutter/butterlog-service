@@ -208,7 +208,8 @@ pub async fn maybe_update_user_notification_channels(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch user's discord_id and last update timestamp
     let row: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT discord_id, discord_notification_channels_updated_at FROM users WHERE id = $1"
+        "SELECT discord_id, discord_notification_channels_updated_at FROM users \
+          WHERE id = $1 AND discord_id IS NOT NULL"
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -335,7 +336,7 @@ pub async fn sync_flight_discord(
         "SELECT f.user_id, f.statistics, u.discord_id, u.username, u.global_name, u.avatar, f.discord_screenshot_sig, f.notes \
          FROM flights f \
          JOIN users u ON f.user_id = u.id \
-         WHERE f.id = $1"
+         WHERE f.id = $1 AND u.discord_id IS NOT NULL"
     )
     .bind(flight_id)
     .fetch_optional(db)

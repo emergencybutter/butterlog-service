@@ -231,6 +231,7 @@ pub async fn ended_flights_handler(
                 f.statistics->'landing_snapshot'->>'VSpd' AS landing_vs \
            FROM flights f JOIN users u ON u.id = f.user_id \
           WHERE f.status = 'ended' \
+            AND u.anonymous_since IS NULL \
             AND f.ended_at IS NOT NULL \
             AND f.ended_at < NOW() - make_interval(secs => $1) \
             AND (f.ended_at, f.id) > ($2, $3) \

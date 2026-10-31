@@ -358,21 +358,26 @@ shown in the app and kept 14 days; signing up keeps them for good.
   token and a link secret. From then on it uses the same Bearer path as a signed-up user, so
   ingest, analysis, export and live need no anonymous special case.
 - **The token writes, the link only reads.** They are separate secrets. The link secret is
-  128 bits, stored hashed like `api_tokens`; the app keeps the plaintext so it can show the
-  link any time, and can rotate it, which invalidates the old one.
+  122 random bits (a v4 UUID), stored hashed like `api_tokens`; the app keeps the plaintext
+  so it can show the link any time, and can rotate it, which invalidates the old one.
 
 **The link.**
 
-- `/l/<secret>` shows the user's flights, each flight page, replay, export and live follow,
-  read-only. Each page shows "Kept until <date> — sign up to keep your flights".
+- `/content/l/<secret>` (under `/content`, which the proxy already sends to the service)
+  sets a `link` cookie and opens the user's flights, so the pages and live updates behind
+  it need no secret in their URLs: the flight list, each flight page, replay, export and
+  live follow, read-only. The list says how long flights are kept and to sign in to keep
+  them; a per-flight "Kept until <date>" is still to come.
 - `noindex`, `Referrer-Policy: no-referrer`, and excluded from the public map, the
   ended-flights feed, aircraft stats and any Discord posting.
 - Share links (`flight_shares`) still work for individual flights, and expire with them.
 
 **Retention.**
 
-- Each flight of an anonymous user gets `expires_at = ended_at + 14 days`; its sessions,
-  chunks, R2 segments, derived products and screenshots go with it.
+- A flight of an anonymous user expires 14 days after it ends (`ended_at`, else its last
+  update); a session, 14 days after it ends or goes silent. Expiry is computed, not stored,
+  so a claim needs to change nothing but the owner. A flight takes its screenshots and
+  shares with it; a session, its chunks and R2 segment; derived products will follow theirs.
 - Deletion is a sweeper next to `track::spawn_reaper`, not an R2 lifecycle rule, so a claim
   can cancel it without moving objects.
 - An anonymous user with no flights and a token unused for 14 days is deleted.
@@ -382,10 +387,10 @@ shown in the app and kept 14 days; signing up keeps them for good.
 
 - The Discord login flow is unchanged. Once the app holds the new token it calls `POST
   /api/v0/account/claim` with the new token as Bearer and the anonymous token in the body.
-- If the Discord account is new to the service, the anonymous row becomes it: `discord_id`
-  set, `anonymous_since` and every `expires_at` cleared.
-- If the Discord account already exists, the anonymous user's flights, sessions and
-  screenshots are reassigned to it and the anonymous row is deleted.
+- The anonymous user's flights (with their screenshots), sessions and shares are reassigned
+  to the Discord account and the anonymous row is deleted, taking its token and link with
+  it. The Discord login has always created or updated its user by then, so a new and an
+  existing account are the same move.
 
 **Consent and abuse.**
 

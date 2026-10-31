@@ -100,6 +100,23 @@ impl R2Client {
         Ok(())
     }
 
+    /// Deletes from another bucket than the public one.
+    pub async fn delete_private(&self, bucket: &str, key: &str) -> Result<(), String> {
+        tracing::info!("[Outgoing Request] R2 DELETE {} (bucket: {})", key, bucket);
+        self.client
+            .delete_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("R2 DELETE {} failed: {:?}", key, e);
+                format!("Failed to delete object from R2: {:?}", e)
+            })?;
+        tracing::info!("[Outgoing Response] R2 DELETE {} completed successfully", key);
+        Ok(())
+    }
+
     pub async fn download_object(&self, key: &str) -> Result<Vec<u8>, String> {
         tracing::info!("[Outgoing Request] R2 GET {} (bucket: {})", key, self.bucket);
         let resp = self.client
