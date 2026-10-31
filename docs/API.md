@@ -125,6 +125,48 @@ Sets `status = 'ended'`, so the live page can hand off to the permanent share ra
 
 ---
 
+### Telemetry Sessions
+
+Sim-native telemetry (`docs/sim-native-telemetry.md`): the app streams what the sim exposes, in the sim's own terms, as zstd chunks. Bodies are binary, in the formats of the `butterlog-wire` crate (`wire/`), sent as `application/octet-stream`. Runs alongside the track endpoints above until the web reads from sessions; nothing reads sessions yet.
+
+Every call is idempotent. The session id is a UUID chosen by the client, so a session can be spooled before it is acknowledged, and chunks are keyed by `(session, seq)`. A client that lost track of what was acknowledged can resend everything.
+
+#### Open a Session
+`PUT /sessions/:id`
+
+*   **Request Body:** a `SessionOpen` (header and channel table), at most **256KB**.
+*   **Response:**
+    *   `200 OK`: `{ "sessionId", "status", "nextSeq", "chunkCount" }`. Opening an open session again returns its cursor.
+    *   `404 Not Found`: the id belongs to another user's session.
+    *   `409 Conflict`: the session was opened with a different channel table.
+    *   `422 Unprocessable Entity`: malformed opening, or an unsupported protocol version.
+
+#### Upload a Chunk
+`PUT /sessions/:id/chunks/:seq`
+
+*   **Request Body:** one zstd-compressed chunk, at most **2MB**. The `seq` inside must match the path.
+*   **Response:**
+    *   `200 OK`: `{ "seq", "duplicate", "nextSeq" }`. `nextSeq` is the first chunk not yet received and decoded: every chunk below it is safe to drop from the spool.
+    *   `404 Not Found`: no such session for this user.
+    *   `410 Gone`: the session is compacted and closed.
+    *   `413 Payload Too Large` / `422 Unprocessable Entity`: not zstd, not a chunk, or the wrong `seq`.
+
+Chunks continue from the previous one, so the service decodes them in order from a keyframe. One that arrives early is stored and waits for its predecessors (`nextSeq` does not move). A chunk that fails to decode in order holds `nextSeq` there for good: an encoder bug, not something a resend repairs.
+
+#### Session Cursor
+`GET /sessions/:id`
+
+`{ "sessionId", "status", "nextSeq", "chunkCount" }`, as returned by opening.
+
+#### End a Session
+`POST /sessions/:id/end`
+
+*   **Response:** `200 OK` with the cursor. Ending an ended session is not an error.
+
+`status` goes `open` → `ended` → `compacted`. Without this call a session is ended 30 minutes after its last chunk, and reopens if chunks arrive again. An ended session whose chunks are all in is compacted into one segment object in a private R2 bucket (`R2_TELEMETRY_BUCKET`; unset, chunks stay in Postgres), at once if the client ended it, after 24 hours if it went silent, so a client back from an outage can still resend.
+
+---
+
 ### Screenshot Management
 
 #### Upload a Screenshot

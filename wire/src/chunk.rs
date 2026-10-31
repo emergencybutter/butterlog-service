@@ -377,6 +377,8 @@ pub enum DecodeError {
     BadTickIndex,
     BadString,
     TrailingBytes,
+    /// A field outside its allowed values, in a channel table, header or segment.
+    BadValue(&'static str),
     /// A chunk other than a keyframe whose predecessor was not decoded first.
     MissingPredecessor { expected: Option<u32>, got: u32 },
 }
@@ -389,7 +391,8 @@ impl fmt::Display for DecodeError {
             Self::UnknownChannel(id) => write!(f, "channel {id} is not in the session's table"),
             Self::BadTickIndex => write!(f, "tick indices out of range or out of order"),
             Self::BadString => write!(f, "string value is not UTF-8"),
-            Self::TrailingBytes => write!(f, "bytes left after the last column"),
+            Self::TrailingBytes => write!(f, "bytes left after the last field"),
+            Self::BadValue(what) => write!(f, "invalid {what}"),
             Self::MissingPredecessor { expected: Some(e), got } => {
                 write!(f, "chunk {got} arrived while chunk {e} was expected")
             }
@@ -401,6 +404,19 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+/// A chunk's sequence number and keyframe flag, read from its first bytes without decoding
+/// the rest. Lets a receiver file a chunk that arrived before its predecessors.
+pub fn peek_chunk(payload: &[u8]) -> Result<(u32, bool), DecodeError> {
+    use DecodeError::Truncated;
+    let mut r = Reader::new(payload);
+    let format = r.u8().ok_or(Truncated)?;
+    if format != FORMAT {
+        return Err(DecodeError::UnknownFormat(format));
+    }
+    let seq = u32::try_from(r.u64().ok_or(Truncated)?).map_err(|_| Truncated)?;
+    Ok((seq, r.u8().ok_or(Truncated)? != 0))
+}
 
 /// Decodes the chunks of one session, in order from a keyframe. Payloads come from
 /// clients, so every length is checked against the input rather than trusted, and a chunk

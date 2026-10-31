@@ -12,6 +12,12 @@ pub fn write_i64(out: &mut Vec<u8>, v: i64) {
     write_u64(out, zigzag(v));
 }
 
+/// Length-prefixed bytes, for strings and nested blobs.
+pub fn write_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    write_u64(out, b.len() as u64);
+    out.extend_from_slice(b);
+}
+
 pub fn zigzag(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
@@ -58,6 +64,12 @@ impl<'a> Reader<'a> {
         let b = self.buf.get(self.pos..end)?;
         self.pos = end;
         Some(b)
+    }
+
+    /// Bytes written by [`write_bytes`].
+    pub fn len_prefixed(&mut self) -> Option<&'a [u8]> {
+        let n = usize::try_from(self.u64()?).ok()?;
+        self.bytes(n)
     }
 
     pub fn is_empty(&self) -> bool {

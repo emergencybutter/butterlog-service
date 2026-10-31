@@ -13,6 +13,9 @@ pub struct Config {
     pub r2_access_key_id: String,
     pub r2_secret_access_key: String,
     pub r2_public_url: String,
+    /// Private bucket for compacted telemetry sessions. Unset, chunks stay in Postgres.
+    /// Never the screenshots bucket: that one is served publicly.
+    pub r2_telemetry_bucket: Option<String>,
     /// Public base URL of this service (no trailing slash), used when building
     /// share/detail links. Overridable via PUBLIC_BASE_URL.
     pub public_base_url: String,
@@ -63,6 +66,7 @@ impl Config {
             .unwrap_or(8080);
 
         let predetermined_channels = env::var("PREDETERMINED_CHANNELS").ok();
+        let r2_telemetry_bucket = env::var("R2_TELEMETRY_BUCKET").ok().filter(|b| !b.is_empty());
 
         let public_base_url = env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "https://butterlog.flyvoyager.net".to_string())
@@ -81,6 +85,7 @@ impl Config {
             r2_access_key_id,
             r2_secret_access_key,
             r2_public_url,
+            r2_telemetry_bucket,
             public_base_url,
             predetermined_channels,
         }

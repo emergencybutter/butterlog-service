@@ -10,6 +10,7 @@ default = ["zstd"]
 zstd = ["dep:zstd"]
 
 [dependencies]
+sha2 = "0.10"
 zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]

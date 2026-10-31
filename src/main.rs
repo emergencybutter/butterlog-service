@@ -21,6 +21,7 @@ mod feed;
 mod live;
 mod templates;
 mod track;
+mod sessions;
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -79,6 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ends flights that stopped reporting and prunes expired track points.
     track::spawn_reaper(state.db.clone());
+    sessions::spawn_compactor(
+        state.db.clone(),
+        state.config.r2_telemetry_bucket.clone().map(|bucket| sessions::R2Segments {
+            r2: state.r2.clone(),
+            bucket,
+        }),
+    );
 
     // Build the router with trace logging
     let app = Router::new()
@@ -150,6 +158,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(axum::extract::DefaultBodyLimit::max(track::MAX_TRACK_DECOMPRESSED as usize)),
         )
         .route("/api/v0/flights/:id/track/cursor", get(track::track_cursor_handler))
+        // Sim-native telemetry (docs/sim-native-telemetry.md), alongside the track above
+        // until the web reads derived products.
+        .route(
+            "/api/v0/sessions/:id",
+            put(sessions::open_session_handler)
+                .get(sessions::session_cursor_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(sessions::MAX_OPEN_BYTES)),
+        )
+        .route(
+            "/api/v0/sessions/:id/chunks/:seq",
+            put(sessions::upload_chunk_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(sessions::MAX_CHUNK_BYTES)),
+        )
+        .route("/api/v0/sessions/:id/end", post(sessions::end_session_handler))
         .route("/api/v0/flights/:id/end", post(track::end_flight_handler))
         // Public, like the map and the flight history pages it mirrors.
         .route("/api/v0/flights/:id/live", get(live::live_flight_handler))

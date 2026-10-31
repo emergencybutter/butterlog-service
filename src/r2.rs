@@ -58,6 +58,31 @@ impl R2Client {
         Ok(format!("{}{}{}", self.public_url, separator, key))
     }
 
+    /// Uploads to another bucket than the public one, for objects with no public URL.
+    pub async fn upload_private(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<(), String> {
+        tracing::info!("[Outgoing Request] R2 PUT {} (bucket: {}, content_type: {})", key, bucket, content_type);
+        self.client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::from(data))
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("R2 PUT {} failed: {:?}", key, e);
+                format!("Failed to upload object to R2: {:?}", e)
+            })?;
+        tracing::info!("[Outgoing Response] R2 PUT {} completed successfully", key);
+        Ok(())
+    }
+
     pub async fn delete_object(&self, key: &str) -> Result<(), String> {
         tracing::info!("[Outgoing Request] R2 DELETE {} (bucket: {})", key, self.bucket);
         self.client

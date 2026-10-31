@@ -7,16 +7,20 @@
 mod chunk;
 mod quantise;
 mod schema;
+mod segment;
+mod session;
 mod varint;
 
 pub use chunk::{
-    flags, DecodeError, DecodedChunk, EncodeError, EncodedChunk, SessionDecoder, SessionEncoder,
-    Tick, Value,
+    flags, peek_chunk, DecodeError, DecodedChunk, EncodeError, EncodedChunk, SessionDecoder,
+    SessionEncoder, Tick, Value,
 };
 #[cfg(feature = "zstd")]
 pub use chunk::{compress, decompress};
 pub use quantise::ChangeFilter;
-pub use schema::{Channel, DeltaOrder, Kind, RateClass};
+pub use schema::{decode_channels, encode_channels, Channel, DeltaOrder, Kind, RateClass};
+pub use segment::{decode_segment, encode_segment, Segment};
+pub use session::{schema_hash, Aircraft, SessionHeader, SessionOpen};
 
 /// Version of the wire format, sent in every session header and plugin handshake.
 pub const PROTOCOL_VERSION: u16 = 1;
