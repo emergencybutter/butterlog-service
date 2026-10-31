@@ -1,2 +1,5 @@
 /target
 .env
+# Built when working on the wire crate on its own; the service lock covers it.
+/wire/target
+/wire/Cargo.lock

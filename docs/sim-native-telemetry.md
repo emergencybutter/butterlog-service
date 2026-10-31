@@ -117,22 +117,36 @@ Ticks are grouped into chunks of 2–5 s (the live latency budget):
 Chunk {
   session_id, seq: u32, base_sim_time, base_wall_time,
   keyframe: bool,
-  columns: per channel → (tick indices, values)
+  columns: per channel → (presence, values)
 }
 ```
 
+The byte layout is specified in `butterlog-wire` (`wire/src/chunk.rs`).
+
 - Values are quantised to integers, delta (position/attitude: delta-of-delta) encoded,
   zigzag-varint packed, column by column.
-- The whole chunk is zstd-compressed.
-- **Keyframes:** every ~60 s a chunk carries the absolute value of *every* channel, so any
-  range is decodable with bounded look-back, and a viewer joining mid-flight needs at most
-  one keyframe.
+- **Presence** per column is a bitmap over the chunk's ticks or a list of tick-index gaps,
+  whichever is smaller: a bitmap for a channel present at most ticks, gaps for one that
+  rarely changes. At 1 Hz, gap lists alone cost about as much as the values.
+- **Chunks continue the previous one:** a column's first value is a delta against the
+  channel's last value in the session. Restarting from absolute values in every chunk cost
+  more than the deltas at low rates. The service therefore decodes a session's chunks in
+  order and holds back any that arrive early; a chunk whose predecessor is missing is
+  refused, never decoded wrong.
+- The whole chunk is zstd-compressed (level 3: levels 1–9 measured within a few percent).
+- **Keyframes:** every ~60 s a chunk starts from absolute values and carries the value of
+  *every* channel, so any range is decodable with bounded look-back, and a viewer joining
+  mid-flight needs at most one keyframe. 120 s saves only ~4%.
 - Discrete happenings the sim reports as events (aircraft loaded, crash, sim pause, replay
-  entered) travel as timestamped records in the same chunk.
+  entered) travel as timestamped records in the same chunk. Not built yet.
 
-**Size (estimate, to be measured — §8 step 1):** in cruise most channels are absent or zero
-deltas. Expect roughly 0.5–1 MB for a 2-hour flight including high-rate phases, against
-~4 MB for raw f64 at 1 Hz and ~80 MB at 20 Hz.
+**Size, measured at 1 Hz** (rollout phase 1: 428 local logs, 384 flight-hours, ~75
+normalised channels, 5 s chunks): **~140 kB per flight-hour** as sent (median; p90 180 kB),
+~70 kB per flight-hour compacted per session at zstd -19, against ~1.6 MB per flight-hour
+for the SQLite logs today. 2 s chunks cost ~40% more than 5 s. Scaling every quantum 10×
+coarser or finer moves size by ~30–40%; no single channel dominates. High-rate phases are
+not in these logs: the design's estimate of 0.5–1 MB for a 2-hour flight including them is
+still to be confirmed by the sampler spikes.
 
 ### 3.5 Transport
 
