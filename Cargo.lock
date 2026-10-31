@@ -727,6 +727,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "axum",
+ "butterlog-wire",
  "chrono",
  "dotenvy",
  "flate2",
@@ -743,6 +744,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "butterlog-wire"
+version = "0.1.0"
 
 [[package]]
 name = "bytemuck"

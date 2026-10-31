@@ -1,0 +1,7 @@
+[package]
+name = "butterlog-wire"
+version = "0.1.0"
+edition = "2024"
+description = "Sim-native telemetry wire format shared by the ButterLog app, X-Plane plugin and service"
+
+[dependencies]

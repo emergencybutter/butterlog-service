@@ -24,4 +24,5 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 flate2 = "1.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 askama = "0.12"
+butterlog-wire = { path = "wire" }
 
