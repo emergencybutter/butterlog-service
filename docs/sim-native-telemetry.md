@@ -152,7 +152,22 @@ by `measure_capture`): the whole pattern stays below 1,000 ft AGL, so it is the 
 sampled every frame capped at 30 Hz. **~600 kB per hour** as sent (83 kB for the pattern),
 68 kB compacted; ~460 kB per hour with the low phase at 10 Hz. A real flight spends most of
 its time in climb and cruise at 5 Hz and 1 Hz, so a 2-hour flight lands well inside the
-0.5–1 MB estimate. MSFS not measured yet.
+0.5–1 MB estimate.
+
+MSFS 2024, the same pattern through `msfs_capture` (every SimVar every sim frame, 65
+values, 7.2 min, ~60 fps): **~900 kB per hour** as sent at 30 Hz near the ground (107 kB
+for the pattern), 96 kB compacted; ~620 kB per hour at 10 Hz. Heavier than X-Plane with
+half the channels: position and attitude change on 85% of frames at a higher frame rate.
+Still inside the estimate; the low-phase rate is the main lever if it needs to shrink.
+
+Seen in the MSFS capture, for the sampler and the normalisers:
+
+- **Loading a flight** moves the aircraft through (0, 0) and another airport and resets
+  `SIMULATION TIME` twice (jumps of −3 s and −9 s) in the first 17 s. The sampler must
+  treat sim time going backwards as a discontinuity, and the flight starts after loading.
+- **`SIM ON GROUND` flickers** at liftoff: ten transitions within a second. Takeoff and
+  touchdown detection needs debouncing on the service.
+- Pause arrives as the `Pause` system event, not a SimVar.
 
 ### 3.5 Transport
 
