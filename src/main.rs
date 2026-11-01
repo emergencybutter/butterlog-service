@@ -23,6 +23,7 @@ mod templates;
 mod track;
 mod sessions;
 mod anonymous;
+mod normalise;
 
 use crate::config::Config;
 use crate::error::AppError;

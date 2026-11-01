@@ -19,7 +19,7 @@ pub struct Aircraft {
     pub engine_count: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionHeader {
     pub protocol_version: u16,
     /// "msfs2020", "msfs2024" or "xplane12".

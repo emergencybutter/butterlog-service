@@ -6,11 +6,15 @@
 //! ```text
 //! cargo run --release --example measure_capture -- <capture_*.blc> [--chunk-secs 5]
 //!     [--keyframe-secs 60] [--level 3] [--low-hz 30] [--quanta-scale 1]
+//!     [--segment <out.blsg.zst>]
 //! ```
+//!
+//! `--segment` also writes the session as the service stores it once compacted, for tests.
 
 use butterlog_wire::{
-    compress, flags, Channel, DeltaOrder, Kind, Phase, PhaseInputs, RateClass, Sampler,
-    SessionDecoder, SessionEncoder,
+    compress, encode_segment, flags, Aircraft, Channel, DeltaOrder, Kind, Phase, PhaseInputs,
+    RateClass, Sampler, SessionDecoder, SessionEncoder, SessionHeader, SessionOpen,
+    PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -165,6 +169,7 @@ struct Args {
     level: i32,
     low_hz: f64,
     quanta_scale: f64,
+    segment: Option<String>,
 }
 
 fn args() -> Args {
@@ -175,6 +180,7 @@ fn args() -> Args {
         level: 3,
         low_hz: 30.0,
         quanta_scale: 1.0,
+        segment: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -185,6 +191,7 @@ fn args() -> Args {
             "--level" => a.level = num() as i32,
             "--low-hz" => a.low_hz = num(),
             "--quanta-scale" => a.quanta_scale = num(),
+            "--segment" => a.segment = it.next(),
             path => a.path = path.to_string(),
         }
     }
@@ -333,6 +340,32 @@ fn main() {
     if let Some(c) = enc.flush() {
         chunks.push(c);
         chunk_phase.push(current_chunk_phase.take().unwrap_or(Phase::Cruise));
+    }
+
+    if let Some(out) = &a.segment {
+        let xplane = names.iter().any(|n| is_xplane(n));
+        let open = SessionOpen {
+            header: SessionHeader {
+                protocol_version: PROTOCOL_VERSION,
+                sim: if xplane { "xplane12" } else { "msfs2024" }.into(),
+                sim_version: String::new(),
+                capture: if xplane { "xplane_plugin" } else { "simconnect" }.into(),
+                client_version: "measure_capture".into(),
+                // The file name only: the path is local.
+                aircraft: Aircraft {
+                    title: std::path::Path::new(&a.path)
+                        .file_name()
+                        .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            },
+            channels: channels.clone(),
+        };
+        let raw = encode_segment(
+            &open.encode(),
+            chunks.iter().map(|c| (c.seq, c.payload.as_slice())),
+        );
+        std::fs::write(out, compress(&raw, 19)).unwrap_or_else(|e| panic!("{out}: {e}"));
     }
 
     let mut dec = SessionDecoder::new(channels);
