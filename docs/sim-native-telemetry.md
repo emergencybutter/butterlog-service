@@ -144,9 +144,15 @@ The byte layout is specified in `butterlog-wire` (`wire/src/chunk.rs`).
 normalised channels, 5 s chunks): **~140 kB per flight-hour** as sent (median; p90 180 kB),
 ~70 kB per flight-hour compacted per session at zstd -19, against ~1.6 MB per flight-hour
 for the SQLite logs today. 2 s chunks cost ~40% more than 5 s. Scaling every quantum 10×
-coarser or finer moves size by ~30–40%; no single channel dominates. High-rate phases are
-not in these logs: the design's estimate of 0.5–1 MB for a 2-hour flight including them is
-still to be confirmed by the sampler spikes.
+coarser or finer moves size by ~30–40%; no single channel dominates.
+
+**Size, measured at high rate** (rollout phase 1: an X-Plane 12 traffic pattern captured
+every frame by the plugin, 128 dataref values, 8.2 min, replayed through the §3.3 sampler
+by `measure_capture`): the whole pattern stays below 1,000 ft AGL, so it is the worst case,
+sampled every frame capped at 30 Hz. **~600 kB per hour** as sent (83 kB for the pattern),
+68 kB compacted; ~460 kB per hour with the low phase at 10 Hz. A real flight spends most of
+its time in climb and cruise at 5 Hz and 1 Hz, so a 2-hour flight lands well inside the
+0.5–1 MB estimate. MSFS not measured yet.
 
 ### 3.5 Transport
 
@@ -170,9 +176,9 @@ Linux**.
 
 | | Legacy UDP (RREF) | Web API WebSocket (today) | Plugin |
 |---|---|---|---|
-| Rate | Per dataref, set by us | Fixed by X-Plane (believed ~10 Hz — verify) | Every frame or any divisor |
-| Sample timestamp | None — arrival time | None — arrival time, with jitter | Sim time, exact per frame |
-| Change filtering | None, resends all every tick | Exact-equality only (verify) | Ours: quantise-then-compare |
+| Rate | Per dataref, set by us | Fixed by X-Plane: measured 8.1 Hz, 100 ms apart (p99 119 ms) | Every frame or any divisor: measured ~50 fps, frame p50 20 ms, p99 30 ms, none dropped |
+| Sample timestamp | None — arrival time | None — arrival time; p99 2.2 s late; nothing at all while paused | Sim time, exact per frame |
+| Change filtering | None, resends all every tick | Exact-equality only: unchanged values never resent | Ours: quantise-then-compare |
 | Types | float32 only, one array element per subscription | All | All, plus the full XPLM API |
 | Sim events (plane loaded, crash, replay, pause) | No | Poll datarefs | Plugin messages, directly |
 | Delivery | Lossy | Reliable | Reliable (we choose) |
@@ -193,6 +199,20 @@ Deciding reasons:
 - **Phase-dependent rates and deadband filtering** require running in the flight loop.
 - **One X-Plane component** for capture, commands (`sim_commands`), traffic injection and
   dataref introspection (XPLM 4 `XPLMCountDataRefs` / `XPLMGetDataRefsByIndex`).
+
+Measured in rollout phase 1, on the same X-Plane 12 traffic pattern with the plugin's
+capture spike and `xp_webapi_probe` running side by side: the plugin saw about six times as
+many samples as the Web API. Notes for the real sampler:
+
+- `sim/time/total_running_time_sec` is a float dataref; `XPLMGetDatad` reads it as 0. Read
+  each dataref by its reported type.
+- The flight-loop counter advances by 2 per callback, so it can't count dropped frames.
+- Replay is visible and must be flagged: in the pattern, entering replay
+  (`replay_mode` 9) moved the aircraft back to its start position, and the replayed takeoff
+  showed on-ground going 1 → 0 again. Without the `REPLAY` flag the service would see a
+  second takeoff. Pause (`sim/time/paused`, `sim_speed` 0) is visible the same way.
+- `sim/cockpit2/engine/indicators/MP_in_hg` and `sim/flightmodel/engine/ENGHP` aren't found
+  under those names in X-Plane 12; the app's Web API subscription has the same gap.
 
 ### 4.2 Plugin architecture
 
