@@ -399,6 +399,8 @@ pub trait SegmentStore {
         key: &str,
         data: Vec<u8>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    fn get(&self, key: &str) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
 }
 
 pub struct R2Segments {
@@ -409,6 +411,10 @@ pub struct R2Segments {
 impl SegmentStore for R2Segments {
     async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
         self.r2.upload_private(&self.bucket, key, data, "application/zstd").await
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
+        self.r2.download_private(&self.bucket, key).await
     }
 }
 
@@ -484,8 +490,9 @@ pub async fn compact_ready(
     Ok(ready.len())
 }
 
-/// Ends silent sessions, analyses ended ones and compacts analysed ones, every minute.
-/// Without a telemetry bucket configured, chunks stay in Postgres.
+/// Ends silent sessions, analyses ended ones and compacts analysed ones, every minute, then
+/// analyses compacted sessions again from their segments after an analyser change. Without
+/// a telemetry bucket configured, chunks stay in Postgres.
 pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
     if store.is_none() {
         tracing::warn!("R2_TELEMETRY_BUCKET is not set; telemetry sessions are not compacted");
@@ -508,6 +515,11 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
                 match compact_ready(&db, store, 10).await {
                     Ok(n) if n > 0 => tracing::info!(count = n, "compacted telemetry sessions"),
                     Err(e) => tracing::error!("telemetry compaction failed: {e}"),
+                    _ => {}
+                }
+                match crate::analysis::ingest::analyse_compacted(&db, store, 5).await {
+                    Ok(n) if n > 0 => tracing::info!(count = n, "analysed compacted telemetry sessions again"),
+                    Err(e) => tracing::error!("telemetry re-analysis failed: {e}"),
                     _ => {}
                 }
             }
@@ -635,6 +647,10 @@ mod tests {
         async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
             self.0.lock().unwrap().insert(key.to_string(), data);
             Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
+            self.0.lock().unwrap().get(key).cloned().ok_or_else(|| format!("no object {key}"))
         }
     }
 

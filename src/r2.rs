@@ -100,6 +100,21 @@ impl R2Client {
         Ok(())
     }
 
+    /// Downloads from another bucket than the public one.
+    pub async fn download_private(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        tracing::info!("[Outgoing Request] R2 GET {} (bucket: {})", key, bucket);
+        let resp = self.client.get_object().bucket(bucket).key(key).send().await.map_err(|e| {
+            tracing::error!("R2 GET {} failed: {:?}", key, e);
+            format!("Failed to download object from R2: {:?}", e)
+        })?;
+        let data = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| format!("Failed to read R2 byte stream: {:?}", e))?;
+        Ok(data.into_bytes().to_vec())
+    }
+
     /// Deletes from another bucket than the public one.
     pub async fn delete_private(&self, bucket: &str, key: &str) -> Result<(), String> {
         tracing::info!("[Outgoing Request] R2 DELETE {} (bucket: {})", key, bucket);

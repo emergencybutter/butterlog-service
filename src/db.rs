@@ -13,8 +13,11 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, AppError> {
 
     tracing::info!("Database connection established. Running migrations...");
 
-    // Runs migrations embedded in the binary during compile-time
+    // Runs migrations embedded in the binary during compile-time. Migrations in the database
+    // that this binary doesn't know are ignored, so a rollback to an older image still starts
+    // after a newer one migrated. Migrations stay additive for that to hold.
     sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
         .run(&pool)
         .await?;
 

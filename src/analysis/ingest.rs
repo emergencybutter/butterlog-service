@@ -4,12 +4,15 @@
 //!
 //! A session is analysed once per [`ANALYSER_VERSION`]. A failure is recorded with the
 //! version too, so it doesn't hold compaction back; bumping the version retries it.
+//! Sessions already compacted are analysed again from their segment in R2, a few at a time
+//! ([`analyse_compacted`]).
 
 use super::flight::Endpoint;
 use super::{analyse, FlightSummary, Places};
 use crate::error::AppError;
 use crate::normalise::normalise;
-use butterlog_wire::{decompress, SessionDecoder, SessionOpen};
+use crate::sessions::SegmentStore;
+use butterlog_wire::{decode_segment, decompress, SessionDecoder, SessionOpen};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -42,16 +45,30 @@ fn places() -> Option<&'static Places> {
         .as_ref()
 }
 
-/// Decodes a session's chunk payloads (zstd, in order) and analyses its flights, each as
-/// stored.
-fn analyse_session(open: &[u8], chunks: &[Vec<u8>]) -> Result<Vec<(FlightSummary, Value)>, String> {
+type Analysed = Vec<(FlightSummary, Value)>;
+
+/// A session's chunks as uploaded (zstd each, in order), analysed.
+fn analyse_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<Analysed, String> {
+    let payloads = chunks.iter().map(|c| decompress(c).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    analyse_payloads(open, &payloads)
+}
+
+/// A compacted session's segment, as stored in R2, analysed.
+fn analyse_segment(compressed: &[u8]) -> Result<Analysed, String> {
+    let raw = decompress(compressed).map_err(|e| e.to_string())?;
+    let segment = decode_segment(&raw).map_err(|e| e.to_string())?;
+    let payloads: Vec<Vec<u8>> = segment.chunks.into_iter().map(|(_, p)| p).collect();
+    analyse_payloads(&segment.open, &payloads)
+}
+
+/// Decodes a session's chunk payloads, in order, and analyses its flights, each as stored.
+fn analyse_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Analysed, String> {
     let places = places().ok_or("airport data is not loaded")?;
     let (open, _) = SessionOpen::decode(open).map_err(|e| e.to_string())?;
     let mut decoder = SessionDecoder::new(open.channels.clone());
     let mut ticks = Vec::new();
-    for data in chunks {
-        let payload = decompress(data).map_err(|e| e.to_string())?;
-        ticks.extend(decoder.decode(&payload).map_err(|e| e.to_string())?.ticks);
+    for payload in payloads {
+        ticks.extend(decoder.decode(payload).map_err(|e| e.to_string())?.ticks);
     }
     let samples = normalise(&open, ticks).map_err(|e| e.to_string())?;
     Ok(analyse(&samples, places).into_iter().map(|f| {
@@ -149,65 +166,100 @@ pub async fn analyse_ended(db: &PgPool, limit: i64) -> Result<usize, AppError> {
                 .fetch_all(db)
                 .await?;
         let open = open.clone();
-        let analysed = tokio::task::spawn_blocking(move || analyse_session(&open, &chunks))
+        let analysed = tokio::task::spawn_blocking(move || analyse_chunks(&open, &chunks))
             .await
             .map_err(|e| AppError::Storage(e.to_string()))?;
-
-        let mut tx = db.begin().await?;
-        sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&mut *tx).await?;
-        let error = match analysed {
-            Ok(flights) => {
-                for (idx, (f, summary)) in flights.iter().enumerate() {
-                    // The app's flights of the day around it.
-                    let candidates: Vec<(i64, Value)> = sqlx::query_as(
-                        "SELECT id, statistics FROM flights \
-                          WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
-                    )
-                    .bind(user_id)
-                    .bind(timestamp(f.first_ms))
-                    .bind(timestamp(f.last_ms))
-                    .fetch_all(&mut *tx)
-                    .await?;
-                    let app = same_flight(f, &candidates);
-                    sqlx::query(
-                        "INSERT INTO telemetry_flights \
-                           (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
-                            departure, arrival, summary, flight_id, parity) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-                    )
-                    .bind(id)
-                    .bind(idx as i32)
-                    .bind(ANALYSER_VERSION)
-                    .bind(timestamp(f.first_ms))
-                    .bind(timestamp(f.last_ms))
-                    .bind(f.takeoff_ms.map(timestamp))
-                    .bind(f.departure.to_string())
-                    .bind(f.arrival.to_string())
-                    .bind(summary)
-                    .bind(app.map(|a| a.0))
-                    .bind(app.map(|a| parity(f, &a.1)))
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                None
-            }
-            Err(e) => {
-                tracing::error!(session = %id, "telemetry session analysis failed: {e}");
-                Some(e)
-            }
-        };
-        sqlx::query(
-            "UPDATE telemetry_sessions \
-                SET analyser_version = $2, analysis_error = $3, analysed_at = NOW() WHERE id = $1",
-        )
-        .bind(id)
-        .bind(ANALYSER_VERSION)
-        .bind(error)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
+        store(db, *id, *user_id, analysed).await?;
     }
     Ok(ready.len())
+}
+
+/// Analyses up to `limit` compacted sessions again from their segments, most recent first,
+/// when the analyser version changed since. A session compacted with no chunks has no
+/// segment and no flights.
+pub async fn analyse_compacted(db: &PgPool, segments: &impl SegmentStore, limit: i64) -> Result<usize, AppError> {
+    let stale: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, user_id, segment_key FROM telemetry_sessions \
+          WHERE status = 'compacted' AND analyser_version IS DISTINCT FROM $1 \
+          ORDER BY compacted_at DESC LIMIT $2",
+    )
+    .bind(ANALYSER_VERSION)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+
+    for (id, user_id, key) in &stale {
+        let analysed = match key {
+            None => Ok(Vec::new()),
+            // A segment that can't be read is an error for this session, not for the batch.
+            Some(key) => match segments.get(key).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || analyse_segment(&bytes))
+                    .await
+                    .map_err(|e| AppError::Storage(e.to_string()))?,
+                Err(e) => Err(e),
+            },
+        };
+        store(db, *id, *user_id, analysed).await?;
+    }
+    Ok(stale.len())
+}
+
+/// Replaces a session's flights with this analysis, or records why it failed.
+async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, String>) -> Result<(), AppError> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&mut *tx).await?;
+    let error = match analysed {
+        Ok(flights) => {
+            for (idx, (f, summary)) in flights.iter().enumerate() {
+                // The app's flights of the day around it.
+                let candidates: Vec<(i64, Value)> = sqlx::query_as(
+                    "SELECT id, statistics FROM flights \
+                      WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
+                )
+                .bind(user_id)
+                .bind(timestamp(f.first_ms))
+                .bind(timestamp(f.last_ms))
+                .fetch_all(&mut *tx)
+                .await?;
+                let app = same_flight(f, &candidates);
+                sqlx::query(
+                    "INSERT INTO telemetry_flights \
+                       (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
+                        departure, arrival, summary, flight_id, parity) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                )
+                .bind(id)
+                .bind(idx as i32)
+                .bind(ANALYSER_VERSION)
+                .bind(timestamp(f.first_ms))
+                .bind(timestamp(f.last_ms))
+                .bind(f.takeoff_ms.map(timestamp))
+                .bind(f.departure.to_string())
+                .bind(f.arrival.to_string())
+                .bind(summary)
+                .bind(app.map(|a| a.0))
+                .bind(app.map(|a| parity(f, &a.1)))
+                .execute(&mut *tx)
+                .await?;
+            }
+            None
+        }
+        Err(e) => {
+            tracing::error!(session = %id, "telemetry session analysis failed: {e}");
+            Some(e)
+        }
+    };
+    sqlx::query(
+        "UPDATE telemetry_sessions \
+            SET analyser_version = $2, analysis_error = $3, analysed_at = NOW() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(ANALYSER_VERSION)
+    .bind(error)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -327,14 +379,48 @@ mod tests {
         assert!(parity["takeoff_s"].as_f64().unwrap().abs() < 1.5);
         assert_eq!(parity["landing_score"]["app"], json!(-142.24));
 
-        // Analysed once per version.
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM telemetry_sessions WHERE id = $1 AND analysed_at IS NOT NULL")
+        // Compacted, then analysed by an older version: analysed again from its segment.
+        let segments = MemStore::default();
+        while sqlx::query_scalar::<_, String>("SELECT status FROM telemetry_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+            != "compacted"
+        {
+            assert!(crate::sessions::compact_ready(&db, &segments, 100).await.unwrap() > 0);
+        }
+        sqlx::query("UPDATE telemetry_sessions SET analyser_version = $2 WHERE id = $1")
+            .bind(id)
+            .bind(ANALYSER_VERSION - 1)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&db).await.unwrap();
+        while version().await.unwrap().0 != Some(ANALYSER_VERSION) {
+            assert!(analyse_compacted(&db, &segments, 100).await.unwrap() > 0);
+        }
+        assert_eq!(version().await.unwrap().1, None);
+        let again: (String, Option<i64>) =
+            sqlx::query_as("SELECT departure, flight_id FROM telemetry_flights WHERE session_id = $1")
                 .bind(id)
                 .fetch_one(&db)
                 .await
-                .unwrap(),
-            1
-        );
+                .unwrap();
+        assert_eq!(again, ("KAST".to_string(), Some(flight)));
+    }
+
+    #[derive(Default)]
+    struct MemStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+    impl SegmentStore for MemStore {
+        async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
+            self.0.lock().unwrap().insert(key.to_string(), data);
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
+            self.0.lock().unwrap().get(key).cloned().ok_or_else(|| format!("no object {key}"))
+        }
     }
 }
