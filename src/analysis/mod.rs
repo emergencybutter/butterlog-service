@@ -1,13 +1,12 @@
 //! Server-side flight analysis (docs/sim-native-telemetry.md §5.2, rollout phase 3):
-//! normalised samples in, the flight summary the app computes today out.
-
-// Wired into ingest once the parity check passes on real sessions.
-#![allow(dead_code, unused_imports)]
+//! normalised samples in, the flight summary the app computes today out. `ingest` runs it
+//! on sessions as they end.
 
 pub mod flight;
+pub mod ingest;
 pub mod places;
 
-pub use flight::{analyse, Endpoint, EventKind, FlightSummary};
+pub use flight::{analyse, FlightSummary};
 pub use places::Places;
 
 #[cfg(test)]
@@ -16,6 +15,7 @@ mod parity {
     //! from its local logs (`butterlog_xp_20261101_010856.db`,
     //! `butterlog_20261101_015533.db`).
 
+    use super::flight::{Endpoint, EventKind};
     use super::*;
     use crate::normalise::normalise_segment;
     use std::path::Path;
@@ -32,10 +32,6 @@ mod parity {
         let flights = analyse(&samples, places());
         assert_eq!(flights.len(), 1, "one flight");
         flights.into_iter().next().unwrap()
-    }
-
-    fn utc(ms: i64) -> String {
-        chrono::DateTime::from_timestamp_millis(ms).unwrap().format("%H:%M:%S%.3f").to_string()
     }
 
     fn ms(hms: &str) -> i64 {

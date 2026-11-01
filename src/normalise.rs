@@ -14,13 +14,9 @@
 //! Channels report only changes, so each sample carries the latest value of every field;
 //! `None` until a field's first value.
 
-// Read by the server analysis that follows in rollout phase 3.
-#![allow(dead_code)]
-
-use butterlog_wire::{
-    decode_segment, decompress, Channel, DecodeError, Event, SessionDecoder, SessionHeader,
-    SessionOpen, Tick, Value,
-};
+#[cfg(test)]
+use butterlog_wire::{decode_segment, decompress, SessionDecoder};
+use butterlog_wire::{Channel, DecodeError, Event, SessionHeader, SessionOpen, Tick, Value};
 use std::fmt;
 
 macro_rules! fields {
@@ -330,7 +326,6 @@ fn wrap_degrees(d: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormaliseError {
     Decode(DecodeError),
-    Decompress(String),
     UnknownSim(String),
 }
 
@@ -338,7 +333,6 @@ impl fmt::Display for NormaliseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Decode(e) => write!(f, "{e}"),
-            Self::Decompress(e) => write!(f, "segment does not decompress: {e}"),
             Self::UnknownSim(sim) => write!(f, "no normaliser for sim {sim:?}"),
         }
     }
@@ -401,9 +395,11 @@ fn derive_headings(values: &mut [Option<f64>; FIELDS]) {
     }
 }
 
-/// A compacted session as the service stores it (`sessions/{user}/{id}.blsg.zst`).
+/// A compacted session as the service stores it (`sessions/{user}/{id}.blsg.zst`). The
+/// test fixtures are in this form.
+#[cfg(test)]
 pub fn normalise_segment(compressed: &[u8]) -> Result<(SessionHeader, Vec<Sample>), NormaliseError> {
-    let raw = decompress(compressed).map_err(|e| NormaliseError::Decompress(e.to_string()))?;
+    let raw = decompress(compressed).expect("segment decompresses");
     let segment = decode_segment(&raw)?;
     let (open, _) = SessionOpen::decode(&segment.open)?;
     let mut decoder = SessionDecoder::new(open.channels.clone());

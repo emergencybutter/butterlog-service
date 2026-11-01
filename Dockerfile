@@ -28,6 +28,9 @@ WORKDIR /usr/local/bin
 # Copy compiled binary from the builder stage
 COPY --from=builder /usr/src/butterlog-service/target/release/butterlog-service .
 
+# Airports and runways for flight analysis, read from ./data (BUTTERLOG_DATA_DIR)
+COPY --from=builder /usr/src/butterlog-service/data ./data
+
 # Cloud Run defaults to port 8080 (the app reads the PORT environment variable)
 EXPOSE 8080
 

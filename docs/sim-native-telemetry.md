@@ -279,6 +279,13 @@ plugin bg thread:         drain ring → length-prefixed frames → localhost TC
   disappears.
 - Derived products — map track, chart series, events, landing scorecard, stats, exports —
   are cached per `(flight, analyser_version)` and rebuilt on version bump.
+- **Built (rollout phase 3):** `src/normalise.rs` maps both sims to one sample stream;
+  `src/analysis/` is the app's analyser on it, with sessions split into flights at
+  teleports and from the first move, ground contact held 0.5 s, and paused, replay and slew
+  samples skipped. Each ended session is analysed before compaction into
+  `telemetry_flights`, once per analyser version, beside the old-path flight with the same
+  takeoff and a `{service, app}` diff of endpoints, times and landing figures. The pattern
+  fixtures hold it to the app's own summaries of the same flights.
 
 ### 5.3 Export (FlySto, CloudAhoy)
 

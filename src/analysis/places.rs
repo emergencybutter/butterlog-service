@@ -15,7 +15,6 @@ pub struct Airport {
     pub name: String,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
-    pub elevation_ft: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -168,7 +167,6 @@ pub(crate) fn mock_airport(ident: &str, lat: f64, lon: f64) -> Airport {
         name: format!("Airport {ident}"),
         latitude_deg: Some(lat),
         longitude_deg: Some(lon),
-        elevation_ft: Some(0),
     }
 }
 

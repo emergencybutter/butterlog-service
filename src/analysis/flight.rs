@@ -19,6 +19,7 @@
 use super::places::{Places, Runway};
 use crate::normalise::{Field, Sample};
 use butterlog_wire::flags;
+use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
@@ -35,7 +36,8 @@ pub enum Phase {
     TaxiIn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Takeoff,
     Landing,
@@ -46,7 +48,7 @@ pub enum EventKind {
     AutopilotOff,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FlightEvent {
     pub kind: EventKind,
     pub wall_time_ms: i64,
@@ -56,7 +58,7 @@ pub struct FlightEvent {
     pub heading: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Landing {
     pub wall_time_ms: i64,
     pub latitude: f64,
@@ -118,6 +120,12 @@ pub enum Endpoint {
     NotFound,
 }
 
+impl Serialize for Endpoint {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
 impl fmt::Display for Endpoint {
     /// As the app's summaries spell them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -130,7 +138,7 @@ impl fmt::Display for Endpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FlightSummary {
     pub departure: Endpoint,
     pub arrival: Endpoint,
@@ -144,12 +152,6 @@ pub struct FlightSummary {
     pub events: Vec<FlightEvent>,
     /// The first landing.
     pub landing: Option<Landing>,
-}
-
-impl FlightSummary {
-    pub fn duration_minutes(&self) -> i64 {
-        (self.last_ms - self.first_ms) / 60_000
-    }
 }
 
 /// How long the app's 300-sample endpoint windows lasted at its ~1 Hz.

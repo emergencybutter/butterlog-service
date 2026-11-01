@@ -412,8 +412,8 @@ impl SegmentStore for R2Segments {
     }
 }
 
-/// Compacts up to `limit` ended sessions whose chunks are all in and decoded: their chunk
-/// payloads go into one segment object, and the chunks leave Postgres.
+/// Compacts up to `limit` ended sessions whose chunks are all in, decoded and analysed:
+/// their chunk payloads go into one segment object, and the chunks leave Postgres.
 pub async fn compact_ready(
     db: &PgPool,
     store: &impl SegmentStore,
@@ -422,6 +422,7 @@ pub async fn compact_ready(
     let ready: Vec<(Uuid, i64, Vec<u8>, i32)> = sqlx::query_as(
         "SELECT id, user_id, open_blob, chunk_count FROM telemetry_sessions \
           WHERE status = 'ended' AND invalid_seq IS NULL AND next_seq = chunk_count \
+            AND analyser_version IS NOT NULL \
             AND (end_reason = 'client' OR ended_at < NOW() - make_interval(secs => $2)) \
           ORDER BY ended_at LIMIT $1",
     )
@@ -483,8 +484,8 @@ pub async fn compact_ready(
     Ok(ready.len())
 }
 
-/// Ends silent sessions and compacts finished ones, every minute. Without a telemetry
-/// bucket configured, chunks stay in Postgres.
+/// Ends silent sessions, analyses ended ones and compacts analysed ones, every minute.
+/// Without a telemetry bucket configured, chunks stay in Postgres.
 pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
     if store.is_none() {
         tracing::warn!("R2_TELEMETRY_BUCKET is not set; telemetry sessions are not compacted");
@@ -496,6 +497,11 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
             match end_abandoned(&db, END_AFTER_SECS).await {
                 Ok(n) if n > 0 => tracing::info!(count = n, "ended silent telemetry sessions"),
                 Err(e) => tracing::error!("telemetry session reaper failed: {e}"),
+                _ => {}
+            }
+            match crate::analysis::ingest::analyse_ended(&db, 10).await {
+                Ok(n) if n > 0 => tracing::info!(count = n, "analysed telemetry sessions"),
+                Err(e) => tracing::error!("telemetry analysis failed: {e}"),
                 _ => {}
             }
             if let Some(store) = &store {
@@ -724,8 +730,10 @@ mod tests {
         assert_eq!(end_session(&db, me, id).await.unwrap().status, "ended");
 
         let store = MemStore::default();
-        // Other tests' sessions may be ready too; compact until this one is done.
+        // Not before it is analysed. Other tests' sessions may be ready too; go on until
+        // this one is done.
         while cursor(&db, me, id).await.unwrap().status != "compacted" {
+            crate::analysis::ingest::analyse_ended(&db, 100).await.unwrap();
             assert!(compact_ready(&db, &store, 100).await.unwrap() > 0);
         }
         let key = format!("sessions/{me}/{id}.blsg.zst");
