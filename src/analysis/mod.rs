@@ -59,6 +59,7 @@ mod parity {
         assert_eq!(s.departure, Endpoint::Airport("KAST".into()));
         assert_eq!(s.arrival, Endpoint::Airport("KAST".into()));
         near("takeoff", s.takeoff_ms.unwrap() as f64, ms(app.takeoff) as f64, 1_500.0);
+        near("takeoff roll", s.takeoff_roll_ms.unwrap() as f64, ms(app.roll) as f64, 1_500.0);
         near("max altitude", s.max_altitude_ft, app.max_altitude, 5.0);
         near("max ground speed", s.max_ground_speed_kt, app.max_ground_speed, 1.0);
         near("fuel", s.fuel_consumed_gal, app.fuel, 0.05);
@@ -75,7 +76,10 @@ mod parity {
 
     /// The app's summary of the same flight.
     struct App {
+        /// The analyser's takeoff event: liftoff.
         takeoff: &'static str,
+        /// The uploaded `takeoff_time`: the roll passing 45 kt.
+        roll: &'static str,
         max_altitude: f64,
         max_ground_speed: f64,
         fuel: f64,
@@ -92,6 +96,7 @@ mod parity {
         let s = summary("xplane_pattern.blsg.zst");
         check(&s, &App {
             takeoff: "01:09:47.776",
+            roll: "01:09:39.068",
             max_altitude: 918.26,
             max_ground_speed: 117.77,
             fuel: 0.534,
@@ -121,6 +126,7 @@ mod parity {
         // flicker of `SIM ON GROUND` at liftoff, 0.8 s.
         check(&s, &App {
             takeoff: "01:58:02.305",
+            roll: "01:57:57.233",
             max_altitude: 1177.11,
             max_ground_speed: 118.86,
             fuel: 0.7565,

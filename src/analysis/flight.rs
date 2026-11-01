@@ -146,6 +146,10 @@ pub struct FlightSummary {
     pub last_ms: i64,
     /// When the wheels first left the ground; a touch-and-go doesn't move it.
     pub takeoff_ms: Option<i64>,
+    /// When the first takeoff roll passed [`TAKEOFF_IAS_KT`] on the ground: the app's
+    /// `takeoff_time`. A speed, not a standstill, so a rolling takeoff has one too. `None`
+    /// for a flight that started in the air.
+    pub takeoff_roll_ms: Option<i64>,
     pub max_altitude_ft: f64,
     pub max_ground_speed_kt: f64,
     pub fuel_consumed_gal: f64,
@@ -161,6 +165,8 @@ const ENDPOINT_WINDOW_MS: i64 = 300_000;
 const ENDPOINT_SPACING_MS: i64 = 1_000;
 /// How long a climb or descent must level off or start before it counts.
 const STABLE_MS: i64 = 10_000;
+/// Indicated airspeed on the ground at which taxiing becomes the takeoff roll.
+pub const TAKEOFF_IAS_KT: f64 = 45.0;
 /// How long after touchdown the landing's peak G is taken over.
 const TOUCHDOWN_G_MS: i64 = 1_000;
 const G_AVERAGE_MS: i64 = 200;
@@ -239,6 +245,7 @@ struct Analyser {
     last_autopilot: bool,
     last_vs: f64,
     takeoff_ms: Option<i64>,
+    takeoff_roll_ms: Option<i64>,
     pending_toc: Option<(i64, f64, f64)>,
     pending_tod: Option<(i64, f64, f64)>,
     landing: Option<Landing>,
@@ -262,6 +269,7 @@ impl Analyser {
             last_autopilot: false,
             last_vs: 0.0,
             takeoff_ms: None,
+            takeoff_roll_ms: None,
             pending_toc: None,
             pending_tod: None,
             landing: None,
@@ -348,8 +356,9 @@ impl Analyser {
                 }
             }
             Phase::TaxiOut => {
-                if ground && p.ias > 45.0 {
+                if ground && p.ias > TAKEOFF_IAS_KT {
                     self.phase = Phase::Takeoff;
+                    self.takeoff_roll_ms.get_or_insert(p.t);
                 } else if !ground {
                     self.phase = Phase::Climb;
                     self.takeoff_ms.get_or_insert(p.t);
@@ -499,6 +508,7 @@ impl Analyser {
             first_ms: first,
             last_ms: last,
             takeoff_ms: self.takeoff_ms,
+            takeoff_roll_ms: self.takeoff_roll_ms,
             max_altitude_ft: self.max_alt,
             max_ground_speed_kt: self.max_gs,
             fuel_consumed_gal: self.initial_fuel - self.final_fuel,
@@ -746,6 +756,7 @@ mod tests {
         p.ias = 50.0;
         a.update(Point { t: 2_000, ..p });
         assert_eq!(a.phase, Phase::Takeoff);
+        assert_eq!(a.takeoff_roll_ms, Some(2_000));
         p.on_ground = false;
         p.vs = 500.0;
         a.update(Point { t: 3_000, ..p });

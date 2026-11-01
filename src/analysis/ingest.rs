@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 1;
+pub const ANALYSER_VERSION: i32 = 2;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
@@ -71,9 +71,10 @@ fn timestamp(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
 
-/// The old-path flight this one is, by takeoff time, or start time with no takeoff.
+/// The old-path flight this one is, by takeoff time (the app's is the roll's), or start
+/// time with no takeoff.
 fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value)]) -> Option<&'a (i64, Value)> {
-    let (ours, key) = match f.takeoff_ms {
+    let (ours, key) = match f.takeoff_roll_ms.or(f.takeoff_ms) {
         Some(t) => (t, "takeoff_time"),
         None => (f.first_ms, "start_time"),
     };
@@ -86,7 +87,9 @@ fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value)]) -> Option<
 }
 
 /// What the service made of a flight beside what the app did: each entry is
-/// `{service, app}`, with the difference in seconds for times.
+/// `{service, app}`, with the difference in seconds for times. The app's `takeoff_time` is
+/// when its takeoff roll passed 45 kt, not liftoff, so it is compared with
+/// `takeoff_roll_ms`.
 fn parity(f: &FlightSummary, app: &Value) -> Value {
     let pair = |service: Value, app: &Value| json!({ "service": service, "app": app });
     let seconds = |ours: Option<i64>, theirs: &Value| match (ours, app_time(theirs)) {
@@ -98,7 +101,7 @@ fn parity(f: &FlightSummary, app: &Value) -> Value {
     json!({
         "departure": pair(json!(f.departure.to_string()), &app["departure"]["icao"]),
         "arrival": pair(json!(f.arrival.to_string()), &app["arrival"]["icao"]),
-        "takeoff_s": seconds(f.takeoff_ms, &app["takeoff_time"]),
+        "takeoff_s": seconds(f.takeoff_roll_ms, &app["takeoff_time"]),
         "landing_s": seconds(landing.map(|l| l.wall_time_ms), &app["landing_time"]),
         "max_altitude_ft": pair(json!(f.max_altitude_ft), max_alt),
         "landing_score": pair(json!(landing.map(|l| l.score())), &app["landing_score"]),
@@ -218,6 +221,7 @@ mod tests {
             first_ms: first,
             last_ms: first + 600_000,
             takeoff_ms: takeoff,
+            takeoff_roll_ms: takeoff.map(|t| t - 20_000),
             max_altitude_ft: 1000.0,
             max_ground_speed_kt: 100.0,
             fuel_consumed_gal: 1.0,
@@ -249,7 +253,8 @@ mod tests {
             "takeoff_time": "2026-11-01 01:09:47.776",
             "max_entries": { "AltMSL": 918.26 },
         });
-        let p = parity(&flight(Some(t + 500), t), &app);
+        // The roll passed 45 kt 20 s before liftoff; the app's takeoff_time is that.
+        let p = parity(&flight(Some(t + 20_500), t), &app);
         assert_eq!(p["departure"], json!({ "service": "KAST", "app": "KAST" }));
         assert_eq!(p["takeoff_s"], json!(0.5));
         assert_eq!(p["max_altitude_ft"]["app"], json!(918.26));
@@ -288,7 +293,7 @@ mod tests {
         .bind(json!({
             "departure": { "icao": "KAST" },
             "arrival": { "icao": "KAST" },
-            "takeoff_time": "2026-11-01 01:09:47.776",
+            "takeoff_time": "2026-11-01 01:09:39.068",
             "landing_score": -142.24,
         }))
         .fetch_one(&db)
