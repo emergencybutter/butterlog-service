@@ -9,8 +9,8 @@
 //! ```
 
 use butterlog_wire::{
-    compress, flags, Channel, ChangeFilter, DeltaOrder, Kind, RateClass, SessionDecoder,
-    SessionEncoder, Tick, Value,
+    compress, flags, Channel, DeltaOrder, Kind, Phase, PhaseInputs, RateClass, Sampler,
+    SessionDecoder, SessionEncoder,
 };
 use std::collections::BTreeMap;
 
@@ -104,26 +104,12 @@ fn is_discrete(name: &str) -> bool {
         )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Phase {
-    Low,
-    Manoeuvre,
-    Cruise,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Group {
-    /// Position, attitude, VS, G, AGL, speeds.
-    Flight,
-    /// Engines, fuel, electrics.
-    Systems,
-    /// Radios, autopilot, lights, gear, state: every frame, change filter decides.
-    OnChange,
-}
-
-fn group(name: &str) -> Group {
+/// Position, attitude, VS, G, AGL and speeds sample at the per-phase frame rate; engines,
+/// fuel and electrics slowly; radios, autopilot, lights, gear and state every frame, sent
+/// on change.
+fn rate_class(name: &str) -> RateClass {
     if is_discrete(name) {
-        return Group::OnChange;
+        return RateClass::OnChange;
     }
     let (flight, systems) = if is_xplane(name) {
         (
@@ -145,56 +131,30 @@ fn group(name: &str) -> Group {
         )
     };
     if flight {
-        Group::Flight
+        RateClass::Frame
     } else if systems {
-        Group::Systems
+        RateClass::Slow
     } else {
-        Group::OnChange
+        RateClass::OnChange
     }
-}
-
-/// The channels the phase test reads, with the sim's thresholds for "below ~1,000 ft AGL"
-/// and "climbing, descending or banked".
-struct PhaseInputs {
-    agl: usize,
-    on_ground: usize,
-    vs: usize,
-    bank: usize,
-    low_agl: f64,
-    steady_vs: f64,
 }
 
 fn phase_inputs(col: impl Fn(&str) -> Option<usize>) -> PhaseInputs {
-    if let Some(agl) = col("sim/flightmodel/position/y_agl") {
-        PhaseInputs {
-            agl,
-            on_ground: col("sim/flightmodel/failures/onground_any").expect("onground_any"),
-            vs: col("sim/flightmodel/position/vh_ind").expect("vh_ind"),
-            bank: col("sim/flightmodel/position/phi").expect("phi"),
-            low_agl: 305.0,  // m
-            steady_vs: 2.5, // m/s, ~500 fpm
-        }
+    let id = |name: &str| col(name).unwrap_or_else(|| panic!("{name}")) as u16;
+    if col("sim/flightmodel/position/y_agl").is_some() {
+        PhaseInputs::xplane(
+            id("sim/flightmodel/position/y_agl"),
+            id("sim/flightmodel/failures/onground_any"),
+            id("sim/flightmodel/position/vh_ind"),
+            id("sim/flightmodel/position/phi"),
+        )
     } else {
-        PhaseInputs {
-            agl: col("PLANE ALT ABOVE GROUND").expect("PLANE ALT ABOVE GROUND"),
-            on_ground: col("SIM ON GROUND").expect("SIM ON GROUND"),
-            vs: col("VERTICAL SPEED").expect("VERTICAL SPEED"),
-            bank: col("PLANE BANK DEGREES").expect("PLANE BANK DEGREES"),
-            low_agl: 1000.0,  // ft
-            steady_vs: 500.0, // fpm
-        }
-    }
-}
-
-/// Seconds between samples of a group in a phase; 0 means every frame.
-fn period(group: Group, phase: Phase, low_hz: f64) -> f64 {
-    match (group, phase) {
-        (Group::OnChange, _) => 0.0,
-        (Group::Flight, Phase::Low) => 1.0 / low_hz,
-        (Group::Flight, Phase::Manoeuvre) => 0.2,
-        (Group::Flight, Phase::Cruise) => 1.0,
-        (Group::Systems, Phase::Cruise) => 5.0,
-        (Group::Systems, _) => 1.0,
+        PhaseInputs::msfs(
+            id("PLANE ALT ABOVE GROUND"),
+            id("SIM ON GROUND"),
+            id("VERTICAL SPEED"),
+            id("PLANE BANK DEGREES"),
+        )
     }
 }
 
@@ -323,16 +283,13 @@ fn main() {
                 unit: String::new(),
                 kind: if discrete { Kind::Enum } else { Kind::F64 },
                 quantum: if discrete { 1.0 } else { quantum * a.quanta_scale },
-                rate_class: RateClass::Frame,
+                rate_class: rate_class(name),
                 delta,
             }
         })
         .collect();
-    let groups: Vec<Group> = names.iter().map(|n| group(n)).collect();
-
+    let mut sampler = Sampler::new(&channels, p).with_low_hz(a.low_hz);
     let mut enc = SessionEncoder::new(channels.clone(), a.keyframe_ms);
-    let mut filter = ChangeFilter::new();
-    let mut last_sample: BTreeMap<u8, f64> = BTreeMap::new();
     let mut chunks = Vec::new();
     let mut chunk_phase = Vec::new();
     let mut phase_secs: BTreeMap<Phase, f64> = BTreeMap::new();
@@ -341,35 +298,12 @@ fn main() {
 
     for (n, f) in frames.iter().enumerate() {
         let v = &f.values;
-        let phase = if v[p.on_ground] != 0.0 || v[p.agl] < p.low_agl {
-            Phase::Low
-        } else if v[p.vs].abs() > p.steady_vs || v[p.bank].abs() > 5.0 {
-            Phase::Manoeuvre
-        } else {
-            Phase::Cruise
-        };
+        for (i, value) in v.iter().enumerate() {
+            sampler.set(i as u16, *value);
+        }
+        let phase = sampler.phase();
         if let Some(next) = frames.get(n + 1) {
             *phase_secs.entry(phase).or_default() += (next.wall_ms - f.wall_ms) as f64 / 1000.0;
-        }
-        let mut due = [false; 3];
-        for (g, slot) in [Group::Flight, Group::Systems, Group::OnChange].iter().zip(&mut due) {
-            let key = *g as u8;
-            let p = period(*g, phase, a.low_hz);
-            let last = last_sample.get(&key).copied().unwrap_or(f64::NEG_INFINITY);
-            // A frame within 1 ms of the period counts as due, so 30 Hz does not alias to 20.
-            if f.sim_time - last >= p - 0.001 || f.sim_time < last {
-                *slot = true;
-                last_sample.insert(key, f.sim_time);
-            }
-        }
-        let mut values = Vec::new();
-        for (i, ch) in channels.iter().enumerate() {
-            if !due[groups[i] as usize] {
-                continue;
-            }
-            if let Some(Value::Int(q)) = filter.filter(ch.id, Value::Int(ch.quantise(v[i]))) {
-                values.push((ch.id, Value::Int(q)));
-            }
         }
         let mut state = 0;
         let flag = |c: Option<usize>, test: fn(f64) -> bool| c.is_some_and(|c| test(v[c]));
@@ -385,12 +319,11 @@ fn main() {
         if rates.iter().any(|r| flag(*r, |x| x != 1.0)) {
             state |= flags::SIM_RATE;
         }
-        if values.is_empty() {
+        let Some(tick) = sampler.tick(f.sim_time, f.wall_ms, state) else {
             continue;
-        }
+        };
         current_chunk_phase.get_or_insert(phase);
-        enc.push(Tick { sim_time: f.sim_time, wall_time_ms: f.wall_ms, flags: state, values })
-            .expect("channels come from the table");
+        enc.push(tick).expect("channels come from the table");
         ticks += 1;
         if enc.buffered_span_ms() >= a.chunk_ms {
             chunks.extend(enc.flush());
