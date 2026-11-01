@@ -239,19 +239,37 @@ many samples as the Web API. Notes for the real sampler:
 ### 4.2 Plugin architecture
 
 ```
-flight loop (sim thread): read datarefs → phase → quantise → compare → push tick to SPSC ring
-plugin bg thread:         drain ring → length-prefixed frames → localhost TCP → app
+flight loop (sim thread): read the subscribed datarefs → fixed-size frame → bounded channel
+plugin bg thread:         drain channel → length-prefixed frames → localhost TCP → app
+app:                      frame → shared sampler (phase, quantise, compare) → chunks → spool
 ```
 
-- **The plugin only samples.** It does not chunk, compress, spool or talk to the service.
-  The app remains the single uploader for both sims (token, spool, retries).
+- **The plugin only reads.** It reads every frame the datarefs the app subscribed to and
+  sends them raw, stamped with the sim clock. It does not quantise, sample, chunk, compress,
+  spool or talk to the service. The app remains the single uploader for both sims (token,
+  spool, retries).
+
+  *Built (rollout phase 4):* sampling moved from the flight loop to the app. The first
+  plan quantised and filtered in the plugin; instead the app runs the same `butterlog-wire`
+  sampler it uses for SimConnect and the Web API, so rates and quanta live in one place, the
+  plugin doesn't change when they're tuned, and the plugin (built on public CI) doesn't
+  depend on the private `butterlog-wire`. Raw frames over localhost cost about 50 kB/s,
+  which doesn't matter. The app sends its dataref list in the subscription, so the plugin
+  holds no list either. Protocol: `butterlog_xp_plugin` `src/link.rs`, port 49021; the app
+  side is `butterlog-app` `telemetry/xp_plugin.rs`, with the same golden messages tested on
+  both sides.
 - **TCP, not UDP, to the app.** A dropped datagram in a recording that is kept for ever is a
   silent hole. UDP stays for traffic injection, where only the newest value matters.
 - **Safety in the sim process.** No allocation and no I/O on the flight loop. Every
   `extern "C"` entry point is wrapped in `catch_unwind` — a panic there takes down X-Plane.
   If the ring is full (app gone), ticks are dropped and counted, never blocked on.
-- **Handshake.** On connect the plugin sends its protocol version and capabilities. The app
-  rejects an incompatible plugin and falls back to the Web API instead of recording garbage.
+- **Handshake.** On connect the plugin sends its protocol version, its own version and
+  X-Plane's. The app rejects an incompatible plugin and falls back to the Web API instead of
+  recording garbage. A session has one capture: if the link drops mid-session, the session
+  ends and a new one goes on through the Web API.
+- **Events.** The plugin sends `XPLM_MSG_PLANE_LOADED` (user aircraft, with its `.acf` path)
+  and `XPLM_MSG_AIRPORT_LOADED` in order with the frames. Pause, replay and crash are read
+  from their datarefs, as with the Web API.
 - **Distribution.** The app installs and updates the plugin itself, locating X-Plane via
   `x-plane_install_12.txt` in the OS's per-user preferences/app-data directory. CI builds
   `win.xpl`, `mac.xpl` (universal x86_64 + arm64, signed and notarised) and `lin.xpl`. The
