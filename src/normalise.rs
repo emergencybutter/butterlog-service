@@ -274,12 +274,18 @@ fn xplane(name: &str) -> Option<Mapping> {
         "cockpit2/fuel/fuel_quantity[0]" => m(FuelLeft, gal_from_kg),
         "cockpit2/fuel/fuel_quantity[1]" => m(FuelRight, gal_from_kg),
         "cockpit2/engine/indicators/fuel_flow_kg_sec[0]" => m(FuelFlow, |v| gal_from_kg(v) * 3600.0),
-        "cockpit2/engine/indicators/oil_temp_deg_C[0]" => m(OilTemp, f_from_c),
+        // X-Plane 12's names; the `_deg_C` temperatures are in °F on some aircraft, the
+        // `_deg_cel` ones always °C. The phase 1 capture used `_deg_C`.
+        "cockpit2/engine/indicators/oil_temperature_deg_C[0]" => m(OilTemp, f_from_c),
         "cockpit2/engine/indicators/oil_pressure_psi[0]" => m(OilPressure, same),
-        "cockpit2/engine/indicators/MP_in_hg[0]" => m(Manifold, same),
+        "cockpit2/engine/indicators/MPR_in_hg[0]" => m(Manifold, same),
         "cockpit2/engine/indicators/engine_speed_rpm[0]" => m(Rpm, same),
-        "cockpit2/engine/indicators/CHT_deg_C[0]" => m(Cht, f_from_c),
-        "cockpit2/engine/indicators/EGT_deg_C[0]" => m(Egt, f_from_c),
+        "cockpit2/engine/indicators/CHT_deg_cel[0]" | "cockpit2/engine/indicators/CHT_deg_C[0]" => {
+            m(Cht, f_from_c)
+        }
+        "cockpit2/engine/indicators/EGT_deg_cel[0]" | "cockpit2/engine/indicators/EGT_deg_C[0]" => {
+            m(Egt, f_from_c)
+        }
         "cockpit2/electrical/bus_volts[0]" => m(Volts, same),
         "cockpit2/electrical/generator_amps[0]" => m(Amps, same),
         "cockpit2/autopilot/autopilot_on" => m(Autopilot, flag),
