@@ -13,13 +13,13 @@ mod session;
 mod varint;
 
 pub use chunk::{
-    flags, peek_chunk, DecodeError, DecodedChunk, EncodeError, EncodedChunk, SessionDecoder,
-    SessionEncoder, Tick, Value,
+    flags, peek_chunk, DecodeError, DecodedChunk, EncodeError, EncodedChunk, Event, EventKind,
+    SessionDecoder, SessionEncoder, Tick, Value,
 };
 #[cfg(feature = "zstd")]
 pub use chunk::{compress, decompress};
 pub use quantise::ChangeFilter;
-pub use sampler::{period, Phase, PhaseInputs, Sampler, DEFAULT_LOW_HZ};
+pub use sampler::{period, Phase, PhaseInputs, Sampler, DEFAULT_LOW_HZ, MAX_QUEUED_EVENTS};
 pub use schema::{decode_channels, encode_channels, Channel, DeltaOrder, Kind, RateClass};
 pub use segment::{decode_segment, encode_segment, Segment};
 pub use session::{schema_hash, Aircraft, SessionHeader, SessionOpen};

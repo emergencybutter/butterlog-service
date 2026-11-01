@@ -4,9 +4,10 @@
 //!
 //! The caller sets each channel's latest raw value as the sim reports it, then calls
 //! [`Sampler::tick`] once per sim frame. A tick carries the channels whose rate class is due
-//! in the current flight phase and whose quantised value changed.
+//! in the current flight phase and whose quantised value changed, and the events reported
+//! since the last tick.
 
-use crate::chunk::{Tick, Value};
+use crate::chunk::{Event, Tick, Value};
 use crate::quantise::ChangeFilter;
 use crate::schema::{Channel, RateClass};
 use std::collections::BTreeMap;
@@ -63,6 +64,9 @@ pub fn period(class: RateClass, phase: Phase, low_hz: f64) -> f64 {
 /// Every frame near the ground, capped at this rate (design §3.3).
 pub const DEFAULT_LOW_HZ: f64 = 30.0;
 
+/// Events kept for the next tick when none comes, as between sessions.
+pub const MAX_QUEUED_EVENTS: usize = 64;
+
 const CLASSES: [RateClass; 4] =
     [RateClass::Frame, RateClass::Fast, RateClass::Slow, RateClass::OnChange];
 
@@ -80,6 +84,7 @@ pub struct Sampler {
     last_sample: [Option<f64>; 4],
     last_sim_time: Option<f64>,
     last_flags: Option<u8>,
+    events: Vec<Event>,
 }
 
 impl Sampler {
@@ -93,6 +98,7 @@ impl Sampler {
             last_sample: [None; 4],
             last_sim_time: None,
             last_flags: None,
+            events: Vec::new(),
         }
     }
 
@@ -118,6 +124,20 @@ impl Sampler {
         }
     }
 
+    /// Queues an event for the next tick, which it makes due. While nothing ticks, only the
+    /// latest [`MAX_QUEUED_EVENTS`] are kept.
+    pub fn event(&mut self, event: Event) {
+        if self.events.len() >= MAX_QUEUED_EVENTS {
+            self.events.remove(0);
+        }
+        self.events.push(event);
+    }
+
+    /// Drops the events queued for the next tick.
+    pub fn discard_events(&mut self) {
+        self.events.clear();
+    }
+
     /// The flight phase from the latest values. Low until the phase inputs are known.
     pub fn phase(&self) -> Phase {
         let p = &self.phase_inputs;
@@ -136,8 +156,8 @@ impl Sampler {
         }
     }
 
-    /// Samples the latest values at `sim_time`. Returns `None` when nothing changed and the
-    /// state flags are the same as in the last tick.
+    /// Samples the latest values at `sim_time`. Returns `None` when nothing changed, no event
+    /// is queued and the state flags are the same as in the last tick.
     ///
     /// Sim time going backwards (a flight loaded, MSFS resetting its clock) restarts every
     /// rate class, so the next ticks aren't held back by times from before the jump.
@@ -166,11 +186,12 @@ impl Sampler {
                 values.push((*id, v));
             }
         }
-        if values.is_empty() && self.last_flags == Some(flags) {
+        if values.is_empty() && self.events.is_empty() && self.last_flags == Some(flags) {
             return None;
         }
         self.last_flags = Some(flags);
-        Some(Tick { sim_time, wall_time_ms, flags, values })
+        let events = std::mem::take(&mut self.events);
+        Some(Tick { sim_time, wall_time_ms, flags, values, events })
     }
 }
 
@@ -284,6 +305,21 @@ mod tests {
         let paused = s.tick(1.0, 1500, crate::flags::PAUSED).unwrap();
         assert!(paused.values.is_empty());
         assert_eq!(s.tick(1.0, 2000, crate::flags::PAUSED), None);
+    }
+
+    #[test]
+    fn an_event_alone_is_a_tick() {
+        let mut s = sampler();
+        s.set(GROUND, 1.0);
+        s.tick(0.0, 0, 0).unwrap();
+        s.event(Event::new(crate::EventKind::Crashed));
+        let tick = s.tick(0.0, 500, 0).unwrap();
+        assert!(tick.values.is_empty());
+        assert_eq!(tick.events, vec![Event::new(crate::EventKind::Crashed)]);
+        assert_eq!(s.tick(0.0, 1000, 0), None, "sent once");
+        s.event(Event::new(crate::EventKind::Paused));
+        s.discard_events();
+        assert_eq!(s.tick(0.0, 1500, 0), None);
     }
 
     #[test]

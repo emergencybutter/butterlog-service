@@ -137,8 +137,15 @@ The byte layout is specified in `butterlog-wire` (`wire/src/chunk.rs`).
 - **Keyframes:** every ~60 s a chunk starts from absolute values and carries the value of
   *every* channel, so any range is decodable with bounded look-back, and a viewer joining
   mid-flight needs at most one keyframe. 120 s saves only ~4%.
-- Discrete happenings the sim reports as events (aircraft loaded, crash, sim pause, replay
-  entered) travel as timestamped records in the same chunk. Not built yet.
+- **Events:** discrete happenings the sim reports (sim start and stop, pause, crash and
+  crash reset, flight or aircraft loaded with the file it names, position changed by hand,
+  replay entered and left) travel in the chunk after the columns, each at the tick it
+  arrived with: a kind code and a detail string. An event makes a tick due even when no
+  value changed. Kind codes are fixed; a code the reader doesn't know decodes as "other",
+  so a newer client doesn't fail an older service. Events that arrive between sessions
+  (the flight loaded before the aircraft's title) go with the next session's first tick.
+  The service copies them to `telemetry_events` as chunks decode, for analysis to query
+  without reading segments.
 
 **Size, measured at 1 Hz** (rollout phase 1: 428 local logs, 384 flight-hours, ~75
 normalised channels, 5 s chunks): **~140 kB per flight-hour** as sent (median; p90 180 kB),

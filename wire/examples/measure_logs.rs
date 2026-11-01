@@ -195,6 +195,7 @@ fn measure(path: &PathBuf, a: &Args, totals: &mut Totals) -> rusqlite::Result<()
             wall_time_ms: wall,
             flags: 0,
             values,
+            events: Vec::new(),
         };
         enc.push(tick).expect("channels come from the table");
         if enc.buffered_span_ms() >= a.chunk_ms {

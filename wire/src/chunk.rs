@@ -16,6 +16,9 @@
 //!   values            numeric: n_values × zigzag, delta or delta-of-delta; the first is a
 //!                     delta against the channel's last value (absolute in a keyframe)
 //!                     string:  n_values × (length varint, UTF-8 bytes)
+//! n_events varint, then per event, in tick order:
+//!   tick index varint, the first absolute, then gaps (≥ 0) | kind u8
+//!   detail            length varint, UTF-8 bytes
 //! ```
 //!
 //! A chunk continues the previous one: each column starts as a delta against the channel's
@@ -30,7 +33,7 @@ use crate::varint::{self, Reader};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 
 /// Sim time is carried in 0.1 ms steps: finer than any frame, coarse enough to pack small.
 const SIM_TIME_QUANTUM: f64 = 1e-4;
@@ -51,6 +54,70 @@ pub enum Value {
     Str(String),
 }
 
+/// What kind of thing an [`Event`] is. Codes are fixed on the wire; a code this build
+/// doesn't know decodes as `Other`, so a newer client's events don't fail an older reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    SimStart,
+    SimStop,
+    Paused,
+    Unpaused,
+    Crashed,
+    CrashReset,
+    /// Detail: the flight file loaded.
+    FlightLoaded,
+    /// Detail: the aircraft file loaded.
+    AircraftLoaded,
+    /// The aircraft was moved by hand, through a menu or a map.
+    PositionChanged,
+    ReplayStarted,
+    ReplayEnded,
+    Other(u8),
+}
+
+impl EventKind {
+    const KNOWN: [EventKind; 11] = [
+        Self::SimStart,
+        Self::SimStop,
+        Self::Paused,
+        Self::Unpaused,
+        Self::Crashed,
+        Self::CrashReset,
+        Self::FlightLoaded,
+        Self::AircraftLoaded,
+        Self::PositionChanged,
+        Self::ReplayStarted,
+        Self::ReplayEnded,
+    ];
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Other(code) => code,
+            known => Self::KNOWN.iter().position(|k| *k == known).unwrap() as u8 + 1,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        code.checked_sub(1)
+            .and_then(|i| Self::KNOWN.get(usize::from(i)).copied())
+            .unwrap_or(Self::Other(code))
+    }
+}
+
+/// Something the sim reported happening (design §3.2), at the tick that carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    pub kind: EventKind,
+    /// Kind-specific, often empty.
+    pub detail: String,
+}
+
+impl Event {
+    pub fn new(kind: EventKind) -> Self {
+        Self { kind, detail: String::new() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tick {
     /// Sim clock, in seconds.
@@ -61,6 +128,8 @@ pub struct Tick {
     pub flags: u8,
     /// Only the channels whose quantised value changed (see [`crate::ChangeFilter`]).
     pub values: Vec<(u16, Value)>,
+    /// What the sim reported happening since the previous tick.
+    pub events: Vec<Event>,
 }
 
 /// An uncompressed chunk payload, ready for [`compress`] and the spool.
@@ -249,6 +318,17 @@ fn encode(
             let base = int_reference(reference, id);
             write_differenced(&mut out, &ints, channels[&id].delta, base);
         }
+    }
+
+    let events: Vec<(usize, &Event)> =
+        ticks.iter().enumerate().flat_map(|(i, t)| t.events.iter().map(move |e| (i, e))).collect();
+    varint::write_u64(&mut out, events.len() as u64);
+    let mut prev = 0;
+    for (i, event) in events {
+        varint::write_u64(&mut out, (i - prev) as u64);
+        prev = i;
+        out.push(event.kind.code());
+        varint::write_bytes(&mut out, event.detail.as_bytes());
     }
     out
 }
@@ -484,6 +564,7 @@ fn decode(
             wall_time_ms: base_wall.wrapping_add(*w),
             flags: 0,
             values: Vec::new(),
+            events: Vec::new(),
         })
         .collect();
 
@@ -517,6 +598,17 @@ fn decode(
                 ticks[i].values.push((id, Value::Int(q)));
             }
         }
+    }
+
+    let n_events = r.u64().ok_or(Truncated)?;
+    let mut at = 0usize;
+    for _ in 0..n_events {
+        let step = usize::try_from(r.u64().ok_or(Truncated)?).map_err(|_| Truncated)?;
+        at = at.checked_add(step).filter(|i| *i < n).ok_or(DecodeError::BadTickIndex)?;
+        let kind = EventKind::from_code(r.u8().ok_or(Truncated)?);
+        let detail = std::str::from_utf8(r.len_prefixed().ok_or(Truncated)?)
+            .map_err(|_| DecodeError::BadString)?;
+        ticks[at].events.push(Event { kind, detail: detail.to_owned() });
     }
     if !r.is_empty() {
         return Err(DecodeError::TrailingBytes);
@@ -570,6 +662,7 @@ mod tests {
             wall_time_ms: 1_790_000_000_000 + i * 33,
             flags: if i == 2 { flags::PAUSED } else { 0 },
             values,
+            events: Vec::new(),
         }
     }
 
@@ -708,10 +801,44 @@ mod tests {
     }
 
     #[test]
+    fn events_round_trip_at_their_ticks() {
+        let mut enc = SessionEncoder::new(channels(), 60_000);
+        let crash = Event { kind: EventKind::Crashed, detail: String::new() };
+        let loaded = Event { kind: EventKind::FlightLoaded, detail: "Flights/pattern.FLT".into() };
+        let future = Event { kind: EventKind::Other(200), detail: "x".into() };
+        let mut input = vec![
+            tick(0, vec![(1, Value::Int(1))]),
+            tick(1, vec![]),
+            tick(2, vec![(1, Value::Int(2))]),
+            tick(3, vec![]),
+        ];
+        input[1].events = vec![crash.clone(), loaded.clone()];
+        input[3].events = vec![future.clone()];
+        for t in input.clone() {
+            enc.push(t).unwrap();
+        }
+        let decoded = SessionDecoder::new(channels()).decode(&enc.flush().unwrap().payload).unwrap();
+        let events: Vec<_> = decoded.ticks.iter().map(|t| t.events.clone()).collect();
+        assert_eq!(events, vec![vec![], vec![crash, loaded], vec![], vec![future]]);
+    }
+
+    #[test]
+    fn event_kinds_keep_their_codes() {
+        for code in 0..=u8::MAX {
+            assert_eq!(EventKind::from_code(code).code(), code);
+        }
+        assert_eq!(EventKind::SimStart.code(), 1);
+        assert_eq!(EventKind::ReplayEnded.code(), 11);
+        assert_eq!(EventKind::from_code(12), EventKind::Other(12));
+    }
+
+    #[test]
     fn rejects_every_truncation() {
         let mut enc = SessionEncoder::new(channels(), 60_000);
         enc.push(tick(0, vec![(1, Value::Int(1)), (3, Value::Str("x".into()))])).unwrap();
-        enc.push(tick(1, vec![(2, Value::Int(2))])).unwrap();
+        let mut with_event = tick(1, vec![(2, Value::Int(2))]);
+        with_event.events.push(Event { kind: EventKind::Paused, detail: "d".into() });
+        enc.push(with_event).unwrap();
         let payload = enc.flush().unwrap().payload;
         for len in 0..payload.len() {
             let decoded = SessionDecoder::new(channels()).decode(&payload[..len]);

@@ -11,6 +11,8 @@
 //! waits for its predecessors. Once a session has ended and every chunk is in, the
 //! compactor moves its chunks into one segment object in R2.
 //!
+//! Sim events in newly decoded chunks are copied to `telemetry_events` as they decode.
+//!
 //! Runs alongside the `flight_track_points` path (`track.rs`) until the web reads derived
 //! products.
 
@@ -22,7 +24,7 @@ use axum::{
 };
 use butterlog_wire::{
     compress, decode_channels, decompress, encode_segment, peek_chunk, schema_hash,
-    SessionDecoder, SessionOpen, PROTOCOL_VERSION,
+    DecodedChunk, SessionDecoder, SessionOpen, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -284,6 +286,7 @@ async fn advance(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<i32, Ap
     let channels = decode_channels(&table).map_err(|e| unprocessable("stored channel table", e))?;
     let mut decoder = SessionDecoder::new(channels);
     let (mut expected, mut new_next, mut invalid) = (start, next_seq, None);
+    let mut events = EventRows::default();
     for (seq, data) in rows {
         if seq != expected {
             break;
@@ -292,7 +295,11 @@ async fn advance(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<i32, Ap
             .map_err(|e| e.to_string())
             .and_then(|p| decoder.decode(&p).map_err(|e| e.to_string()));
         match decoded {
-            Ok(_) => {
+            Ok(chunk) => {
+                // Chunks before next_seq are decoded again only to rebuild the state.
+                if seq >= next_seq {
+                    events.add(seq, &chunk);
+                }
                 expected += 1;
                 new_next = new_next.max(expected);
             }
@@ -303,6 +310,24 @@ async fn advance(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<i32, Ap
             }
         }
     }
+    if !events.seq.is_empty() {
+        sqlx::query(
+            "INSERT INTO telemetry_events (session_id, seq, idx, sim_time, wall_time, kind, detail) \
+             SELECT $1, e.seq, e.idx, e.sim_time, to_timestamp(e.wall_ms / 1000.0), e.kind, e.detail \
+               FROM UNNEST($2::int[], $3::int[], $4::float8[], $5::bigint[], $6::smallint[], \
+                           $7::text[]) AS e(seq, idx, sim_time, wall_ms, kind, detail) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(&events.seq)
+        .bind(&events.idx)
+        .bind(&events.sim_time)
+        .bind(&events.wall_ms)
+        .bind(&events.kind)
+        .bind(&events.detail)
+        .execute(&mut **tx)
+        .await?;
+    }
     sqlx::query("UPDATE telemetry_sessions SET next_seq = $2, invalid_seq = $3 WHERE id = $1")
         .bind(id)
         .bind(new_next)
@@ -310,6 +335,32 @@ async fn advance(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<i32, Ap
         .execute(&mut **tx)
         .await?;
     Ok(new_next)
+}
+
+/// `telemetry_events` rows, as columns for one `UNNEST` insert.
+#[derive(Default)]
+struct EventRows {
+    seq: Vec<i32>,
+    idx: Vec<i32>,
+    sim_time: Vec<f64>,
+    wall_ms: Vec<i64>,
+    kind: Vec<i16>,
+    detail: Vec<String>,
+}
+
+impl EventRows {
+    fn add(&mut self, seq: i32, chunk: &DecodedChunk) {
+        let events = chunk.ticks.iter().flat_map(|t| t.events.iter().map(move |e| (t, e)));
+        for (idx, (tick, event)) in events.enumerate() {
+            self.seq.push(seq);
+            self.idx.push(idx as i32);
+            self.sim_time.push(tick.sim_time);
+            self.wall_ms.push(tick.wall_time_ms);
+            self.kind.push(event.kind.code().into());
+            // Postgres text can't hold NUL.
+            self.detail.push(event.detail.replace('\0', ""));
+        }
+    }
 }
 
 /// Marks a session ended by its client. Ending an ended or compacted session is a no-op.
@@ -502,8 +553,8 @@ pub async fn end_session_handler(
 mod tests {
     use super::*;
     use butterlog_wire::{
-        decode_segment, Aircraft, Channel, DeltaOrder, Kind, RateClass, SessionEncoder,
-        SessionHeader, Tick, Value,
+        decode_segment, Aircraft, Channel, DeltaOrder, Event, EventKind, Kind, RateClass,
+        SessionEncoder, SessionHeader, Tick, Value,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -561,6 +612,7 @@ mod tests {
                     wall_time_ms: 1_790_000_000_000 + i * 5_000,
                     flags: 0,
                     values: vec![(0, Value::Int(474_600_000 + i * i))],
+                    events: vec![Event { kind: EventKind::Crashed, detail: format!("crash {i}") }],
                 })
                 .unwrap();
                 let payload = enc.flush().unwrap().payload;
@@ -613,6 +665,20 @@ mod tests {
         let again = store_chunk(&db, me, id, 1, &sent[1]).await.unwrap();
         assert!(again.duplicate);
         assert_eq!(again.next_seq, 3);
+
+        // Each chunk's event is copied out once, however often its chunk is decoded.
+        let events: Vec<(i32, i16, String)> = sqlx::query_as(
+            "SELECT seq, kind, detail FROM telemetry_events WHERE session_id = $1 ORDER BY seq",
+        )
+        .bind(id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let crashed = EventKind::Crashed.code() as i16;
+        assert_eq!(
+            events,
+            (0..3).map(|i| (i, crashed, format!("crash {i}"))).collect::<Vec<_>>()
+        );
 
         assert!(matches!(
             store_chunk(&db, me, id, 4, &sent[1]).await,
