@@ -110,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content", get(content_handler))
         .route("/content/flight/user/:user_id", get(content_user_handler))
         .route("/content/settings", get(settings_handler))
+        .route("/content/telemetry", get(telemetry_handler))
         .route("/content/stats", get(stats_handler))
         .route("/content/aircraft", get(aircraft_handler))
         .route("/content/aircraft/:icao", get(aircraft_type_mine_handler))
@@ -431,6 +432,22 @@ async fn callback_handler(
         session_cookie(&api_token),
     );
     Ok(response)
+}
+
+/// The signed-in pilot's telemetry flights beside the app's, for the phase 3 parity check.
+async fn telemetry_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    let Ok(user_id) = handlers::get_user_id_from_session(&state.db, &headers).await else {
+        return Ok(Redirect::temporary("/api/v0/auth/login").into_response());
+    };
+    let page = templates::TelemetryPage {
+        nav: nav_for(&state, &headers, "flights", "Telemetry").await,
+        flights: analysis::compare::flights(&state.db, user_id, 100).await?,
+        failures: analysis::compare::failures(&state.db, user_id, 20).await?,
+    };
+    Ok(Html(page.render()?).into_response())
 }
 
 async fn settings_handler(

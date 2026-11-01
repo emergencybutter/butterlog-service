@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex">
+    <title>Telemetry comparison</title>
+    {% include "_theme_head.html" %}
+    {% include "_app_shell_head.html" %}
+    <style>
+        .intro { color: var(--text-secondary); margin: 0 0 20px; line-height: 1.5; max-width: 62ch; }
+        .tflight {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+        .tflight-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 4px 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .tflight-route { font-family: var(--font-display); font-weight: 600; font-size: 1.1rem; color: var(--text); }
+        .tflight-meta { color: var(--text-secondary); font-size: 0.9rem; }
+        .tflight-tag {
+            margin-left: auto;
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: var(--radius-pill);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+        }
+        .tflight-tag.is-off { color: var(--warn); border-color: var(--warn); }
+        .tflight-tag.is-ok { color: var(--ok); border-color: var(--ok); }
+        .tflight a { color: var(--accent-text); }
+        .measures { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+        .measures th {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            text-align: right;
+            padding: 8px 16px 6px;
+        }
+        .measures th:first-child, .measures td:first-child { text-align: left; }
+        .measures td {
+            padding: 6px 16px;
+            border-top: 1px solid var(--border);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            color: var(--text);
+        }
+        .measures td:first-child { color: var(--text-secondary); }
+        .measures tr.is-off td { color: var(--warn); }
+        .measures tr.is-off td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+        .failures li { margin-bottom: 6px; color: var(--text-secondary); }
+        .failures code { font-family: var(--font-mono); font-size: 0.85rem; color: var(--error); }
+        @media (max-width: 600px) {
+            .measures th, .measures td { padding-left: 10px; padding-right: 10px; }
+            .tflight-tag { margin-left: 0; }
+        }
+    </style>
+</head>
+<body>
+{% include "_app_shell.html" %}
+
+    <div class="view-head">
+        <div class="view-head-inner">
+            <span class="view-title">Telemetry</span>
+            <span class="view-sub">The service's analysis beside the app's</span>
+        </div>
+    </div>
+
+    <div class="view-body">
+        <p class="intro">Each flight recorded by the new telemetry pipeline, analysed on the service, next to
+            the same flight as the app uploaded it. Differences beyond what the parity check allows are
+            marked. Landing scores are expected to differ on firm landings: the service sees the impact,
+            the app's once-a-second sample usually misses it.</p>
+
+{% if flights.is_empty() %}
+        <div class="empty">
+            <p>No telemetry flights yet.</p>
+            <p class="hint">Fly with a build that records telemetry and the telemetry_beta switch on.</p>
+        </div>
+{% endif %}
+
+{% for f in flights %}
+        <section class="tflight">
+            <div class="tflight-head">
+                <span class="tflight-route">{{ f.route }}</span>
+                <span class="tflight-meta">{{ f.when }} · {{ f.sim }} · {{ f.aircraft }}</span>
+                {% match f.app_flight_id %}
+                {% when Some with (id) %}
+                <span class="tflight-meta"><a href="/content/flights/{{ id }}">App's flight {{ id }}</a></span>
+                {% when None %}
+                <span class="tflight-meta">No matching app flight</span>
+                {% endmatch %}
+                {% if f.measures.is_empty() %}
+                <span class="tflight-tag">v{{ f.analyser_version }} · nothing to compare</span>
+                {% else if f.off_count > 0 %}
+                <span class="tflight-tag is-off">v{{ f.analyser_version }} · {{ f.off_count }} off</span>
+                {% else %}
+                <span class="tflight-tag is-ok">v{{ f.analyser_version }} · matches</span>
+                {% endif %}
+            </div>
+            {% if !f.measures.is_empty() %}
+            <table class="measures">
+                <thead><tr><th>Measure</th><th>Service</th><th>App</th><th>Difference</th></tr></thead>
+                <tbody>
+                {% for m in f.measures %}
+                    <tr{% if m.off %} class="is-off"{% endif %}><td>{{ m.label }}</td><td>{{ m.service }}</td><td>{{ m.app }}</td><td>{{ m.difference }}</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </section>
+{% endfor %}
+
+{% if !failures.is_empty() %}
+        <h2 class="view-sub">Sessions that failed analysis</h2>
+        <ul class="failures">
+        {% for s in failures %}
+            <li>{{ s.when }} · {{ s.sim }} · {{ s.aircraft }}: <code>{{ s.error }}</code></li>
+        {% endfor %}
+        </ul>
+{% endif %}
+    </div>
+
+{% include "_app_shell_foot.html" %}
+</body>
+</html>

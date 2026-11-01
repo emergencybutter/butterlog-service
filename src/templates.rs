@@ -52,6 +52,16 @@ impl Nav {
 #[template(path = "home.html")]
 pub struct HomePage;
 
+/// The telemetry comparison: the pilot's flights as the service analysed them, beside the
+/// app's (see `analysis::compare`).
+#[derive(Template)]
+#[template(path = "telemetry.html")]
+pub struct TelemetryPage {
+    pub nav: Nav,
+    pub flights: Vec<crate::analysis::compare::FlightRow>,
+    pub failures: Vec<crate::analysis::compare::FailedSession>,
+}
+
 #[derive(Template)]
 #[template(path = "map.html")]
 pub struct MapPage {

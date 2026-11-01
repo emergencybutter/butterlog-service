@@ -2,6 +2,7 @@
 //! normalised samples in, the flight summary the app computes today out. `ingest` runs it
 //! on sessions as they end.
 
+pub mod compare;
 pub mod flight;
 pub mod ingest;
 pub mod places;
