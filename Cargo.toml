@@ -25,4 +25,6 @@ flate2 = "1.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 askama = "0.12"
 butterlog-wire = { path = "wire" }
+csv = "1.3"
+rstar = "0.11"
 

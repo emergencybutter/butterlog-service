@@ -24,6 +24,7 @@ mod track;
 mod sessions;
 mod anonymous;
 mod normalise;
+mod analysis;
 
 use crate::config::Config;
 use crate::error::AppError;
