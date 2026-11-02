@@ -394,8 +394,16 @@ Peers exchange state directly over UDP (`multiplayer.rs`); the service is only t
 matchmaker. An MSFS pilot sees an X-Plane pilot, so peers need a sim-neutral model. Today
 that is the full `FlightMetrics`; it becomes a small **`TrafficState`** in `butterlog-wire`:
 
-- Position, MSL altitude, heading, pitch, bank, ground speed, on-ground, and for animation
-  gear, flaps, lights and engines running. Versioned with `protocol_version`.
+- Position, MSL altitude, heading, track, pitch, bank, ground and indicated speed,
+  on-ground, gear and lights, and the identity (title, type, airline, livery). About 100
+  bytes in a binary layout (`wire/src/traffic.rs`), against about 3 kB of JSON before.
+  Versioned on its own (`TRAFFIC_VERSION`): later versions only append fields, and a
+  decoder skips what it doesn't know. Flaps and engines running come once a sim adapter
+  reads them; no injector uses them yet.
+- During the rollout an app sends a peer `TrafficState` once that peer has shown it speaks
+  it (by sending one, or `"traffic_state"` in its JSON packet) within the last minute, and
+  the old JSON packet otherwise. Older apps ignore the new JSON field and drop the binary
+  packet, which is not JSON, so old and new apps keep seeing each other.
 - Each sim adapter converts its own values into `TrafficState` to send, and back out to
   inject. That is a few lines per sim, not the analysis normalisers.
 - It is deliberately separate from the service normalisers (calibration, capture quality,

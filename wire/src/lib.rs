@@ -10,6 +10,7 @@ mod sampler;
 mod schema;
 mod segment;
 mod session;
+mod traffic;
 mod varint;
 
 pub use chunk::{
@@ -23,6 +24,7 @@ pub use sampler::{period, Phase, PhaseInputs, Sampler, DEFAULT_LOW_HZ, MAX_QUEUE
 pub use schema::{decode_channels, encode_channels, Channel, DeltaOrder, Kind, RateClass};
 pub use segment::{decode_segment, encode_segment, Segment};
 pub use session::{schema_hash, Aircraft, SessionHeader, SessionOpen};
+pub use traffic::{lights, TrafficIdentity, TrafficState, TRAFFIC_VERSION};
 
 /// Version of the wire format, sent in every session header and plugin handshake.
 pub const PROTOCOL_VERSION: u16 = 1;
