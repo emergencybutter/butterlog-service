@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 2;
+pub const ANALYSER_VERSION: i32 = 3;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
@@ -45,7 +45,9 @@ fn places() -> Option<&'static Places> {
         .as_ref()
 }
 
-type Analysed = Vec<(FlightSummary, Value)>;
+/// Each flight, its summary as stored, and its statistics document
+/// (`analysis/statistics.rs`).
+type Analysed = Vec<(FlightSummary, Value, Value)>;
 
 /// A session's chunks as uploaded (zstd each, in order), analysed.
 fn analyse_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<Analysed, String> {
@@ -73,7 +75,8 @@ fn analyse_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Analysed, Strin
     let samples = normalise(&open, ticks).map_err(|e| e.to_string())?;
     Ok(analyse(&samples, places).into_iter().map(|f| {
         let json = summary_json(&f, places);
-        (f, json)
+        let statistics = super::statistics::statistics(&open.header, &f, &samples, places);
+        (f, json, statistics)
     }).collect())
 }
 
@@ -210,7 +213,7 @@ async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, S
     sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&mut *tx).await?;
     let error = match analysed {
         Ok(flights) => {
-            for (idx, (f, summary)) in flights.iter().enumerate() {
+            for (idx, (f, summary, statistics)) in flights.iter().enumerate() {
                 // The app's flights of the day around it.
                 let candidates: Vec<(i64, Value)> = sqlx::query_as(
                     "SELECT id, statistics FROM flights \
@@ -225,8 +228,8 @@ async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, S
                 sqlx::query(
                     "INSERT INTO telemetry_flights \
                        (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
-                        departure, arrival, summary, flight_id, parity) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                        departure, arrival, summary, flight_id, parity, statistics) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 )
                 .bind(id)
                 .bind(idx as i32)
@@ -239,6 +242,7 @@ async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, S
                 .bind(summary)
                 .bind(app.map(|a| a.0))
                 .bind(app.map(|a| parity(f, &a.1)))
+                .bind(statistics)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -375,6 +379,13 @@ mod tests {
         assert_eq!(departure, "KAST");
         assert_eq!(summary["departure_name"], json!("Astoria Regional Airport"));
         assert!(summary["landing"]["score"].is_number());
+        let statistics: Value =
+            sqlx::query_scalar("SELECT statistics FROM telemetry_flights WHERE session_id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(statistics["arrival"]["name"], json!("Astoria Regional Airport"));
         assert_eq!(linked, Some(flight));
         assert!(parity["takeoff_s"].as_f64().unwrap().abs() < 1.5);
         assert_eq!(parity["landing_score"]["app"], json!(-142.24));

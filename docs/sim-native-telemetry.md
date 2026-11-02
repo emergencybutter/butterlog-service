@@ -395,8 +395,8 @@ matchmaker. An MSFS pilot sees an X-Plane pilot, so peers need a sim-neutral mod
 that is the full `FlightMetrics`; it becomes a small **`TrafficState`** in `butterlog-wire`:
 
 - Position, MSL altitude, heading, track, pitch, bank, ground and indicated speed,
-  on-ground, gear and lights, and the identity (title, type, airline, livery). About 100
-  bytes in a binary layout (`wire/src/traffic.rs`), against about 3 kB of JSON before.
+  on-ground, gear and lights, and the identity (title, type, airline, livery). About 120
+  bytes in a binary layout (`wire/src/traffic.rs`), against 1.3 kB or more of JSON before.
   Versioned on its own (`TRAFFIC_VERSION`): later versions only append fields, and a
   decoder skips what it doesn't know. Flaps and engines running come once a sim adapter
   reads them; no injector uses them yet.

@@ -831,6 +831,43 @@ fn assemble_embeds(
     Ok((vec![final_embed], Vec::new()))
 }
 
+/// The landed or in-flight post a statistics document makes, as `(label, text)` lines:
+/// the title, each line of the description, and each line of each field, labelled by the
+/// field and, for `**Name**: value` lines, the name. For comparing the service's document
+/// with the app's (`analysis/compare.rs`, rollout phase 5): what differs between two posts,
+/// without the parts that are the same for both (author, links, footer, notes).
+pub fn post_lines(statistics: &Value) -> Vec<(String, String)> {
+    let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
+    let Ok((embeds, _)) = assemble_embeds(statistics, &user, "", "", None) else {
+        return Vec::new();
+    };
+    let embed = serde_json::to_value(&embeds[0]).unwrap_or(Value::Null);
+    let mut lines = vec![("Title".to_string(), embed["title"].as_str().unwrap_or_default().to_string())];
+    for line in embed["description"].as_str().unwrap_or_default().lines() {
+        let line = without_discord_times(line);
+        let label = line.split_whitespace().next().unwrap_or("Description").to_string();
+        lines.push((label, line));
+    }
+    for field in embed["fields"].as_array().into_iter().flatten() {
+        let name = field["name"].as_str().unwrap_or_default();
+        for (i, line) in field["value"].as_str().unwrap_or_default().lines().enumerate() {
+            match line.strip_prefix("**").and_then(|l| l.split_once("**: ")) {
+                Some((label, value)) => lines.push((format!("{name} · {label}"), value.to_string())),
+                None => lines.push((format!("{name} · line {}", i + 1), line.to_string())),
+            }
+        }
+    }
+    lines
+}
+
+/// "Departed **X** at 0209Z (<t:…:F> local, <t:…:R>)" without the viewer-local parts.
+fn without_discord_times(line: &str) -> String {
+    match (line.find(" (<t:"), line.rfind(":R>)")) {
+        (Some(start), Some(end)) if end > start => format!("{}{}", &line[..start], &line[end + 4..]),
+        _ => line.to_string(),
+    }
+}
+
 fn d_or_null<'a>(val: &'a Value, key: &str) -> Option<&'a Value> {
     if let Some(v) = val.get(key) {
         if v.is_null() {
@@ -962,6 +999,28 @@ mod tests {
 
         let engine = get_formatted_fields_for_category(&snapshot, "engine");
         assert!(engine.contains("**Engine 1 RPM**: 2400.00 rpm"));
+    }
+
+    #[test]
+    fn a_landed_post_reads_as_lines() {
+        let lines = post_lines(&serde_json::json!({
+            "departure": { "icao": "PHOG", "name": "Kahului" },
+            "arrival": { "icao": "PHOG", "name": "Kahului" },
+            "takeoff_time": "2026-11-02 02:05:39.519",
+            "landing_time": "2026-11-02 02:06:02.519",
+            "airframe_name": "Cessna Skyhawk",
+            "resolved_icao": "C172",
+            "simulator": "X-Plane",
+            "simulator_version": "12",
+            "landing_snapshot": { "VSpd": -382.56 },
+            "max_entries": { "IAS": 81.24 },
+        }));
+        let get = |label: &str| lines.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str());
+        assert_eq!(get("Title"), Some("Flight PHOG ✈ PHOG"));
+        assert_eq!(get("Departed"), Some("Departed **Kahului** at 0205Z"));
+        assert_eq!(get("Flight Info · line 1"), Some("Flying Cessna Skyhawk (C172)"));
+        assert_eq!(get("Landing Stats · Vertical Speed"), Some("-382.56 fpm"));
+        assert_eq!(get("Max Stats · Indicated Airspeed"), Some("81.24 kts"));
     }
 
     #[test]

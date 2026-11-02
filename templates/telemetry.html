@@ -62,6 +62,16 @@
         .measures td:first-child { color: var(--text-secondary); }
         .measures tr.is-off td { color: var(--warn); }
         .measures tr.is-off td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+        .post { border-top: 1px solid var(--border); }
+        .post summary {
+            cursor: pointer;
+            padding: 10px 16px;
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            letter-spacing: 0.04em;
+            color: var(--text-secondary);
+        }
+        .post-lines th, .post-lines td { text-align: left; overflow-wrap: anywhere; }
         .failures li { margin-bottom: 6px; color: var(--text-secondary); }
         .failures code { font-family: var(--font-mono); font-size: 0.85rem; color: var(--error); }
         @media (max-width: 600px) {
@@ -84,12 +94,13 @@
         <p class="intro">Each flight recorded by the new telemetry pipeline, analysed on the service, next to
             the same flight as the app uploaded it. Differences beyond what the parity check allows are
             marked. Landing scores are expected to differ on firm landings: the service sees the impact,
-            the app's once-a-second sample usually misses it.</p>
+            the app's once-a-second sample usually misses it. Under each flight, the Discord post the
+            service would make from its own analysis, beside the app's. The service's is not posted.</p>
 
 {% if flights.is_empty() %}
         <div class="empty">
             <p>No telemetry flights yet.</p>
-            <p class="hint">Fly with a build that records telemetry and the telemetry_beta switch on.</p>
+            <p class="hint">Turn on the telemetry beta in the app's Settings, then fly.</p>
         </div>
 {% endif %}
 
@@ -121,6 +132,19 @@
                 {% endfor %}
                 </tbody>
             </table>
+            {% endif %}
+            {% if !f.post.is_empty() %}
+            <details class="post"{% if f.post_off_count > 0 %} open{% endif %}>
+                <summary>Discord post · {% if f.post_off_count > 0 %}{{ f.post_off_count }} of {{ f.post.len() }} lines differ{% else %}the same{% endif %}</summary>
+                <table class="measures post-lines">
+                    <thead><tr><th>Line</th><th>Service</th><th>App</th></tr></thead>
+                    <tbody>
+                    {% for l in f.post %}
+                        <tr{% if l.off %} class="is-off"{% endif %}><td>{{ l.label }}</td><td>{{ l.service }}</td><td>{{ l.app }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
             {% endif %}
         </section>
 {% endfor %}

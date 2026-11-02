@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn is_small() {
-        // The JSON packet it replaces is about 3 kB.
+        // The JSON packet it replaces is 1.3 kB with every value zero.
         assert!(state().encode().len() < 150, "{}", state().encode().len());
     }
 

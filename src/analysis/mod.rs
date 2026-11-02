@@ -6,6 +6,7 @@ pub mod compare;
 pub mod flight;
 pub mod ingest;
 pub mod places;
+pub mod statistics;
 
 pub use flight::{analyse, FlightSummary};
 pub use places::Places;

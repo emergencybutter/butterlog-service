@@ -1,6 +1,8 @@
 //! The comparison page's data (`/content/telemetry`): a pilot's telemetry flights, each
 //! measure as the service and the app saw it, and whether the difference is beyond what
 //! the parity check allows (the tolerances of the fixture tests in `analysis/mod.rs`).
+//! Below each, the Discord post each side's statistics document makes (rollout phase 5's
+//! shadow mode): the service's is never posted, only compared.
 
 use crate::error::AppError;
 use chrono::{DateTime, Utc};
@@ -26,6 +28,69 @@ pub struct FlightRow {
     pub analyser_version: i32,
     pub measures: Vec<Measure>,
     pub off_count: usize,
+    /// The two posts line by line; empty without both documents.
+    pub post: Vec<PostLine>,
+    pub post_off_count: usize,
+}
+
+/// One line of the Discord post, as each side's statistics make it.
+pub struct PostLine {
+    pub label: String,
+    pub service: String,
+    pub app: String,
+    /// Different beyond rounding: a number off by more than 5% (and 1 unit), or anything
+    /// else that isn't equal.
+    pub off: bool,
+}
+
+/// The first number in a line ("-382.56 fpm", "Currently 0.1 nautical miles...").
+fn first_number(s: &str) -> Option<f64> {
+    let start = s.find(|c: char| c.is_ascii_digit() || c == '-')?;
+    let rest = &s[start..];
+    let end = rest[1..].find(|c: char| !(c.is_ascii_digit() || c == '.')).map_or(rest.len(), |i| i + 1);
+    rest[..end].parse().ok()
+}
+
+/// The line without its numbers, to tell a different number from different words.
+fn words(s: &str) -> String {
+    s.replace(|c: char| c.is_ascii_digit() || c == '.' || c == '-', "")
+}
+
+fn close(service: &str, app: &str) -> bool {
+    if service == app {
+        return true;
+    }
+    match (first_number(service), first_number(app)) {
+        (Some(s), Some(a)) if words(service) == words(app) => (s - a).abs() <= (a.abs() * 0.05).max(1.0),
+        _ => false,
+    }
+}
+
+/// The two posts, line by line: the service's lines in order, then those only the app's has.
+pub fn post_lines(service: &Value, app: &Value) -> Vec<PostLine> {
+    let ours = crate::discord::post_lines(service);
+    let theirs = crate::discord::post_lines(app);
+    let find = |lines: &[(String, String)], label: &str| {
+        lines.iter().find(|(l, _)| l == label).map(|(_, v)| v.clone())
+    };
+    let mut out: Vec<PostLine> = ours
+        .iter()
+        .map(|(label, s)| {
+            let a = find(&theirs, label);
+            PostLine {
+                label: label.clone(),
+                service: s.clone(),
+                off: a.as_deref().is_none_or(|a| !close(s, a)),
+                app: a.unwrap_or_default(),
+            }
+        })
+        .collect();
+    for (label, a) in &theirs {
+        if find(&ours, label).is_none() {
+            out.push(PostLine { label: label.clone(), service: String::new(), app: a.clone(), off: true });
+        }
+    }
+    out
 }
 
 pub struct FailedSession {
@@ -129,10 +194,13 @@ fn utc(t: DateTime<Utc>) -> String {
 
 /// The pilot's latest telemetry flights, newest first.
 pub async fn flights(db: &PgPool, user_id: i64, limit: i64) -> Result<Vec<FlightRow>, AppError> {
-    let rows: Vec<(DateTime<Utc>, String, Value, String, String, Option<i64>, i32, Option<Value>)> = sqlx::query_as(
+    type Row =
+        (DateTime<Utc>, String, Value, String, String, Option<i64>, i32, Option<Value>, Option<Value>, Option<Value>);
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT f.first_at, s.sim, s.aircraft, f.departure, f.arrival, f.flight_id, \
-                f.analyser_version, f.parity \
+                f.analyser_version, f.parity, f.statistics, a.statistics \
            FROM telemetry_flights f JOIN telemetry_sessions s ON s.id = f.session_id \
+           LEFT JOIN flights a ON a.id = f.flight_id \
           WHERE s.user_id = $1 \
           ORDER BY f.first_at DESC LIMIT $2",
     )
@@ -142,8 +210,12 @@ pub async fn flights(db: &PgPool, user_id: i64, limit: i64) -> Result<Vec<Flight
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(first, sim, aircraft, departure, arrival, app_flight_id, analyser_version, parity)| {
+        .map(|(first, sim, aircraft, departure, arrival, app_flight_id, analyser_version, parity, ours, theirs)| {
             let measures = parity.as_ref().map(measures).unwrap_or_default();
+            let post = match (&ours, &theirs) {
+                (Some(ours), Some(theirs)) => post_lines(ours, theirs),
+                _ => Vec::new(),
+            };
             FlightRow {
                 when: utc(first),
                 sim,
@@ -153,6 +225,8 @@ pub async fn flights(db: &PgPool, user_id: i64, limit: i64) -> Result<Vec<Flight
                 analyser_version,
                 off_count: measures.iter().filter(|m| m.off).count(),
                 measures,
+                post_off_count: post.iter().filter(|l| l.off).count(),
+                post,
             }
         })
         .collect())
@@ -239,6 +313,13 @@ mod tests {
                 analyser_version: 2,
                 off_count: ms.iter().filter(|m| m.off).count(),
                 measures: ms,
+                post_off_count: 1,
+                post: vec![PostLine {
+                    label: "Landing Stats · Vertical Speed".into(),
+                    service: "-171.90 fpm".into(),
+                    app: "-212.40 fpm".into(),
+                    off: true,
+                }],
             }],
             failures: vec![FailedSession {
                 when: "2026-11-01 15:02 UTC".into(),
@@ -250,9 +331,27 @@ mod tests {
         let html = page.render().unwrap();
         assert!(html.contains("CYZF → CYZF") && html.contains("/content/flights/548"));
         assert!(html.contains("C172SP &lt;G1000&gt;"), "escaped");
+        assert!(html.contains("-212.40 fpm"));
         if let Ok(out) = std::env::var("RENDER_TELEMETRY_PAGE") {
             std::fs::write(out, html).unwrap();
         }
+    }
+
+    #[test]
+    fn post_lines_differ_beyond_rounding() {
+        let doc = |vspd: f64, ias: f64, name: &str| json!({
+            "departure": { "icao": "KAST", "name": name },
+            "arrival": { "icao": "KAST", "name": name },
+            "landing_time": "2026-11-01 01:14:00.000",
+            "airframe_name": "Cessna Skyhawk",
+            "landing_snapshot": { "VSpd": vspd },
+            "max_entries": { "IAS": ias },
+        });
+        let lines = post_lines(&doc(-171.9, 117.0, "Astoria Regional Airport"), &doc(-289.3, 116.0, "Astoria"));
+        let off: Vec<_> = lines.iter().filter(|l| l.off).map(|l| l.label.as_str()).collect();
+        assert_eq!(off, ["Landed", "Landing Stats · Vertical Speed"]);
+        assert_eq!(first_number("Currently 0.1 nautical miles"), Some(0.1));
+        assert_eq!(first_number("-382.56 fpm"), Some(-382.56));
     }
 
     #[test]
