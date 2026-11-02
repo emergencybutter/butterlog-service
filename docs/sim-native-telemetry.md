@@ -366,8 +366,9 @@ segmented on the service, and the local metrics file is gone.
 | `screenshots.db`, screenshot upload, list of screenshots not yet uploaded (§5.5) | |
 | SimVar / dataref introspection, debugging | FlySto export (moves to the service, §5.3) |
 | Traffic injection (`multiplayer.rs`), sim commands | Aircraft stats, `flight_analyzer.rs` |
-| `TrafficState` conversion per sim (§6.1) | Airport, runway, ICAO, airline indexes |
-| Local model matching (`aircraft-characteristics.csv`) | ICAO type / airline resolution (moves to the service) |
+| `TrafficState` conversion per sim (§6.1) | Airport and runway indexes |
+| Local model matching (`aircraft-characteristics.csv`) | |
+| ICAO type / airline resolution, as a fallback (`butterlog-identity`, shared with the service, §6.1) | |
 | | Share and webhook formatting |
 | | Offline / local-only recording |
 
@@ -404,12 +405,19 @@ that is the full `FlightMetrics`; it becomes a small **`TrafficState`** in `butt
   load, and the direct path with STUN/NAT traversal is deliberate
   (`docs/multiplayer-same-nat.md`, `docs/multiplayer-proximity-peers.md` in the app).
 
-**Identity comes from the service.** The sender no longer resolves its own ICAO type and
-airline. The service already does that from the session header (§5.2); it returns the
-result in the session-open ack — ICAO type, airline ICAO and airline name — and the app
-forwards it to peers. The receiver matches local models with `aircraft-characteristics.csv`
-and local livery titles with the airline name it was sent, so the client drops the airport,
-runway, ICAO and airline tables.
+**Identity comes from the service.** The service resolves the ICAO type and airline from
+the session header's title and livery when the session opens, stores them on the session,
+and returns them in the open reply: ICAO type, airline ICAO and airline name. The app
+forwards them to peers. The receiver matches local models with `aircraft-characteristics.csv`
+and local livery titles with the airline name it was sent.
+
+Both sides resolve with one crate, **`butterlog-identity`** (`identity/` in the service
+repo, beside `butterlog-wire`), which carries the aircraft and airline tables. The app
+resolves locally too, so peers get a type and airline before the session opens, and when it
+never does (telemetry off, service unreachable). Once the service answers, its answer wins;
+the app logs the first disagreement per aircraft. So an index fix reaches every peer with a
+service deploy, and the app's copy only has to be good enough as a fallback. The client
+drops the airport and runway tables.
 
 ### 6.2 Anonymous accounts
 

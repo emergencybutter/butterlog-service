@@ -1311,14 +1311,13 @@ fn split_csv_line(line: &str) -> Vec<String> {
 
 /// ICAO type code to the model name a pilot would recognise.
 ///
-/// Read from the same FAA characteristics table the client resolves types
-/// against, vendored into the binary so the service needs no data file
-/// alongside it. Parsed once, on first use.
+/// Read from the FAA characteristics table that types are resolved against
+/// (`butterlog-identity`), built into the binary. Parsed once, on first use.
 fn aircraft_names() -> &'static std::collections::HashMap<String, String> {
     static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
         std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
-        const TABLE: &str = include_str!("../data/aircraft-characteristics.csv");
+        const TABLE: &str = butterlog_identity::aircraft_characteristics::CSV;
         let mut out = std::collections::HashMap::new();
         for line in TABLE.lines().skip(1) {
             let fields = split_csv_line(line);

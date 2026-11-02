@@ -1,0 +1,9 @@
+[package]
+name = "butterlog-identity"
+version = "0.1.0"
+edition = "2021"
+description = "Resolves a sim aircraft's ICAO type and operating airline from its title and livery. Shared by the ButterLog service, which resolves every session, and the app, which falls back to it"
+
+[dependencies]
+csv = "1.3"
+serde = { version = "1", features = ["derive"] }

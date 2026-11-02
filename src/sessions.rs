@@ -13,6 +13,10 @@
 //!
 //! Sim events in newly decoded chunks are copied to `telemetry_events` as they decode.
 //!
+//! Opening resolves the aircraft's ICAO type and airline from its title and livery
+//! (`butterlog-identity`) and returns them, so the app can pass them to traffic peers
+//! (docs/sim-native-telemetry.md §6.1).
+//!
 //! Runs alongside the `flight_track_points` path (`track.rs`) until the web reads derived
 //! products.
 
@@ -22,6 +26,7 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+use butterlog_identity::Resolver;
 use butterlog_wire::{
     compress, decode_channels, decompress, encode_segment, peek_chunk, schema_hash,
     DecodedChunk, SessionDecoder, SessionOpen, PROTOCOL_VERSION,
@@ -65,6 +70,31 @@ pub struct SessionCursor {
     /// Every chunk below this was received and decoded.
     pub next_seq: i32,
     pub chunk_count: i32,
+    /// What the aircraft was resolved to. Only in the reply to opening.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<AircraftIdentity>,
+}
+
+/// An aircraft's resolved identity. Empty strings when nothing matched.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AircraftIdentity {
+    /// ICAO type designator, e.g. `B738`.
+    pub icao: String,
+    /// ICAO airline designator, e.g. `RYR`.
+    pub airline_icao: String,
+    pub airline: String,
+}
+
+impl AircraftIdentity {
+    pub fn resolve(title: &str, livery: &str) -> Self {
+        let r = Resolver::embedded().resolve(title, livery);
+        AircraftIdentity {
+            icao: r.icao_code().to_string(),
+            airline_icao: r.airline_icao().to_string(),
+            airline: r.airline_name().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -90,7 +120,7 @@ async fn cursor(db: &PgPool, user_id: i64, id: Uuid) -> Result<SessionCursor, Ap
     match row {
         // Another user's session is reported as missing, not as forbidden.
         Some((owner, status, next_seq, chunk_count)) if owner == user_id => {
-            Ok(SessionCursor { session_id: id, status, next_seq, chunk_count })
+            Ok(SessionCursor { session_id: id, status, next_seq, chunk_count, identity: None })
         }
         _ => Err(AppError::NotFound("No such session".to_string())),
     }
@@ -112,6 +142,7 @@ pub async fn open_session(
         )));
     }
     let hash = schema_hash(&table).to_vec();
+    let identity = AircraftIdentity::resolve(&h.aircraft.title, &h.aircraft.livery);
     let aircraft = serde_json::json!({
         "title": h.aircraft.title,
         "icao": h.aircraft.icao,
@@ -119,6 +150,9 @@ pub async fn open_session(
         "livery": h.aircraft.livery,
         "engineType": h.aircraft.engine_type,
         "engineCount": h.aircraft.engine_count,
+        "resolvedIcao": identity.icao,
+        "resolvedAirlineIcao": identity.airline_icao,
+        "resolvedAirline": identity.airline,
     });
 
     let mut tx = db.begin().await?;
@@ -160,7 +194,9 @@ pub async fn open_session(
         ));
     }
     tx.commit().await?;
-    cursor(db, user_id, id).await
+    let mut opened = cursor(db, user_id, id).await?;
+    opened.identity = Some(identity);
+    Ok(opened)
 }
 
 /// Stores one chunk, then decodes whatever has become contiguous.
@@ -654,11 +690,44 @@ mod tests {
         }
     }
 
+    /// The app parses this shape (`telemetry/uploader.rs`, `the_open_reply_carries_the_identity`).
+    #[test]
+    fn the_open_reply_carries_the_identity() {
+        let cursor = SessionCursor {
+            session_id: Uuid::nil(),
+            status: "open".into(),
+            next_seq: 0,
+            chunk_count: 0,
+            identity: Some(AircraftIdentity::resolve("Boeing 737-800 Ryanair", "")),
+        };
+        assert_eq!(
+            serde_json::to_value(&cursor).unwrap(),
+            serde_json::json!({
+                "sessionId": "00000000-0000-0000-0000-000000000000",
+                "status": "open",
+                "nextSeq": 0,
+                "chunkCount": 0,
+                "identity": { "icao": "B738", "airlineIcao": "RYR", "airline": "Ryanair" },
+            })
+        );
+        let later = SessionCursor { identity: None, ..cursor };
+        assert!(serde_json::to_value(&later).unwrap().get("identity").is_none());
+    }
+
     #[tokio::test]
     async fn opening_is_idempotent_and_owned() {
         let Some(db) = db().await else { return };
         let (me, other, id) = (user(&db).await, user(&db).await, Uuid::new_v4());
-        assert_eq!(open_session(&db, me, id, &opening(1e-7)).await.unwrap().status, "open");
+        let opened = open_session(&db, me, id, &opening(1e-7)).await.unwrap();
+        assert_eq!(opened.status, "open");
+        assert_eq!(opened.identity.unwrap().icao, "C172");
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT aircraft FROM telemetry_sessions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stored["resolvedIcao"], "C172");
         assert_eq!(open_session(&db, me, id, &opening(1e-7)).await.unwrap().next_seq, 0);
         assert!(matches!(
             open_session(&db, other, id, &opening(1e-7)).await,

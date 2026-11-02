@@ -168,7 +168,7 @@ Every call is idempotent. The session id is a UUID chosen by the client, so a se
 
 *   **Request Body:** a `SessionOpen` (header and channel table), at most **256KB**.
 *   **Response:**
-    *   `200 OK`: `{ "sessionId", "status", "nextSeq", "chunkCount" }`. Opening an open session again returns its cursor.
+    *   `200 OK`: `{ "sessionId", "status", "nextSeq", "chunkCount", "identity" }`. Opening an open session again returns its cursor. `identity` is `{ "icao", "airlineIcao", "airline" }`, the aircraft's ICAO type and operating airline resolved from its title and livery (`identity/`); each is `""` when nothing matched. The app passes it to traffic peers.
     *   `404 Not Found`: the id belongs to another user's session.
     *   `409 Conflict`: the session was opened with a different channel table.
     *   `422 Unprocessable Entity`: malformed opening, or an unsupported protocol version.
