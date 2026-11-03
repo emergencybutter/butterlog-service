@@ -77,9 +77,22 @@ impl Resolver {
         if !self.aircraft.type_may_fly_for_airline(code) {
             return Resolution { icao, airline: None, airline_skipped: true };
         }
-        let airline = self.airlines.find(&format!("{title} {livery}"));
+        // The livery's own name first: an X-Plane livery is a path through the aircraft's
+        // folder, whose name ("DWSim_ATR_72_600_XP12") says nothing about the operator.
+        let livery = livery_name(livery);
+        let airline = Some(livery)
+            .filter(|l| !l.is_empty())
+            .and_then(|l| self.airlines.find(l))
+            .or_else(|| self.airlines.find(&format!("{title} {livery}")));
         Resolution { icao, airline, airline_skipped: false }
     }
+}
+
+/// The last part of a livery path ("Aircraft/.../liveries/Voyager Aviation/"), or the
+/// livery as it is (MSFS names it).
+fn livery_name(livery: &str) -> &str {
+    let livery = livery.trim();
+    livery.rsplit(['/', '\\']).find(|s| !s.trim().is_empty()).map_or(livery, str::trim)
 }
 
 #[cfg(test)]
@@ -92,6 +105,19 @@ mod tests {
         assert_eq!(r.icao_code(), "B738");
         assert_eq!(r.airline_icao(), "RYR");
         assert!(!r.airline_skipped);
+    }
+
+    #[test]
+    fn the_authors_liveries_are_voyager_aviation() {
+        let r = Resolver::embedded();
+        let voyager = |title: &str, livery: &str| r.resolve(title, livery).airline_icao().to_string();
+        assert_eq!(voyager("ATR 72-600", "Aircraft/DWSim_ATR_72_600_XP12/liveries/Voyager Aviation/"), "VYA");
+        assert_eq!(r.resolve("ATR 72-600", "Aircraft/DWSim_ATR_72_600_XP12/liveries/Voyager Aviation/").icao_code(), "AT76");
+        assert_eq!(voyager("FSReborn Phenom 300E PRO Oberon Interior", "Voyager Aviation | S1 (2K Dynamic)"), "VYA");
+        assert_eq!(voyager("FFX HS125 - 800XP", "Voyager | N850VY"), "VYA");
+        assert_eq!(voyager("FFX HS125 - 800XP", "Voyager | Dynamic Registration"), "VYA");
+        assert_eq!(voyager("ToLiSs A320 Hi Def", "Aircraft/ToLissA320_V1p2p1/liveries/Voyager A20N N20VY/"), "VYA");
+        assert_eq!(voyager("Dassault Falcon 8X by Aerobask", "Aircraft/Falcon 8X/liveries/Voyager/"), "VYA");
     }
 
     #[test]

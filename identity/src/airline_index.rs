@@ -29,6 +29,9 @@ const STOPWORDS: &[&str] = &[
     "daher", "pilatus", "beechcraft", "beech", "gulfstream", "dassault", "mcdonnell",
     "douglas", "antonov", "tupolev", "sukhoi", "robin", "mooney", "textron", "tecnam",
     "icon", "kodiak", "honda", "hondajet", "asobo", "microsoft",
+    // "ATR" is also Atlas Airlines' designator: "ATR 72-600" made every ATR an Atlas one.
+    "atr", "saab", "fokker", "lockheed", "havilland", "dhc", "bae", "sikorsky", "eurocopter",
+    "mitsubishi", "comac", "ilyushin", "yakovlev", "socata", "grumman", "learjet", "hawker",
     // engine and airframe variant designators — common in livery titles ("A320 CFM WF"),
     // and several collide with real ICAO designators (CFM = ACEF, IAE = AC Insat-Aero).
     "cfm", "cfm56", "iae", "leap", "gtf", "pw", "neo", "ceo",
@@ -37,6 +40,14 @@ const STOPWORDS: &[&str] = &[
     "international", "intl", "express", "transport", "transports", "group", "company",
     "co", "ltd", "inc", "limited", "holdings", "charter", "flight", "flights", "service",
     "services",
+    // livery filler: MSFS's "(Dynamic)" and "Dynamic Registration" matched Dynamic Airways
+    "dynamic", "registration", "livery", "liveries", "default",
+    // model families that are also airline words ("Falcon 50" is not Falcon Air)
+    "falcon", "citation", "phenom", "challenger", "caravan", "bluebird",
+    // colours: "White A220-300" is a plain livery
+    "white", "blue", "red", "green", "black", "grey", "gray", "silver", "gold", "orange",
+    // variant notes: "A220-300 - No Cabin", "G3X Avionics"
+    "no", "cabin", "avionics",
 ];
 
 struct Posting {
@@ -55,6 +66,10 @@ pub struct AirlineMatch {
 pub struct AirlineIndex {
     icaos: Vec<String>,
     names: Vec<String>,
+    /// Each airline's name and call sign as [`phrase`]s, and its name without stopwords
+    /// when that leaves two words or more, for [`AirlineIndex::find`]'s preference for an
+    /// airline named in full.
+    phrases: Vec<[String; 3]>,
     postings: HashMap<String, Vec<Posting>>,
     idf: HashMap<String, f32>,
     /// Minimum contribution a *single* token must reach for `find` to accept a match,
@@ -79,6 +94,18 @@ fn tokenize(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Lowercase words separated by single spaces and padded with one, stopwords kept, so
+/// `" voyager aviation "` can be looked for, whole words only, in a query's phrase.
+fn phrase(s: &str) -> String {
+    let words: Vec<String> = s
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    format!(" {} ", words.join(" "))
+}
+
 fn add_tokens(into: &mut HashMap<String, f32>, text: &str, weight: f32) {
     for token in tokenize(text) {
         into.entry(token)
@@ -91,6 +118,7 @@ impl AirlineIndex {
     pub fn build(db: &AirlinesDatabase) -> Self {
         let mut icaos: Vec<String> = Vec::with_capacity(db.airlines.len());
         let mut names: Vec<String> = Vec::with_capacity(db.airlines.len());
+        let mut phrases: Vec<[String; 3]> = Vec::with_capacity(db.airlines.len());
         let mut per: Vec<HashMap<String, f32>> = Vec::with_capacity(db.airlines.len());
 
         for a in &db.airlines {
@@ -100,6 +128,9 @@ impl AirlineIndex {
             add_tokens(&mut tokens, &a.name, W_NAME);
             icaos.push(a.icao.clone());
             names.push(a.name.clone());
+            let words = tokenize(&a.name);
+            let stripped = if words.len() >= 2 { format!(" {} ", words.join(" ")) } else { String::new() };
+            phrases.push([phrase(&a.name), phrase(&a.callsign), stripped]);
             per.push(tokens);
         }
 
@@ -124,7 +155,7 @@ impl AirlineIndex {
         // shared by many airlines (e.g. generic "sky"/"wings"-type name fragments).
         let min_score = 0.6 * (1.0 + n).ln();
 
-        Self { icaos, names, postings, idf, min_score }
+        Self { icaos, names, phrases, postings, idf, min_score }
     }
 
     /// Score `query` against every airline, returning `(airline_idx, summed_score,
@@ -178,11 +209,21 @@ impl AirlineIndex {
 
     /// Best airline match for `query`, or `None` if no candidate is supported by a
     /// sufficiently distinctive single word. Among candidates that clear that bar, the
-    /// highest summed score wins (ties broken by ICAO for determinism).
+    /// highest summed score wins (ties broken by ICAO for determinism), counting
+    /// [`min_score`](Self::min_score) more for one whose whole name or call sign is in the
+    /// query: stopwords drop "Aviation" from "Voyager Aviation", which otherwise ties
+    /// with Voyager Airlines on "voyager" alone.
     pub fn find(&self, query: &str) -> Option<AirlineMatch> {
+        let (q, stripped) = (phrase(query), format!(" {} ", tokenize(query).join(" ")));
+        let named = |idx: u32| {
+            let [name, callsign, name_words] = &self.phrases[idx as usize];
+            [name, callsign].iter().any(|p| p.trim().len() >= 3 && q.contains(p.as_str()))
+                || (!name_words.is_empty() && stripped.contains(name_words.as_str()))
+        };
         self.score(query)
             .into_iter()
             .filter(|&(_idx, _sum, best)| best >= self.min_score)
+            .map(|(idx, sum, best)| (idx, if named(idx) { sum + self.min_score } else { sum }, best))
             .max_by(|a, b| {
                 a.1.partial_cmp(&b.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -249,6 +290,21 @@ mod tests {
             "EIN"
         );
         assert_eq!(top(&idx, "FenixA320 IAE SL — Ryanair"), "RYR");
+    }
+
+    /// The livery of the author's ATR, as X-Plane names it.
+    #[test]
+    fn an_atr_is_not_atlas_airlines() {
+        let mut db = test_db();
+        db.airlines.push(al("ATR", "Atlas Airlines", "ATLAS-AIR"));
+        db.airlines.push(al("VOG", "Voyager Airlines", "VOYAGER AIR"));
+        let idx = AirlineIndex::build(&db);
+        assert!(idx.find("ATR 72-600").is_none());
+        assert_eq!(top(&idx, "ATR 72-600 Aircraft/DWSim_ATR_72_600_XP12/liveries/Voyager Aviation/"), "VYA");
+        // The call sign alone, "VOYAGER", is Voyager Aviation's; Voyager Airlines' is
+        // "VOYAGER AIR".
+        assert_eq!(top(&idx, "Voyager | N850VY"), "VYA");
+        assert_eq!(top(&idx, "Voyager Airlines 737"), "VOG");
     }
 
     #[test]
