@@ -179,6 +179,10 @@ fn negated(v: f64) -> f64 {
     -v
 }
 
+fn hundredfold(v: f64) -> f64 {
+    v * 100.0
+}
+
 fn flag(v: f64) -> f64 {
     if v > 0.5 { 1.0 } else { 0.0 }
 }
@@ -223,7 +227,8 @@ fn msfs(name: &str) -> Option<Mapping> {
         "ELECTRICAL MAIN BUS VOLTAGE:1" => m(Volts, "volts", same),
         "ELECTRICAL MAIN BUS AMPS:1" => m(Amps, "amps", same),
         "AUTOPILOT MASTER" => m(Autopilot, "bool", flag),
-        "GEAR TOTAL PCT EXTENDED" => m(Gear, "percent over 100", same),
+        // Already a fraction in the sim: "percent over 100" reads 0.01 with the gear down.
+        "GEAR TOTAL PCT EXTENDED" => m(Gear, "percent over 100", hundredfold),
         "BRAKE PARKING POSITION" => m(ParkingBrake, "bool", flag),
         "LIGHT NAV" => m(NavLights, "bool", flag),
         "LIGHT BEACON" => m(BeaconLights, "bool", flag),
@@ -542,6 +547,17 @@ mod tests {
         assert_eq!(samples[1].get(Field::Pitch), Some(5.0));
         assert_eq!(samples[2].get(Field::Pitch), Some(5.0), "carried forward");
         assert_eq!(samples[2].get(Field::Latitude), None);
+    }
+
+    /// MSFS's gear in "percent over 100" read 0.01 down; a fixed-gear Skyhawk's is down
+    /// throughout.
+    #[test]
+    fn the_msfs_gear_is_a_fraction() {
+        let path = format!("{}/tests/fixtures/msfs_pattern.blsg.zst", env!("CARGO_MANIFEST_DIR"));
+        let (_, samples) = normalise_segment(&std::fs::read(path).unwrap()).unwrap();
+        let gear: Vec<f64> = samples.iter().filter_map(|s| s.get(Field::Gear)).collect();
+        assert!(!gear.is_empty());
+        assert!(gear.iter().all(|&g| (g - 1.0).abs() < 1e-9), "{:?}", &gear[..gear.len().min(5)]);
     }
 
     #[test]
