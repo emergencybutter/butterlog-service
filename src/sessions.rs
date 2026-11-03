@@ -259,11 +259,13 @@ pub async fn store_chunk(
     .rows_affected()
         == 1;
     if inserted {
-        // A session the reaper ended for silence comes back when its client does.
+        // A session the reaper ended for silence comes back when its client does. A new
+        // chunk undoes any analysis, done when the session ended: it is analysed again,
+        // and only then compacted, when it ends again.
         sqlx::query(
             "UPDATE telemetry_sessions \
                 SET chunk_count = chunk_count + 1, chunk_bytes = chunk_bytes + $2, \
-                    last_chunk_at = NOW(), \
+                    last_chunk_at = NOW(), analyser_version = NULL, \
                     status = CASE WHEN end_reason = 'abandoned' THEN 'open' ELSE status END, \
                     ended_at = CASE WHEN end_reason = 'abandoned' THEN NULL ELSE ended_at END, \
                     end_reason = CASE WHEN end_reason = 'abandoned' THEN NULL ELSE end_reason END \
@@ -874,11 +876,22 @@ mod tests {
 
         assert!(end_abandoned(&db, 0).await.unwrap() >= 1);
         assert_eq!(cursor(&db, me, id).await.unwrap().status, "ended");
+        // Ended, it is analysed as far as it got.
+        crate::analysis::ingest::analyse_ended(&db, &TestSegments, 100).await.unwrap();
         // Within the grace period: not compacted, so the client can still resend.
         compact_ready(&db, &TestSegments, 100).await.unwrap();
         assert_eq!(cursor(&db, me, id).await.unwrap().status, "ended");
         store_chunk(&db, me, id, 1, &sent[1]).await.unwrap();
         let back = cursor(&db, me, id).await.unwrap();
         assert_eq!((back.status.as_str(), back.next_seq), ("open", 2));
+        // Back, it is analysed again when it ends: a sim paused for 84 minutes on
+        // 2026-11-03 left an EGJJ-EGPH flight ending in the air at the pause.
+        let version: Option<i32> =
+            sqlx::query_scalar("SELECT analyser_version FROM telemetry_sessions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(version, None);
     }
 }
