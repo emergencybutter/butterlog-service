@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 3;
+pub const ANALYSER_VERSION: i32 = 4;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
