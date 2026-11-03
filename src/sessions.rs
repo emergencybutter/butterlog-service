@@ -439,6 +439,43 @@ pub trait SegmentStore {
     fn get(&self, key: &str) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
 }
 
+/// Segments in memory, one store for every test: the tests share a database, and each
+/// compacts whatever sessions are ready, other tests' too.
+#[cfg(test)]
+pub struct TestSegments;
+
+#[cfg(test)]
+fn test_segments() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>> {
+    static SEGMENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    SEGMENTS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+impl SegmentStore for TestSegments {
+    async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
+        test_segments().lock().unwrap().insert(key.to_string(), data);
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
+        test_segments().lock().unwrap().get(key).cloned().ok_or_else(|| format!("no object {key}"))
+    }
+}
+
+/// No segment store: nothing is compacted, so nothing is read back.
+pub struct NoSegments;
+
+impl SegmentStore for NoSegments {
+    async fn put(&self, _key: &str, _data: Vec<u8>) -> Result<(), String> {
+        Err("no telemetry bucket".into())
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
+        Err(format!("no telemetry bucket to read {key} from"))
+    }
+}
+
 pub struct R2Segments {
     pub r2: crate::r2::R2Client,
     pub bucket: String,
@@ -542,7 +579,11 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
                 Err(e) => tracing::error!("telemetry session reaper failed: {e}"),
                 _ => {}
             }
-            match crate::analysis::ingest::analyse_ended(&db, 10).await {
+            let analysed = match &store {
+                Some(store) => crate::analysis::ingest::analyse_ended(&db, store, 10).await,
+                None => crate::analysis::ingest::analyse_ended(&db, &NoSegments, 10).await,
+            };
+            match analysed {
                 Ok(n) if n > 0 => tracing::info!(count = n, "analysed telemetry sessions"),
                 Err(e) => tracing::error!("telemetry analysis failed: {e}"),
                 _ => {}
@@ -610,8 +651,6 @@ mod tests {
         decode_segment, Aircraft, Channel, DeltaOrder, Event, EventKind, Kind, RateClass,
         SessionEncoder, SessionHeader, Tick, Value,
     };
-    use std::collections::HashMap;
-    use std::sync::Mutex;
 
     async fn db() -> Option<PgPool> {
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
@@ -674,20 +713,6 @@ mod tests {
                 (payload, sent)
             })
             .unzip()
-    }
-
-    #[derive(Default)]
-    struct MemStore(Mutex<HashMap<String, Vec<u8>>>);
-
-    impl SegmentStore for MemStore {
-        async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
-            self.0.lock().unwrap().insert(key.to_string(), data);
-            Ok(())
-        }
-
-        async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
-            self.0.lock().unwrap().get(key).cloned().ok_or_else(|| format!("no object {key}"))
-        }
     }
 
     /// The app parses this shape (`telemetry/uploader.rs`, `the_open_reply_carries_the_identity`).
@@ -814,15 +839,15 @@ mod tests {
         }
         assert_eq!(end_session(&db, me, id).await.unwrap().status, "ended");
 
-        let store = MemStore::default();
+        let store = TestSegments;
         // Not before it is analysed. Other tests' sessions may be ready too; go on until
         // this one is done.
         while cursor(&db, me, id).await.unwrap().status != "compacted" {
-            crate::analysis::ingest::analyse_ended(&db, 100).await.unwrap();
+            crate::analysis::ingest::analyse_ended(&db, &store, 100).await.unwrap();
             assert!(compact_ready(&db, &store, 100).await.unwrap() > 0);
         }
         let key = format!("sessions/{me}/{id}.blsg.zst");
-        let stored = store.0.lock().unwrap().remove(&key).expect("segment stored");
+        let stored = test_segments().lock().unwrap().get(&key).cloned().expect("segment stored");
         let segment = decode_segment(&decompress(&stored).unwrap()).unwrap();
         assert_eq!(segment.open, open);
         assert_eq!(
@@ -850,7 +875,7 @@ mod tests {
         assert!(end_abandoned(&db, 0).await.unwrap() >= 1);
         assert_eq!(cursor(&db, me, id).await.unwrap().status, "ended");
         // Within the grace period: not compacted, so the client can still resend.
-        compact_ready(&db, &MemStore::default(), 100).await.unwrap();
+        compact_ready(&db, &TestSegments, 100).await.unwrap();
         assert_eq!(cursor(&db, me, id).await.unwrap().status, "ended");
         store_chunk(&db, me, id, 1, &sent[1]).await.unwrap();
         let back = cursor(&db, me, id).await.unwrap();

@@ -128,6 +128,11 @@ impl Sample {
     pub fn get(&self, field: Field) -> Option<f64> {
         self.values[field.index()]
     }
+
+    #[cfg(test)]
+    pub fn set(&mut self, field: Field, value: f64) {
+        self.values[field.index()] = Some(value);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,13 +6,17 @@
 //! version too, so it doesn't hold compaction back; bumping the version retries it.
 //! Sessions already compacted are analysed again from their segment in R2, a few at a time
 //! ([`analyse_compacted`]).
+//!
+//! A session that picks up the flight of the one before it, after a client restart
+//! (`analysis/resume.rs`), is analysed with it as one stream, and the stream's flights are
+//! stored under its first session.
 
 use super::flight::Endpoint;
 use super::{analyse, FlightSummary, Places};
 use crate::error::AppError;
-use crate::normalise::normalise;
+use crate::normalise::{normalise, Sample};
 use crate::sessions::SegmentStore;
-use butterlog_wire::{decode_segment, decompress, SessionDecoder, SessionOpen};
+use butterlog_wire::{decode_segment, decompress, SessionDecoder, SessionHeader, SessionOpen};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -49,23 +53,28 @@ fn places() -> Option<&'static Places> {
 /// (`analysis/statistics.rs`).
 type Analysed = Vec<(FlightSummary, Value, Value)>;
 
-/// A session's chunks as uploaded (zstd each, in order), analysed.
-fn analyse_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<Analysed, String> {
-    let payloads = chunks.iter().map(|c| decompress(c).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
-    analyse_payloads(open, &payloads)
+/// One session, decoded.
+struct Part {
+    header: SessionHeader,
+    samples: Vec<Sample>,
 }
 
-/// A compacted session's segment, as stored in R2, analysed.
-fn analyse_segment(compressed: &[u8]) -> Result<Analysed, String> {
+/// A session's chunks as uploaded (zstd each, in order), decoded.
+fn decode_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<Part, String> {
+    let payloads = chunks.iter().map(|c| decompress(c).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    decode_payloads(open, &payloads)
+}
+
+/// A compacted session's segment, as stored in R2, decoded.
+fn decode_stored_segment(compressed: &[u8]) -> Result<Part, String> {
     let raw = decompress(compressed).map_err(|e| e.to_string())?;
     let segment = decode_segment(&raw).map_err(|e| e.to_string())?;
     let payloads: Vec<Vec<u8>> = segment.chunks.into_iter().map(|(_, p)| p).collect();
-    analyse_payloads(&segment.open, &payloads)
+    decode_payloads(&segment.open, &payloads)
 }
 
-/// Decodes a session's chunk payloads, in order, and analyses its flights, each as stored.
-fn analyse_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Analysed, String> {
-    let places = places().ok_or("airport data is not loaded")?;
+/// Decodes a session's chunk payloads, in order, into samples.
+fn decode_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Part, String> {
     let (open, _) = SessionOpen::decode(open).map_err(|e| e.to_string())?;
     let mut decoder = SessionDecoder::new(open.channels.clone());
     let mut ticks = Vec::new();
@@ -73,11 +82,171 @@ fn analyse_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Analysed, Strin
         ticks.extend(decoder.decode(payload).map_err(|e| e.to_string())?.ticks);
     }
     let samples = normalise(&open, ticks).map_err(|e| e.to_string())?;
-    Ok(analyse(&samples, places).into_iter().map(|f| {
-        let json = summary_json(&f, places);
-        let statistics = super::statistics::statistics(&open.header, &f, &samples, places);
-        (f, json, statistics)
-    }).collect())
+    Ok(Part { header: open.header, samples })
+}
+
+/// The flights of a stream of samples, each as stored. `header` is its first session's.
+fn analyse_samples(header: &SessionHeader, samples: &[Sample]) -> Result<Analysed, String> {
+    let places = places().ok_or("airport data is not loaded")?;
+    Ok(analyse(samples, places)
+        .into_iter()
+        .map(|f| {
+            let json = summary_json(&f, places);
+            let statistics = super::statistics::statistics(header, &f, samples, places);
+            (f, json, statistics)
+        })
+        .collect())
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, AppError> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| AppError::Storage(e.to_string()))
+}
+
+/// A session's samples, from its chunks in Postgres or, once compacted, its segment. An
+/// `Err` inside is the session's own problem, not the database's.
+async fn load(db: &PgPool, segments: &impl SegmentStore, id: Uuid) -> Result<Result<Part, String>, AppError> {
+    let (status, open, key): (String, Vec<u8>, Option<String>) =
+        sqlx::query_as("SELECT status, open_blob, segment_key FROM telemetry_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await?;
+    if status != "compacted" {
+        let chunks: Vec<Vec<u8>> =
+            sqlx::query_scalar("SELECT data FROM telemetry_chunks WHERE session_id = $1 ORDER BY seq")
+                .bind(id)
+                .fetch_all(db)
+                .await?;
+        return blocking(move || decode_chunks(&open, &chunks)).await;
+    }
+    match key {
+        // Compacted with no chunks: no segment.
+        None => blocking(move || decode_payloads(&open, &[])).await,
+        Some(key) => match segments.get(&key).await {
+            Ok(bytes) => blocking(move || decode_stored_segment(&bytes)).await,
+            Err(e) => Ok(Err(e)),
+        },
+    }
+}
+
+/// The longest chain of sessions analysed as one stream.
+const MAX_CHAIN: usize = 50;
+
+/// The sessions `id` continues, first to last, ending with `id`.
+async fn chain_to(db: &PgPool, id: Uuid) -> Result<Vec<Uuid>, AppError> {
+    let mut chain = vec![id];
+    loop {
+        let at = *chain.last().expect("not empty");
+        let previous: Option<Uuid> = sqlx::query_scalar("SELECT continues FROM telemetry_sessions WHERE id = $1")
+            .bind(at)
+            .fetch_one(db)
+            .await?;
+        match previous {
+            Some(p) if !chain.contains(&p) && chain.len() < MAX_CHAIN => chain.push(p),
+            _ => break,
+        }
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+/// Sessions analysed as one: their ids, first to last, their samples joined, and the
+/// first one's header.
+struct Stream {
+    ids: Vec<Uuid>,
+    samples: Vec<Sample>,
+    header: SessionHeader,
+}
+
+/// The stream session `id` continues, if it does (`analysis/resume.rs`): among the
+/// user's latest sessions before it that no other session continues, the first in the
+/// same aircraft whose stream ends in the air where this one starts.
+async fn resumed(db: &PgPool, segments: &impl SegmentStore, id: Uuid, session: &Part) -> Result<Option<Stream>, AppError> {
+    let candidates: Vec<(Uuid, Value)> = sqlx::query_as(
+        "SELECT s.id, s.aircraft FROM telemetry_sessions s JOIN telemetry_sessions x ON x.id = $1 \
+          WHERE s.user_id = x.user_id AND s.started_at < x.started_at AND s.id <> x.id \
+            AND s.chunk_count > 0 AND s.status IN ('ended', 'compacted') \
+            AND s.invalid_seq IS NULL AND s.next_seq = s.chunk_count \
+            AND NOT EXISTS (SELECT 1 FROM telemetry_sessions c WHERE c.continues = s.id AND c.id <> x.id) \
+          ORDER BY s.started_at DESC LIMIT $2",
+    )
+    .bind(id)
+    .bind(super::resume::CANDIDATES)
+    .fetch_all(db)
+    .await?;
+    let Some(places) = places() else { return Ok(None) };
+    'candidates: for (candidate, aircraft) in candidates {
+        if aircraft["title"].as_str() != Some(session.header.aircraft.title.as_str()) {
+            continue;
+        }
+        let ids = chain_to(db, candidate).await?;
+        let mut samples = Vec::new();
+        let mut header = None;
+        for &part in &ids {
+            match load(db, segments, part).await? {
+                Ok(p) => {
+                    header.get_or_insert(p.header);
+                    super::resume::join(&mut samples, p.samples);
+                }
+                Err(e) => {
+                    tracing::warn!(session = %part, "telemetry session not loaded to resume from: {e}");
+                    continue 'candidates;
+                }
+            }
+        }
+        let (samples, flights) = blocking(move || {
+            let flights = analyse(&samples, places);
+            (samples, flights)
+        })
+        .await?;
+        if super::resume::continues(&samples, &flights, &session.samples) {
+            let header = header.expect("a chain has a session");
+            return Ok(Some(Stream { ids, samples, header }));
+        }
+    }
+    Ok(None)
+}
+
+/// Analyses a session as part of its stream: the sessions it continues, itself, and those
+/// that continue it. The stream's flights are stored under its first session.
+async fn analyse_session(db: &PgPool, segments: &impl SegmentStore, id: Uuid, user_id: i64) -> Result<(), AppError> {
+    let session = match load(db, segments, id).await? {
+        Ok(p) => p,
+        Err(e) => return store(db, id, &[id], None, user_id, Err(e)).await,
+    };
+    let mut stream = match resumed(db, segments, id, &session).await? {
+        Some(s) => s,
+        None => Stream { ids: Vec::new(), samples: Vec::new(), header: session.header.clone() },
+    };
+    let continues = stream.ids.last().copied();
+    stream.ids.push(id);
+    super::resume::join(&mut stream.samples, session.samples);
+    // Those that continue it, as they were linked.
+    loop {
+        let tail = *stream.ids.last().expect("the session itself");
+        let next: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM telemetry_sessions \
+              WHERE continues = $1 AND status IN ('ended', 'compacted') \
+                AND invalid_seq IS NULL AND next_seq = chunk_count \
+              ORDER BY started_at LIMIT 1",
+        )
+        .bind(tail)
+        .fetch_optional(db)
+        .await?;
+        let Some(next) = next.filter(|n| !stream.ids.contains(n) && stream.ids.len() < MAX_CHAIN) else { break };
+        match load(db, segments, next).await? {
+            Ok(p) => {
+                super::resume::join(&mut stream.samples, p.samples);
+                stream.ids.push(next);
+            }
+            Err(e) => {
+                tracing::warn!(session = %next, "telemetry session not loaded to continue: {e}");
+                break;
+            }
+        }
+    }
+    let Stream { ids, samples, header } = stream;
+    let analysed = blocking(move || analyse_samples(&header, &samples)).await?;
+    store(db, id, &ids, continues, user_id, analysed).await
 }
 
 /// The app's timestamps: UTC, "2026-11-01 01:09:47.776".
@@ -150,9 +319,9 @@ fn summary_json(f: &FlightSummary, places: &Places) -> Value {
 
 /// Analyses up to `limit` ended sessions whose chunks are all in and decoded, and that
 /// this analyser version hasn't seen.
-pub async fn analyse_ended(db: &PgPool, limit: i64) -> Result<usize, AppError> {
-    let ready: Vec<(Uuid, i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, user_id, open_blob FROM telemetry_sessions \
+pub async fn analyse_ended(db: &PgPool, segments: &impl SegmentStore, limit: i64) -> Result<usize, AppError> {
+    let ready: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT id, user_id FROM telemetry_sessions \
           WHERE status = 'ended' AND invalid_seq IS NULL AND next_seq = chunk_count \
             AND analyser_version IS DISTINCT FROM $1 \
           ORDER BY ended_at LIMIT $2",
@@ -162,55 +331,64 @@ pub async fn analyse_ended(db: &PgPool, limit: i64) -> Result<usize, AppError> {
     .fetch_all(db)
     .await?;
 
-    for (id, user_id, open) in &ready {
-        let chunks: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT data FROM telemetry_chunks WHERE session_id = $1 ORDER BY seq")
-                .bind(id)
-                .fetch_all(db)
-                .await?;
-        let open = open.clone();
-        let analysed = tokio::task::spawn_blocking(move || analyse_chunks(&open, &chunks))
-            .await
-            .map_err(|e| AppError::Storage(e.to_string()))?;
-        store(db, *id, *user_id, analysed).await?;
+    for (id, user_id) in &ready {
+        analyse_session(db, segments, *id, *user_id).await?;
     }
     Ok(ready.len())
 }
 
-/// Analyses up to `limit` compacted sessions again from their segments, most recent first,
-/// when the analyser version changed since. A session compacted with no chunks has no
-/// segment and no flights.
+/// Analyses up to `limit` compacted sessions again from their segments when the analyser
+/// version changed since, oldest first: a session resumes the stream of those before it,
+/// whose links must be made first. A session compacted with no chunks has no segment and
+/// no flights.
 pub async fn analyse_compacted(db: &PgPool, segments: &impl SegmentStore, limit: i64) -> Result<usize, AppError> {
-    let stale: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, user_id, segment_key FROM telemetry_sessions \
+    let stale: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT id, user_id FROM telemetry_sessions \
           WHERE status = 'compacted' AND analyser_version IS DISTINCT FROM $1 \
-          ORDER BY compacted_at DESC LIMIT $2",
+          ORDER BY started_at LIMIT $2",
     )
     .bind(ANALYSER_VERSION)
     .bind(limit)
     .fetch_all(db)
     .await?;
 
-    for (id, user_id, key) in &stale {
-        let analysed = match key {
-            None => Ok(Vec::new()),
-            // A segment that can't be read is an error for this session, not for the batch.
-            Some(key) => match segments.get(key).await {
-                Ok(bytes) => tokio::task::spawn_blocking(move || analyse_segment(&bytes))
-                    .await
-                    .map_err(|e| AppError::Storage(e.to_string()))?,
-                Err(e) => Err(e),
-            },
-        };
-        store(db, *id, *user_id, analysed).await?;
+    for (id, user_id) in &stale {
+        // Analysed since the batch was read, with another session's stream.
+        let version: Option<i32> = sqlx::query_scalar("SELECT analyser_version FROM telemetry_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await?;
+        if version != Some(ANALYSER_VERSION) {
+            analyse_session(db, segments, *id, *user_id).await?;
+        }
     }
     Ok(stale.len())
 }
 
-/// Replaces a session's flights with this analysis, or records why it failed.
-async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, String>) -> Result<(), AppError> {
+/// Replaces the flights of a stream of sessions, `ids` first to last, with this analysis,
+/// stored under the first; or records why it failed. `session` is the one analysed, which
+/// `continues` the stream before it.
+async fn store(
+    db: &PgPool,
+    session: Uuid,
+    ids: &[Uuid],
+    continues: Option<Uuid>,
+    user_id: i64,
+    analysed: Result<Analysed, String>,
+) -> Result<(), AppError> {
+    let id = ids[0];
     let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&mut *tx).await?;
+    // One analysis of these sessions at a time stores its flights.
+    sqlx::query("SELECT id FROM telemetry_sessions WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        .bind(ids)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM telemetry_flights WHERE session_id = ANY($1)").bind(ids).execute(&mut *tx).await?;
+    sqlx::query("UPDATE telemetry_sessions SET continues = $2 WHERE id = $1")
+        .bind(session)
+        .bind(continues)
+        .execute(&mut *tx)
+        .await?;
     let error = match analysed {
         Ok(flights) => {
             for (idx, (f, summary, statistics)) in flights.iter().enumerate() {
@@ -255,9 +433,9 @@ async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, S
     };
     sqlx::query(
         "UPDATE telemetry_sessions \
-            SET analyser_version = $2, analysis_error = $3, analysed_at = NOW() WHERE id = $1",
+            SET analyser_version = $2, analysis_error = $3, analysed_at = NOW() WHERE id = ANY($1)",
     )
-    .bind(id)
+    .bind(ids)
     .bind(ANALYSER_VERSION)
     .bind(error)
     .execute(&mut *tx)
@@ -269,6 +447,7 @@ async fn store(db: &PgPool, id: Uuid, user_id: i64, analysed: Result<Analysed, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::TestSegments;
 
     fn flight(takeoff: Option<i64>, first: i64) -> FlightSummary {
         FlightSummary {
@@ -365,7 +544,7 @@ mod tests {
             .fetch_one(&db)
         };
         while version().await.unwrap().0.is_none() {
-            assert!(analyse_ended(&db, 100).await.unwrap() > 0);
+            assert!(analyse_ended(&db, &TestSegments, 100).await.unwrap() > 0);
         }
         assert_eq!(version().await.unwrap(), (Some(ANALYSER_VERSION), None));
 
@@ -391,7 +570,7 @@ mod tests {
         assert_eq!(parity["landing_score"]["app"], json!(-142.24));
 
         // Compacted, then analysed by an older version: analysed again from its segment.
-        let segments = MemStore::default();
+        let segments = TestSegments;
         while sqlx::query_scalar::<_, String>("SELECT status FROM telemetry_sessions WHERE id = $1")
             .bind(id)
             .fetch_one(&db)
@@ -421,17 +600,107 @@ mod tests {
         assert_eq!(again, ("KAST".to_string(), Some(flight)));
     }
 
-    #[derive(Default)]
-    struct MemStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
-
-    impl SegmentStore for MemStore {
-        async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), String> {
-            self.0.lock().unwrap().insert(key.to_string(), data);
-            Ok(())
+    /// A chunk payload with its sequence number changed (`format u8 | seq varint | ...`),
+    /// and whether it is a keyframe.
+    fn renumbered(payload: &[u8], seq: u32) -> (Vec<u8>, bool) {
+        let mut at = 1;
+        while payload[at] & 0x80 != 0 {
+            at += 1;
         }
-
-        async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
-            self.0.lock().unwrap().get(key).cloned().ok_or_else(|| format!("no object {key}"))
+        at += 1;
+        let mut out = vec![payload[0]];
+        let mut v = seq;
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
         }
+        out.extend_from_slice(&payload[at..]);
+        (out, payload[at] == 1)
+    }
+
+    /// The X-Plane pattern, as if the app restarted in the air: one session up to a
+    /// keyframe halfway through, the next from it. One flight, under the first.
+    #[tokio::test]
+    async fn a_session_after_a_restart_in_the_air_continues_the_flight() {
+        use crate::sessions::{end_session, open_session, store_chunk};
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (discord_id, username) VALUES ($1, 'test') RETURNING id",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        let path = format!("{}/tests/fixtures/xplane_pattern.blsg.zst", env!("CARGO_MANIFEST_DIR"));
+        let segment = butterlog_wire::decode_segment(&decompress(&std::fs::read(path).unwrap()).unwrap()).unwrap();
+        let keyframes: Vec<usize> =
+            (1..segment.chunks.len()).filter(|&i| renumbered(&segment.chunks[i].1, 0).1).collect();
+        let cut = keyframes[keyframes.len() / 2];
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        open_session(&db, user, first, &segment.open).await.unwrap();
+        for (seq, payload) in &segment.chunks[..cut] {
+            store_chunk(&db, user, first, *seq, &butterlog_wire::compress(payload, 3)).await.unwrap();
+        }
+        end_session(&db, user, first).await.unwrap();
+        open_session(&db, user, second, &segment.open).await.unwrap();
+        for (seq, (_, payload)) in segment.chunks[cut..].iter().enumerate() {
+            let (payload, _) = renumbered(payload, seq as u32);
+            store_chunk(&db, user, second, seq as u32, &butterlog_wire::compress(&payload, 3)).await.unwrap();
+        }
+        end_session(&db, user, second).await.unwrap();
+
+        let segments = TestSegments;
+        let analysed = |id: Uuid| {
+            sqlx::query_scalar::<_, Option<i32>>("SELECT analyser_version FROM telemetry_sessions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+        };
+        while analysed(second).await.unwrap() != Some(ANALYSER_VERSION) {
+            assert!(analyse_ended(&db, &segments, 100).await.unwrap() > 0);
+        }
+        let continues: Option<Uuid> = sqlx::query_scalar("SELECT continues FROM telemetry_sessions WHERE id = $1")
+            .bind(second)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(continues, Some(first));
+        let flights = || {
+            sqlx::query_as::<_, (Uuid, String, String)>(
+                "SELECT session_id, departure, arrival FROM telemetry_flights WHERE session_id = ANY($1)",
+            )
+            .bind([first, second])
+            .fetch_all(&db)
+        };
+        assert_eq!(flights().await.unwrap(), [(first, "KAST".to_string(), "KAST".to_string())]);
+
+        // Compacted, and analysed again from the segments by the later session: the same.
+        while sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM telemetry_sessions WHERE id = ANY($1) AND status <> 'compacted'",
+        )
+        .bind([first, second])
+        .fetch_one(&db)
+        .await
+        .unwrap()
+            > 0
+        {
+            assert!(crate::sessions::compact_ready(&db, &segments, 100).await.unwrap() > 0);
+        }
+        sqlx::query("UPDATE telemetry_sessions SET analyser_version = $2 WHERE id = ANY($1)")
+            .bind([first, second])
+            .bind(ANALYSER_VERSION - 1)
+            .execute(&db)
+            .await
+            .unwrap();
+        analyse_session(&db, &segments, second, user).await.unwrap();
+        assert_eq!(analysed(first).await.unwrap(), Some(ANALYSER_VERSION));
+        assert_eq!(flights().await.unwrap(), [(first, "KAST".to_string(), "KAST".to_string())]);
     }
 }
