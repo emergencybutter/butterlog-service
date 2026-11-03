@@ -12,11 +12,7 @@
 //! - Ground contact must hold for [`GROUND_HOLD_MS`] to count, from its first sample:
 //!   MSFS flickers it at liftoff, which at frame rate reads as touch-and-goes.
 //! - A session is split into flights as the app splits its logs: at a teleport, such as
-//!   a flight being loaded, and from the first time the aircraft moves. A teleport from
-//!   the air to the air is a reposition, not a new flight: a pilot reloading the sim
-//!   mid-flight puts the aircraft back further along the route. The app, a second
-//!   between samples and minutes across the reload, saw it as flying there; at frame
-//!   rate it is a jump between two frames.
+//!   a flight being loaded, and from the first time the aircraft moves.
 //! - Touchdown vertical speed is the last airborne sample's, now a frame before the
 //!   wheels touch rather than up to a second.
 
@@ -675,25 +671,21 @@ fn distance_nm(a: &Point, b: &Point) -> f64 {
 }
 
 /// Splits at teleports: a move further than the ground speed could have carried the
-/// aircraft, with the aircraft on the ground on either side. One in the air on both is a
-/// reposition: the flight goes on, its climb and descent timers started over as after a
-/// pause.
-fn split_at_teleports(points: &mut [Point]) -> Vec<&[Point]> {
-    let mut starts = vec![0];
+/// aircraft.
+fn split_at_teleports(points: &[Point]) -> Vec<&[Point]> {
+    let mut parts = Vec::new();
+    let mut start = 0;
     for i in 1..points.len() {
         let (a, b) = (&points[i - 1], &points[i]);
         let hours = (b.t - a.t).max(0) as f64 / 3_600_000.0;
         let plausible = a.gs.max(0.0) * hours * TELEPORT_SPEED_FACTOR + TELEPORT_MARGIN_NM;
         if distance_nm(a, b) > plausible {
-            if a.on_ground || b.on_ground {
-                starts.push(i);
-            } else {
-                points[i].resumed = true;
-            }
+            parts.push(&points[start..i]);
+            start = i;
         }
     }
-    let points = &*points;
-    starts.iter().zip(starts.iter().skip(1).chain([&points.len()])).map(|(&a, &b)| &points[a..b]).collect()
+    parts.push(&points[start..]);
+    parts
 }
 
 /// The flights in a session's samples, in order: each from the aircraft's first move
@@ -709,7 +701,7 @@ pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
         }
     }
     debounce_ground(&mut points);
-    split_at_teleports(&mut points)
+    split_at_teleports(&points)
         .into_iter()
         .filter_map(|part| {
             let moving = part.iter().position(|p| p.gs > MOVING_KT)?;
@@ -908,23 +900,8 @@ mod tests {
         for p in &mut points[6..] {
             p.lat += 1.0;
         }
-        let parts = split_at_teleports(&mut points);
+        let parts = split_at_teleports(&points);
         assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [6, 4]);
-    }
-
-    /// The LFBO to EGJJ flight of 2026-11-02: reloaded at FL202, put back 52 nm on at
-    /// FL138, one frame to the next.
-    #[test]
-    fn a_reposition_in_the_air_is_the_same_flight() {
-        let mut points: Vec<Point> =
-            (0..10).map(|i| Point { gs: 233.0, on_ground: false, ..point(i as f64 * 0.033) }).collect();
-        for p in &mut points[6..] {
-            p.lat += 0.87;
-        }
-        let parts = split_at_teleports(&mut points);
-        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [10]);
-        assert!(parts[0][6].resumed, "timers start over");
-        assert!(!parts[0][5].resumed);
     }
 
     #[test]
