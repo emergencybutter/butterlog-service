@@ -60,6 +60,42 @@ pub async fn start_discord_bot(token: &str) -> Result<Arc<serenity::http::Http>,
     Ok(http_client)
 }
 
+/// Discord's JSON error code for a channel that doesn't exist: deleted, or never there.
+const UNKNOWN_CHANNEL: isize = 10003;
+
+fn is_unknown_channel(e: &serenity::Error) -> bool {
+    matches!(
+        e,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(r)) if r.error.code == UNKNOWN_CHANNEL
+    )
+}
+
+/// Drops a channel Discord says no longer exists, as an admin removing it would
+/// (`handlers.rs`), and the record of the posts made there: otherwise every flight of
+/// every member tries it again, and the hourly refresh puts it back on their lists.
+async fn forget_channel(db: &PgPool, channel: &str) {
+    let forgotten = async {
+        let mut tx = db.begin().await?;
+        sqlx::query("DELETE FROM discord_notification_channels WHERE channel_id = $1")
+            .bind(channel)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM flight_discord_messages WHERE discord_channel_id = $1")
+            .bind(channel)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM allowlisted_channels WHERE channel_id = $1")
+            .bind(channel)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    };
+    match forgotten.await {
+        Ok(()) => tracing::warn!("Discord channel {channel} no longer exists; removed it"),
+        Err(e) => tracing::error!("Failed to remove deleted Discord channel {channel}: {e}"),
+    }
+}
+
 pub async fn validate_discord_channel(http: &serenity::http::Http, channel_id: u64) -> Result<(), String> {
     let chan_id = ChannelId::new(channel_id);
     let channel = chan_id.to_channel(http).await
@@ -519,6 +555,7 @@ pub async fn sync_flight_discord(
             tracing::info!("[Outgoing Request] Discord EDIT message {} in channel {}", msg_id, channel_id);
             match channel_id.edit_message(http, msg_id, builder).await {
                 Ok(_) => tracing::info!("[Outgoing Response] Edited message {} successfully", msg_id),
+                Err(e) if is_unknown_channel(&e) => forget_channel(db, channel_str).await,
                 Err(e) => tracing::error!("Failed to edit Discord message {} in channel {}: {:?}", msg_id, channel_id, e),
             }
         } else {
@@ -562,6 +599,7 @@ pub async fn sync_flight_discord(
                     .execute(db)
                     .await;
                 }
+                Err(e) if is_unknown_channel(&e) => forget_channel(db, channel_str).await,
                 Err(e) => {
                     tracing::error!("Failed to send Discord message in channel {}: {:?}", channel_id, e);
                     // Release the claim so a later sync can retry.
@@ -963,6 +1001,62 @@ pub async fn get_bot_guilds_and_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Against a real Postgres, given by `TEST_DATABASE_URL` (skipped without it).
+    #[tokio::test]
+    async fn a_deleted_channel_is_forgotten_and_no_other() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let user: i64 = sqlx::query_scalar("INSERT INTO users (discord_id, username) VALUES ($1, 'test') RETURNING id")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let flight: i64 =
+            sqlx::query_scalar("INSERT INTO flights (user_id, departure, arrival, statistics) VALUES ($1, 'KAST', 'KAST', '{}') RETURNING id")
+                .bind(user)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let (gone, kept) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        for channel in [&gone, &kept] {
+            sqlx::query("INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, 'flightlogs', '1')")
+                .bind(channel)
+                .execute(&db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2)")
+                .bind(user)
+                .bind(channel)
+                .execute(&db)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO flight_discord_messages (flight_id, discord_message_id, discord_channel_id) VALUES ($1, '1', $2)",
+            )
+            .bind(flight)
+            .bind(channel)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        forget_channel(&db, &gone).await;
+
+        for (channel, expected) in [(&gone, 0), (&kept, 1)] {
+            let counts: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM allowlisted_channels WHERE channel_id = $1), \
+                        (SELECT COUNT(*) FROM discord_notification_channels WHERE channel_id = $1), \
+                        (SELECT COUNT(*) FROM flight_discord_messages WHERE discord_channel_id = $1)",
+            )
+            .bind(channel)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(counts, (expected, expected, expected), "channel {channel}");
+        }
+    }
 
     #[test]
     fn format_timestamp_handles_rfc3339_and_log_format() {
