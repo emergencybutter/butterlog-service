@@ -130,6 +130,11 @@ impl Sample {
     }
 
     #[cfg(test)]
+    pub fn empty() -> Self {
+        Sample { sim_time: 0.0, wall_time_ms: 0, flags: 0, events: Vec::new(), values: [None; FIELDS] }
+    }
+
+    #[cfg(test)]
     pub fn set(&mut self, field: Field, value: f64) {
         self.values[field.index()] = Some(value);
     }

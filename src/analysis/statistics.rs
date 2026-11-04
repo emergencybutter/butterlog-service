@@ -98,13 +98,30 @@ fn maxima(samples: &[&Sample]) -> Map<String, Value> {
 
 /// The fuel on board at the first sample with any, less that at the last, in the units of
 /// `FQtyL` and `FQtyR`: the app's `fuel_consumed`, which it keeps in its log but has never
-/// uploaded, so the feed's is empty for its flights.
+/// uploaded, so the feed's is empty for its flights. None when fuel was added on the way, by
+/// a refuel or a reload, which makes the difference meaningless: the flight that began in
+/// the air after an LFBO-EGJJ reload on 2026-11-02 came out at -24.2.
 fn fuel_consumed(samples: &[&Sample]) -> Option<f64> {
-    let total = |s: &&Sample| Some(s.get(Field::FuelLeft)? + s.get(Field::FuelRight)?).filter(|t| *t > 0.0);
-    let first = samples.iter().find_map(total)?;
-    let last = samples.iter().rev().find_map(total)?;
+    let totals: Vec<f64> = samples
+        .iter()
+        .filter_map(|s| Some(s.get(Field::FuelLeft)? + s.get(Field::FuelRight)?))
+        .filter(|t| *t > 0.0)
+        .collect();
+    let (&first, &last) = (totals.first()?, totals.last()?);
+    // More than sloshing: a quantity the gauges don't wander by.
+    let added = REFUEL_FRACTION * first.max(1.0 / REFUEL_FRACTION);
+    let mut lowest = first;
+    for &t in &totals {
+        if t > lowest + added {
+            return None;
+        }
+        lowest = lowest.min(t);
+    }
     Some(first - last)
 }
+
+/// Fuel going up by this fraction of the starting quantity (or by 1) is fuel added.
+const REFUEL_FRACTION: f64 = 0.005;
 
 /// How the app names the sim.
 fn simulator(sim: &str) -> (&'static str, &'static str) {
@@ -213,5 +230,19 @@ mod tests {
         assert!(takeoff["IAS"].as_f64().unwrap() >= 45.0, "{}", takeoff["IAS"]);
         let burnt = s["fuel_consumed"].as_f64().unwrap();
         assert!(burnt > 0.0, "{burnt}");
+    }
+
+    #[test]
+    fn fuel_added_on_the_way_is_no_fuel_used() {
+        let at = |left: f64, right: f64| {
+            let mut s = Sample::empty();
+            s.set(Field::FuelLeft, left);
+            s.set(Field::FuelRight, right);
+            s
+        };
+        let burn = [at(100.0, 100.0), at(99.6, 100.1), at(90.0, 90.0)];
+        assert_eq!(fuel_consumed(&burn.iter().collect::<Vec<_>>()), Some(20.0), "a slosh is not a refuel");
+        let refuel = [at(100.0, 100.0), at(80.0, 80.0), at(110.0, 110.0), at(105.0, 105.0)];
+        assert_eq!(fuel_consumed(&refuel.iter().collect::<Vec<_>>()), None);
     }
 }
