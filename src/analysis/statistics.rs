@@ -123,6 +123,59 @@ fn fuel_consumed(samples: &[&Sample]) -> Option<f64> {
 /// Fuel going up by this fraction of the starting quantity (or by 1) is fuel added.
 const REFUEL_FRACTION: f64 = 0.005;
 
+/// The airport nearest a sample, as the app's `closest_airport`: distance in nautical miles.
+fn closest_airport(s: &Sample, places: &Places) -> Option<Value> {
+    let (lat, lon) = (s.get(Field::Latitude)?, s.get(Field::Longitude)?);
+    let a = places.best_airport(lat, lon)?;
+    let km = super::places::haversine_km(lat, lon, a.latitude_deg?, a.longitude_deg?);
+    Some(json!({ "icao": a.ident, "name": a.name, "distance": km / 1.852 }))
+}
+
+/// A flight's track as the app uploads it to `flight_track_points`: the first sample of
+/// each second, in the app's keys and signs.
+pub fn track(f: &FlightSummary, samples: &[Sample]) -> Vec<crate::track::DecodedPoint> {
+    let mut points = Vec::new();
+    let mut last_epoch = None;
+    for s in samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)) {
+        let epoch = s.wall_time_ms.div_euclid(1000);
+        if last_epoch == Some(epoch) {
+            continue;
+        }
+        let (Some(lat), Some(lon)) = (s.get(Field::Latitude), s.get(Field::Longitude)) else { continue };
+        last_epoch = Some(epoch);
+        let v = |field: Field| s.get(field).map(|x| x as f32);
+        points.push(crate::track::DecodedPoint {
+            epoch,
+            latitude: lat as f32,
+            longitude: lon as f32,
+            altitude: v(Field::AltitudeIndicated),
+            ias: v(Field::Ias),
+            vspeed: v(Field::VerticalSpeed),
+            pitch: v(Field::Pitch).map(|x| -x),
+            roll: v(Field::Roll).map(|x| -x),
+            heading: v(Field::HeadingMagnetic),
+            track: v(Field::Track),
+            ground_speed: v(Field::GroundSpeed),
+            true_airspeed: v(Field::Tas),
+            baro: v(Field::Baro),
+            magvar: v(Field::MagneticVariation),
+            g_load: v(Field::GNormal),
+            oat: v(Field::Oat),
+            wind_speed: v(Field::WindSpeed),
+            wind_dir: v(Field::WindDirection),
+            fuel_flow: v(Field::FuelFlow),
+            fuel_left: v(Field::FuelLeft),
+            fuel_right: v(Field::FuelRight),
+            rpm: v(Field::Rpm),
+            pct_power: v(Field::PctRpm),
+            manifold: v(Field::Manifold),
+            oil_temp: v(Field::OilTemp),
+            oil_press: v(Field::OilPressure),
+        });
+    }
+    points
+}
+
 /// How the app names the sim.
 fn simulator(sim: &str) -> (&'static str, &'static str) {
     if sim.starts_with("xplane") { ("X-Plane", "12") } else { ("MSFS", "SimConnect") }
@@ -167,6 +220,16 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
     }
     if let Some(burnt) = fuel_consumed(&flight) {
         doc_mut.insert("fuel_consumed".into(), json!(burnt));
+    }
+    // Where it ended: the post of a flight that ends in the air says how far it was from
+    // the airport nearest, as the app's last update did.
+    if let Some(last) = flight.last() {
+        doc_mut.insert("current_snapshot".into(), Value::Object(snapshot(last)));
+        if f.landing.is_none() {
+            if let Some(closest) = closest_airport(last, places) {
+                doc_mut.insert("closest_airport".into(), closest);
+            }
+        }
     }
     if let Some(l) = &f.landing {
         let at = flight.iter().find(|s| s.wall_time_ms >= l.wall_time_ms).copied();

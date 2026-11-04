@@ -95,6 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             r2: state.r2.clone(),
             bucket,
         }),
+        {
+            let state = state.clone();
+            move |flight_id| handlers::spawn_discord_sync(&state, flight_id)
+        },
     );
     anonymous::spawn_sweeper(
         state.db.clone(),

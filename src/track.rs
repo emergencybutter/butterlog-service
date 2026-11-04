@@ -455,53 +455,44 @@ fn parse_event_epoch(ts: &str) -> Option<i64> {
         .map(|dt| dt.and_utc().timestamp())
 }
 
-pub async fn upload_track_handler(
-    State(state): State<AppState>,
-    Path(flight_id): Path<i64>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, AppError> {
-    let user_id = get_user_id_from_session(&state.db, &headers).await?;
-    let status = owned_active_flight(&state.db, flight_id, user_id).await?;
-
-    let json = decompress_gzip_capped(&body, MAX_TRACK_DECOMPRESSED)
-        .map_err(AppError::PayloadTooLarge)?;
-    let batch: TrackBatch = serde_json::from_str(&json)
-        .map_err(|e| AppError::BadRequest(format!("Invalid track batch: {}", e)))?;
-
-    let points = decode_batch(&batch).map_err(AppError::BadRequest)?;
-    let submitted = points.len();
-
-    // Explode the columnar batch into rows. ON CONFLICT DO NOTHING is what makes
-    // the endpoint idempotent: a replayed batch inserts nothing and still
-    // reports success.
-    let mut epochs: Vec<i64> = Vec::with_capacity(submitted);
-    let mut lats: Vec<f32> = Vec::with_capacity(submitted);
-    let mut lons: Vec<f32> = Vec::with_capacity(submitted);
-    let mut alts: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut ias: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut vs: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut pitch: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut roll: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut heading: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut track: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut ground_speed: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut true_airspeed: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut baro: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut magvar: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut g_load: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut oat: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut wind_speed: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut wind_dir: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut fuel_flow: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut fuel_left: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut fuel_right: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut rpm: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut pct_power: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut manifold: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut oil_temp: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    let mut oil_press: Vec<Option<f32>> = Vec::with_capacity(submitted);
-    for p in &points {
+/// Stores a flight's track points, those it has already (by epoch) left as they are; how
+/// many were new. ON CONFLICT DO NOTHING is what makes the upload idempotent: a replayed
+/// batch inserts nothing and still reports success.
+pub(crate) async fn insert_points(
+    conn: &mut sqlx::PgConnection,
+    flight_id: i64,
+    points: &[DecodedPoint],
+) -> Result<usize, sqlx::Error> {
+    if points.is_empty() {
+        return Ok(0);
+    }
+    let mut epochs: Vec<i64> = Vec::with_capacity(points.len());
+    let mut lats: Vec<f32> = Vec::with_capacity(points.len());
+    let mut lons: Vec<f32> = Vec::with_capacity(points.len());
+    let mut alts: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut ias: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut vs: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut pitch: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut roll: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut heading: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut track: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut ground_speed: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut true_airspeed: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut baro: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut magvar: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut g_load: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut oat: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut wind_speed: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut wind_dir: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut fuel_flow: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut fuel_left: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut fuel_right: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut rpm: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut pct_power: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut manifold: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut oil_temp: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    let mut oil_press: Vec<Option<f32>> = Vec::with_capacity(points.len());
+    for p in points {
         epochs.push(p.epoch);
         lats.push(p.latitude);
         lons.push(p.longitude);
@@ -530,51 +521,67 @@ pub async fn upload_track_handler(
         oil_press.push(p.oil_press);
     }
 
+    Ok(sqlx::query(
+        &format!(
+            "INSERT INTO flight_track_points ({}) \
+             SELECT $1, * FROM UNNEST($2::bigint[], $3::real[], $4::real[], $5::real[], \
+                                      $6::real[], $7::real[], $8::real[], $9::real[], {}) \
+             ON CONFLICT (flight_id, sample_epoch) DO NOTHING",
+            TRACK_COLUMNS, TRACK_UNNEST
+        ),
+    )
+    .bind(flight_id)
+    .bind(&epochs)
+    .bind(&lats)
+    .bind(&lons)
+    .bind(&alts)
+    .bind(&ias)
+    .bind(&vs)
+    .bind(&pitch)
+    .bind(&roll)
+    .bind(&heading)
+    .bind(&track)
+    .bind(&ground_speed)
+    .bind(&true_airspeed)
+    .bind(&baro)
+    .bind(&magvar)
+    .bind(&g_load)
+    .bind(&oat)
+    .bind(&wind_speed)
+    .bind(&wind_dir)
+    .bind(&fuel_flow)
+    .bind(&fuel_left)
+    .bind(&fuel_right)
+    .bind(&rpm)
+    .bind(&pct_power)
+    .bind(&manifold)
+    .bind(&oil_temp)
+    .bind(&oil_press)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected() as usize)
+}
+
+pub async fn upload_track_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    let status = owned_active_flight(&state.db, flight_id, user_id).await?;
+
+    let json = decompress_gzip_capped(&body, MAX_TRACK_DECOMPRESSED)
+        .map_err(AppError::PayloadTooLarge)?;
+    let batch: TrackBatch = serde_json::from_str(&json)
+        .map_err(|e| AppError::BadRequest(format!("Invalid track batch: {}", e)))?;
+
+    let points = decode_batch(&batch).map_err(AppError::BadRequest)?;
+    let submitted = points.len();
+
     let mut tx = state.db.begin().await?;
 
-    let accepted = if submitted == 0 {
-        0
-    } else {
-        sqlx::query(
-            &format!(
-                "INSERT INTO flight_track_points ({}) \
-                 SELECT $1, * FROM UNNEST($2::bigint[], $3::real[], $4::real[], $5::real[], \
-                                          $6::real[], $7::real[], $8::real[], $9::real[], {}) \
-                 ON CONFLICT (flight_id, sample_epoch) DO NOTHING",
-                TRACK_COLUMNS, TRACK_UNNEST
-            ),
-        )
-        .bind(flight_id)
-        .bind(&epochs)
-        .bind(&lats)
-        .bind(&lons)
-        .bind(&alts)
-        .bind(&ias)
-        .bind(&vs)
-        .bind(&pitch)
-        .bind(&roll)
-        .bind(&heading)
-        .bind(&track)
-        .bind(&ground_speed)
-        .bind(&true_airspeed)
-        .bind(&baro)
-        .bind(&magvar)
-        .bind(&g_load)
-        .bind(&oat)
-        .bind(&wind_speed)
-        .bind(&wind_dir)
-        .bind(&fuel_flow)
-        .bind(&fuel_left)
-        .bind(&fuel_right)
-        .bind(&rpm)
-        .bind(&pct_power)
-        .bind(&manifold)
-        .bind(&oil_temp)
-        .bind(&oil_press)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected() as usize
-    };
+    let accepted = insert_points(&mut tx, flight_id, &points).await?;
 
     merge_events(&mut tx, flight_id, &batch.events).await?;
 

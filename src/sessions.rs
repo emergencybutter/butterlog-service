@@ -567,8 +567,9 @@ pub async fn compact_ready(
 
 /// Ends silent sessions, analyses ended ones and compacts analysed ones, every minute, then
 /// analyses compacted sessions again from their segments after an analyser change. Without
-/// a telemetry bucket configured, chunks stay in Postgres.
-pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
+/// a telemetry bucket configured, chunks stay in Postgres. `sync_flight` syncs the Discord
+/// post of each flight an analysis wrote (rollout phase 5).
+pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>, sync_flight: impl Fn(i64) + Send + Sync + 'static) {
     if store.is_none() {
         tracing::warn!("R2_TELEMETRY_BUCKET is not set; telemetry sessions are not compacted");
     }
@@ -590,6 +591,7 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
                 Err(e) => tracing::error!("telemetry analysis failed: {e}"),
                 _ => {}
             }
+            sync_due(&db, &sync_flight).await;
             if let Some(store) = &store {
                 match compact_ready(&db, store, 10).await {
                     Ok(n) if n > 0 => tracing::info!(count = n, "compacted telemetry sessions"),
@@ -601,9 +603,23 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>) {
                     Err(e) => tracing::error!("telemetry re-analysis failed: {e}"),
                     _ => {}
                 }
+                sync_due(&db, &sync_flight).await;
             }
         }
     });
+}
+
+/// Hands each flight whose Discord post an analysis left due to `sync_flight`, once.
+async fn sync_due(db: &PgPool, sync_flight: &(impl Fn(i64) + Sync)) {
+    let due: Result<Vec<i64>, sqlx::Error> = sqlx::query_scalar(
+        "UPDATE flights SET discord_sync_due = FALSE WHERE discord_sync_due RETURNING id",
+    )
+    .fetch_all(db)
+    .await;
+    match due {
+        Ok(ids) => ids.into_iter().for_each(sync_flight),
+        Err(e) => tracing::error!("flights due a Discord sync not read: {e}"),
+    }
 }
 
 pub async fn open_session_handler(

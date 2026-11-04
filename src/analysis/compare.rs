@@ -300,7 +300,8 @@ pub async fn flights(db: &PgPool, user_id: i64, limit: i64) -> Result<Vec<Flight
         (DateTime<Utc>, String, Value, String, String, Option<i64>, i32, Option<Value>, Option<Value>, Option<Value>);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT f.first_at, s.sim, s.aircraft, f.departure, f.arrival, f.flight_id, \
-                f.analyser_version, f.parity, f.statistics, a.statistics \
+                f.analyser_version, f.parity, f.statistics, \
+                CASE WHEN a.service_owned THEN a.app_statistics ELSE a.statistics END \
            FROM telemetry_flights f JOIN telemetry_sessions s ON s.id = f.session_id \
            LEFT JOIN flights a ON a.id = f.flight_id \
           WHERE s.user_id = $1 \

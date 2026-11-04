@@ -16,6 +16,7 @@ use super::{analyse, FlightSummary, Places};
 use crate::error::AppError;
 use crate::normalise::{normalise, Sample};
 use crate::sessions::SegmentStore;
+use crate::track::DecodedPoint;
 use butterlog_wire::{decode_segment, decompress, SessionDecoder, SessionHeader, SessionOpen};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{json, Value};
@@ -25,7 +26,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 7;
+pub const ANALYSER_VERSION: i32 = 8;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
@@ -49,9 +50,9 @@ fn places() -> Option<&'static Places> {
         .as_ref()
 }
 
-/// Each flight, its summary as stored, and its statistics document
-/// (`analysis/statistics.rs`).
-type Analysed = Vec<(FlightSummary, Value, Value)>;
+/// Each flight, its summary as stored, its statistics document
+/// (`analysis/statistics.rs`) and its track.
+type Analysed = Vec<(FlightSummary, Value, Value, Vec<DecodedPoint>)>;
 
 /// One session, decoded.
 struct Part {
@@ -93,7 +94,8 @@ fn analyse_samples(header: &SessionHeader, samples: &[Sample]) -> Result<Analyse
         .map(|f| {
             let json = summary_json(&f, places);
             let statistics = super::statistics::statistics(header, &f, samples, places);
-            (f, json, statistics)
+            let track = super::statistics::track(&f, samples);
+            (f, json, statistics, track)
         })
         .collect())
 }
@@ -249,6 +251,68 @@ async fn analyse_session(db: &PgPool, segments: &impl SegmentStore, id: Uuid, us
     store(db, id, &ids, continues, user_id, analysed).await
 }
 
+/// Makes a flight the analysis found the user's on the service (rollout phase 5): the
+/// app's flight it matched, `linked`, takes the service's document, the app's kept aside
+/// the first time; with none, the flight is created, with its track. Either way its
+/// Discord post is due a sync. Returns the flight.
+async fn take_over(
+    tx: &mut sqlx::PgConnection,
+    user_id: i64,
+    linked: Option<i64>,
+    f: &FlightSummary,
+    statistics: &Value,
+    track: &[DecodedPoint],
+) -> Result<i64, AppError> {
+    let arrival = f.landing.as_ref().map(|_| f.arrival.to_string());
+    let end_reason = if f.landing.is_some() { "landed" } else { "sim_closed" };
+    let (id, service_made): (i64, bool) = match linked {
+        // How the app's flight ended is the app's; the service's own ends with its
+        // analysis, which a later session continuing it can extend to a landing.
+        Some(id) => sqlx::query_as(
+            "UPDATE flights \
+                SET app_statistics = CASE WHEN service_owned THEN app_statistics ELSE statistics END, \
+                    statistics = $2, arrival = COALESCE($3, arrival), service_owned = TRUE, \
+                    ended_at = CASE WHEN service_made THEN $4 ELSE ended_at END, \
+                    end_reason = CASE WHEN service_made THEN $5 ELSE end_reason END, \
+                    discord_sync_due = TRUE, updated_at = CURRENT_TIMESTAMP \
+              WHERE id = $1 RETURNING id, service_made",
+        )
+        .bind(id)
+        .bind(statistics)
+        .bind(&arrival)
+        .bind(timestamp(f.last_ms))
+        .bind(end_reason)
+        .fetch_one(&mut *tx)
+        .await?,
+        None => sqlx::query_as(
+            "INSERT INTO flights \
+               (user_id, departure, arrival, statistics, created_at, updated_at, status, ended_at, \
+                end_reason, service_owned, service_made, discord_sync_due) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'ended', $6, $7, TRUE, TRUE, TRUE) RETURNING id, service_made",
+        )
+        .bind(user_id)
+        .bind(f.departure.to_string())
+        .bind(&arrival)
+        .bind(statistics)
+        .bind(timestamp(f.first_ms))
+        .bind(timestamp(f.last_ms))
+        .bind(end_reason)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+    // The app's track, for a flight it made, stays; the service's own is the analysis's.
+    if service_made {
+        sqlx::query("DELETE FROM flight_track_points WHERE flight_id = $1").bind(id).execute(&mut *tx).await?;
+        let stored = crate::track::insert_points(&mut *tx, id, track).await?;
+        sqlx::query("UPDATE flights SET track_points = $2 WHERE id = $1")
+            .bind(id)
+            .bind(stored as i32)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(id)
+}
+
 /// The app's timestamps: UTC, "2026-11-01 01:09:47.776".
 fn app_time(v: &Value) -> Option<i64> {
     let s = v.as_str()?;
@@ -389,12 +453,18 @@ async fn store(
         .bind(continues)
         .execute(&mut *tx)
         .await?;
+    let since: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT service_flights_since FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
     let error = match analysed {
         Ok(flights) => {
-            for (idx, (f, summary, statistics)) in flights.iter().enumerate() {
-                // The app's flights of the day around it.
-                let candidates: Vec<(i64, Value)> = sqlx::query_as(
-                    "SELECT id, statistics FROM flights \
+            for (idx, (f, summary, statistics, track)) in flights.iter().enumerate() {
+                // The user's flights of the day around it, with what the app made of each.
+                let rows: Vec<(i64, Value, bool, Option<Value>)> = sqlx::query_as(
+                    "SELECT id, statistics, service_owned, app_statistics FROM flights \
                       WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
                 )
                 .bind(user_id)
@@ -402,7 +472,19 @@ async fn store(
                 .bind(timestamp(f.last_ms))
                 .fetch_all(&mut *tx)
                 .await?;
-                let app = same_flight(f, &candidates);
+                let candidates: Vec<(i64, Value)> = rows.iter().map(|r| (r.0, r.1.clone())).collect();
+                let linked = same_flight(f, &candidates).map(|c| c.0);
+                // The app's document: its own, kept aside on a flight the service owns.
+                let app_doc = linked
+                    .and_then(|id| rows.iter().find(|r| r.0 == id))
+                    .and_then(|r| if r.2 { r.3.clone() } else { Some(r.1.clone()) });
+                let takes_over = since.is_some_and(|t| f.first_ms >= t.timestamp_millis())
+                    && (f.takeoff_ms.is_some() || f.landing.is_some());
+                let flight_id = if takes_over {
+                    Some(take_over(&mut tx, user_id, linked, f, statistics, track).await?)
+                } else {
+                    linked
+                };
                 sqlx::query(
                     "INSERT INTO telemetry_flights \
                        (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
@@ -418,8 +500,8 @@ async fn store(
                 .bind(f.departure.to_string())
                 .bind(f.arrival.to_string())
                 .bind(summary)
-                .bind(app.map(|a| a.0))
-                .bind(app.map(|a| parity(f, &a.1)))
+                .bind(flight_id)
+                .bind(app_doc.as_ref().map(|a| parity(f, a)))
                 .bind(statistics)
                 .execute(&mut *tx)
                 .await?;
@@ -702,5 +784,116 @@ mod tests {
         analyse_session(&db, &segments, second, user).await.unwrap();
         assert_eq!(analysed(first).await.unwrap(), Some(ANALYSER_VERSION));
         assert_eq!(flights().await.unwrap(), [(first, "KAST".to_string(), "KAST".to_string())]);
+    }
+
+    /// For a user the service makes the flights of: the pattern, once with no flight from
+    /// the app, which the service creates, and once with the app's, which it takes over.
+    #[tokio::test]
+    async fn the_service_makes_the_flights_of_a_user_it_owns() {
+        use crate::sessions::{end_session, open_session, store_chunk};
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let path = format!("{}/tests/fixtures/xplane_pattern.blsg.zst", env!("CARGO_MANIFEST_DIR"));
+        let segment = butterlog_wire::decode_segment(&decompress(&std::fs::read(path).unwrap()).unwrap()).unwrap();
+        let segments = TestSegments;
+
+        // A user it owns, the pattern uploaded, and analysed.
+        let fly = |app_flight: bool| {
+            let (db, segment) = (&db, &segment);
+            async move {
+                let user: i64 = sqlx::query_scalar(
+                    "INSERT INTO users (discord_id, username, service_flights_since) \
+                     VALUES ($1, 'test', '2026-01-01') RETURNING id",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .fetch_one(db)
+                .await
+                .unwrap();
+                let app = if app_flight {
+                    Some(
+                        sqlx::query_scalar::<_, i64>(
+                            "INSERT INTO flights (user_id, departure, statistics, track_points, created_at) \
+                             VALUES ($1, 'KAST', $2, 7, '2026-11-01 01:09:00+00') RETURNING id",
+                        )
+                        .bind(user)
+                        .bind(json!({ "takeoff_time": "2026-11-01 01:09:39.068", "landing_score": -142.24 }))
+                        .fetch_one(db)
+                        .await
+                        .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let id = Uuid::new_v4();
+                open_session(db, user, id, &segment.open).await.unwrap();
+                for (seq, payload) in &segment.chunks {
+                    store_chunk(db, user, id, *seq, &butterlog_wire::compress(payload, 3)).await.unwrap();
+                }
+                end_session(db, user, id).await.unwrap();
+                analyse_session(db, &TestSegments, id, user).await.unwrap();
+                (user, id, app)
+            }
+        };
+        type Flight = (i64, String, Option<String>, Value, Option<Value>, bool, bool, bool, String, i32);
+        let flights_of = |user: i64| {
+            sqlx::query_as::<_, Flight>(
+                "SELECT id, departure, arrival, statistics, app_statistics, service_owned, service_made, \
+                        discord_sync_due, status, track_points FROM flights WHERE user_id = $1",
+            )
+            .bind(user)
+            .fetch_all(&db)
+        };
+        let linked = |session: Uuid| {
+            sqlx::query_as::<_, (Option<i64>, Option<Value>)>(
+                "SELECT flight_id, parity FROM telemetry_flights WHERE session_id = $1",
+            )
+            .bind(session)
+            .fetch_one(&db)
+        };
+
+        // No flight from the app: the service's, ended, with its track, its post due.
+        let (user, session, _) = fly(false).await;
+        let made = flights_of(user).await.unwrap();
+        assert_eq!(made.len(), 1);
+        let (id, departure, arrival, statistics, app_statistics, owned, service_made, due, status, points) =
+            made[0].clone();
+        assert_eq!((departure.as_str(), arrival.as_deref(), status.as_str()), ("KAST", Some("KAST"), "ended"));
+        assert_eq!(statistics["arrival"]["icao"], json!("KAST"));
+        assert!(statistics["current_snapshot"]["Latitude"].is_number());
+        assert_eq!((app_statistics, owned, service_made, due), (None, true, true, true));
+        assert!(points > 100, "{points} track points");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flight_track_points WHERE flight_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored, points as i64);
+        assert_eq!(linked(session).await.unwrap(), (Some(id), None));
+
+        // Analysed again: the same flight, not another.
+        sqlx::query("UPDATE flights SET discord_sync_due = FALSE WHERE id = $1").bind(id).execute(&db).await.unwrap();
+        analyse_session(&db, &segments, session, user).await.unwrap();
+        let again = flights_of(user).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].0, again[0].7, again[0].9), (id, true, points));
+
+        // The app's flight: the service's document, the app's kept, the app's track.
+        let (user, session, app) = fly(true).await;
+        let taken = flights_of(user).await.unwrap();
+        assert_eq!(taken.len(), 1);
+        let (id, _, arrival, statistics, app_statistics, owned, service_made, due, _, points) = taken[0].clone();
+        assert_eq!(Some(id), app);
+        assert_eq!(arrival.as_deref(), Some("KAST"));
+        assert_eq!(statistics["arrival"]["icao"], json!("KAST"));
+        assert_eq!(app_statistics.as_ref().unwrap()["landing_score"], json!(-142.24));
+        assert_eq!((owned, service_made, due, points), (true, false, true, 7));
+        let (flight, parity) = linked(session).await.unwrap();
+        assert_eq!(flight, app);
+        assert_eq!(parity.unwrap()["landing_score"]["app"], json!(-142.24));
+        // Analysed again, the app's document is still the one kept.
+        analyse_session(&db, &segments, session, user).await.unwrap();
+        let kept = flights_of(user).await.unwrap();
+        assert_eq!(kept[0].4.as_ref().unwrap()["landing_score"], json!(-142.24));
     }
 }

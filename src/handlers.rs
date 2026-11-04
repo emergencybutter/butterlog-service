@@ -204,7 +204,7 @@ async fn update_and_get_peers(
 }
 
 /// Fire-and-forget Discord synchronization for a flight.
-fn spawn_discord_sync(state: &crate::AppState, flight_id: i64) {
+pub(crate) fn spawn_discord_sync(state: &crate::AppState, flight_id: i64) {
     let db = state.db.clone();
     let r2 = state.r2.clone();
     let http = state.discord_http.clone();
@@ -412,9 +412,15 @@ async fn update_flight_core(
         return Err(AppError::NotFound("Flight not found".to_string()));
     }
 
-    // Perform update; COALESCE keeps the existing value when the payload omits it.
+    // Perform update; COALESCE keeps the existing value when the payload omits it. On a
+    // flight the service owns (rollout phase 5), the app's document is kept aside, to
+    // compare, and the service's arrival stands.
     let (departure, arrival, statistics, notes): (String, Option<String>, serde_json::Value, Option<String>) = sqlx::query_as(
-        "UPDATE flights SET arrival = COALESCE($1, arrival), statistics = $2, notes = COALESCE($3, notes), updated_at = CURRENT_TIMESTAMP \
+        "UPDATE flights SET \
+            arrival = CASE WHEN service_owned THEN arrival ELSE COALESCE($1, arrival) END, \
+            statistics = CASE WHEN service_owned THEN statistics ELSE $2 END, \
+            app_statistics = CASE WHEN service_owned THEN $2 ELSE app_statistics END, \
+            notes = COALESCE($3, notes), updated_at = CURRENT_TIMESTAMP \
          WHERE id = $4 RETURNING departure, arrival, statistics, notes"
     )
     .bind(&payload.arrival)
