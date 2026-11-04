@@ -60,6 +60,10 @@ pub struct CreateFlightRequest {
     #[serde(default)]
     pub longitude: Option<f64>,
     pub notes: Option<String>,
+    /// The app can leave the flight to the service (rollout phase 5): it then takes a 202
+    /// for an answer, with no flight.
+    #[serde(default)]
+    pub service_may_make: bool,
 }
 
 #[derive(Deserialize)]
@@ -340,9 +344,27 @@ pub async fn create_flight_bearer_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<CreateFlightRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let user_id = get_user_id_from_session(&state.db, &headers).await?;
-    create_flight_core(state, user_id, payload).await
+    if payload.service_may_make && service_makes_flights(&state.db, user_id).await? {
+        let answer = serde_json::json!({ "service_makes_flight": true });
+        return Ok((StatusCode::ACCEPTED, Json(answer)).into_response());
+    }
+    create_flight_core(state, user_id, payload).await.map(IntoResponse::into_response)
+}
+
+/// Whether the service makes the user's flights now (rollout phase 5): their switch is on,
+/// and their telemetry, which it makes them from, is arriving. Otherwise the app does.
+pub(crate) async fn service_makes_flights(db: &PgPool, user_id: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM users u JOIN telemetry_sessions s ON s.user_id = u.id \
+            WHERE u.id = $1 AND u.service_flights_since <= NOW() \
+              AND s.status = 'open' AND s.last_chunk_at > NOW() - INTERVAL '5 minutes')",
+    )
+    .bind(user_id)
+    .fetch_one(db)
+    .await
 }
 
 async fn create_flight_core(
@@ -1043,4 +1065,41 @@ async fn multiplayer_ping_core(
     let peers = peer_details.iter().map(|p| p.udp_address.clone()).collect();
 
     Ok((StatusCode::OK, Json(MultiplayerPingResponse { peers, peer_details })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Against a real Postgres, given by `TEST_DATABASE_URL` (skipped without it).
+    #[tokio::test]
+    async fn the_service_makes_flights_with_the_switch_on_and_telemetry_arriving() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let user: i64 = sqlx::query_scalar("INSERT INTO users (discord_id, username) VALUES ($1, 'test') RETURNING id")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let path = format!("{}/tests/fixtures/xplane_pattern.blsg.zst", env!("CARGO_MANIFEST_DIR"));
+        let raw = butterlog_wire::decompress(&std::fs::read(path).unwrap()).unwrap();
+        let segment = butterlog_wire::decode_segment(&raw).unwrap();
+        let session = uuid::Uuid::new_v4();
+        crate::sessions::open_session(&db, user, session, &segment.open).await.unwrap();
+        let (seq, payload) = &segment.chunks[0];
+        crate::sessions::store_chunk(&db, user, session, *seq, &butterlog_wire::compress(payload, 3)).await.unwrap();
+
+        // Telemetry arriving, the switch off.
+        assert!(!service_makes_flights(&db, user).await.unwrap());
+        sqlx::query("UPDATE users SET service_flights_since = NOW() WHERE id = $1").bind(user).execute(&db).await.unwrap();
+        assert!(service_makes_flights(&db, user).await.unwrap());
+        // The switch on, the telemetry stopped.
+        sqlx::query("UPDATE telemetry_sessions SET last_chunk_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
+            .bind(session)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!service_makes_flights(&db, user).await.unwrap());
+    }
 }

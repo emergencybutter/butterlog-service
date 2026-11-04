@@ -522,6 +522,10 @@ pub async fn compact_ready(
             .bind(id)
             .fetch_all(db)
             .await?;
+            // Its chunks gone: another compaction finished it since, and its segment stands.
+            if rows.is_empty() {
+                continue;
+            }
             let open = open.clone();
             let segment = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
                 let payloads = rows
@@ -860,10 +864,15 @@ mod tests {
         let store = TestSegments;
         // Not before it is analysed. Other tests' sessions may be ready too; go on until
         // this one is done.
-        while cursor(&db, me, id).await.unwrap().status != "compacted" {
+        // Another test's compaction may take it too: bounded rather than "made progress".
+        for _ in 0..50 {
+            if cursor(&db, me, id).await.unwrap().status == "compacted" {
+                break;
+            }
             crate::analysis::ingest::analyse_ended(&db, &store, 100).await.unwrap();
-            assert!(compact_ready(&db, &store, 100).await.unwrap() > 0);
+            compact_ready(&db, &store, 100).await.unwrap();
         }
+        assert_eq!(cursor(&db, me, id).await.unwrap().status, "compacted");
         let key = format!("sessions/{me}/{id}.blsg.zst");
         let stored = test_segments().lock().unwrap().get(&key).cloned().expect("segment stored");
         let segment = decode_segment(&decompress(&stored).unwrap()).unwrap();

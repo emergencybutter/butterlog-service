@@ -662,13 +662,14 @@ mod tests {
         {
             assert!(crate::sessions::compact_ready(&db, &segments, 100).await.unwrap() > 0);
         }
+        // Its flights gone first: another test's re-analysis may pick it up once it is stale.
+        sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&db).await.unwrap();
         sqlx::query("UPDATE telemetry_sessions SET analyser_version = $2 WHERE id = $1")
             .bind(id)
             .bind(ANALYSER_VERSION - 1)
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM telemetry_flights WHERE session_id = $1").bind(id).execute(&db).await.unwrap();
         while version().await.unwrap().0 != Some(ANALYSER_VERSION) {
             assert!(analyse_compacted(&db, &segments, 100).await.unwrap() > 0);
         }
