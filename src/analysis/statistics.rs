@@ -190,6 +190,51 @@ fn endpoint(e: &Endpoint, places: &Places) -> Value {
     json!({ "icao": ident, "name": name.unwrap_or_else(|| ident.clone()) })
 }
 
+/// The flight's takeoff, landing, top of climb and top of descent, as the app's events
+/// (camelCase, its timestamps), which the flight and live pages mark on the map and the
+/// charts. The landing carries its touchdown, as the app's did.
+fn events(f: &FlightSummary) -> Value {
+    use super::flight::EventKind;
+    let mut events: Vec<Value> = f
+        .events
+        .iter()
+        .filter_map(|e| {
+            let kind = match e.kind {
+                EventKind::Takeoff => "takeoff",
+                EventKind::TopOfClimb => "top_of_climb",
+                EventKind::TopOfDescent => "top_of_descent",
+                // The first landing is the flight's: its own entry, below.
+                _ => return None,
+            };
+            Some(json!({
+                "timestamp": app_time(e.wall_time_ms),
+                "eventType": kind,
+                "latitude": e.latitude,
+                "longitude": e.longitude,
+                "heading": e.heading,
+            }))
+        })
+        .collect();
+    if let Some(l) = &f.landing {
+        events.push(json!({
+            "timestamp": app_time(l.wall_time_ms),
+            "eventType": "landing",
+            "latitude": l.latitude,
+            "longitude": l.longitude,
+            "heading": l.heading,
+            "touchdownFpm": l.touchdown_fpm,
+            "landingG": l.g,
+            "offsetPercent": l.offset_percent,
+            "thresholdDistFt": l.threshold_dist_ft,
+            "vsVariance": l.vs_variance,
+            "iasVariance": l.ias_variance,
+            "approachStability": l.approach_stability,
+        }));
+        events.sort_by(|a, b| a["timestamp"].as_str().cmp(&b["timestamp"].as_str()));
+    }
+    Value::Array(events)
+}
+
 /// The statistics document for one flight of a session. `samples` are the session's.
 pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample], places: &Places) -> Value {
     let flight: Vec<&Sample> =
@@ -212,6 +257,7 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
         "departure": endpoint(&f.departure, places),
         "takeoff_time": f.takeoff_roll_ms.map_or(Value::Null, app_time),
         "max_entries": maxima(&flight),
+        "events": events(f),
     });
     let doc_mut = doc.as_object_mut().expect("an object");
     // The frame the takeoff time is: the feed and the aircraft stats measure distance from it.

@@ -340,11 +340,15 @@ async fn merge_events(
         return Ok(());
     }
 
-    let mut stats: serde_json::Value =
-        sqlx::query_scalar("SELECT statistics FROM flights WHERE id = $1 FOR UPDATE")
+    let (mut stats, service_owned): (serde_json::Value, bool) =
+        sqlx::query_as("SELECT statistics, service_owned FROM flights WHERE id = $1 FOR UPDATE")
             .bind(flight_id)
             .fetch_one(&mut **tx)
             .await?;
+    // The service's document has its own events, from the telemetry (rollout phase 5).
+    if service_owned {
+        return Ok(());
+    }
 
     let existing = stats
         .get("events")
