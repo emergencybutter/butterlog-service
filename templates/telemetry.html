@@ -95,7 +95,9 @@
             the same flight as the app uploaded it. Differences beyond what the parity check allows are
             marked. Landing scores are expected to differ on firm landings: the service sees the impact,
             the app's once-a-second sample usually misses it. Under each flight, the Discord post the
-            service would make from its own analysis, beside the app's. The service's is not posted.</p>
+            service would make from its own analysis, beside the app's. The service's is not posted.
+            Then what the flight page, the feed and the aircraft stats would show from each; a figure
+            only the service has, such as fuel used, which the app never sends, is not marked.</p>
 
 {% if flights.is_empty() %}
         <div class="empty">
@@ -140,6 +142,19 @@
                     <thead><tr><th>Line</th><th>Service</th><th>App</th></tr></thead>
                     <tbody>
                     {% for l in f.post %}
+                        <tr{% if l.off %} class="is-off"{% endif %}><td>{{ l.label }}</td><td>{{ l.service }}</td><td>{{ l.app }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+            {% endif %}
+            {% if !f.pages.is_empty() %}
+            <details class="post"{% if f.pages_off_count > 0 %} open{% endif %}>
+                <summary>Flight page, feed and aircraft stats · {% if f.pages_off_count > 0 %}{{ f.pages_off_count }} of {{ f.pages.len() }} figures differ{% else %}the same{% endif %}</summary>
+                <table class="measures post-lines">
+                    <thead><tr><th>Figure</th><th>Service</th><th>App</th></tr></thead>
+                    <tbody>
+                    {% for l in f.pages %}
                         <tr{% if l.off %} class="is-off"{% endif %}><td>{{ l.label }}</td><td>{{ l.service }}</td><td>{{ l.app }}</td></tr>
                     {% endfor %}
                     </tbody>

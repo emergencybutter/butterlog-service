@@ -666,7 +666,6 @@ async fn flight_detail_page(
             .map(|(label, value)| templates::StatItem { label: label.to_string(), value })
             .collect()
     };
-    const PEAK_KEYS: &[&str] = &["AltB", "IAS", "GndSpd", "VSpd", "NormAc"];
     let touchdown_stats = to_items(
         stats
             .get("landing_snapshot")
@@ -737,6 +736,9 @@ type FlightListRow = (
     // track_points
     i32,
 );
+
+/// The flight page's peak figures, from `max_entries`.
+const PEAK_KEYS: &[&str] = &["AltB", "IAS", "GndSpd", "VSpd", "NormAc"];
 
 /// Minimal HTML escaping for user-controlled text rendered into attributes/markup.
 fn esc(s: &str) -> String {

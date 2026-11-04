@@ -96,6 +96,16 @@ fn maxima(samples: &[&Sample]) -> Map<String, Value> {
         .collect()
 }
 
+/// The fuel on board at the first sample with any, less that at the last, in the units of
+/// `FQtyL` and `FQtyR`: the app's `fuel_consumed`, which it keeps in its log but has never
+/// uploaded, so the feed's is empty for its flights.
+fn fuel_consumed(samples: &[&Sample]) -> Option<f64> {
+    let total = |s: &&Sample| Some(s.get(Field::FuelLeft)? + s.get(Field::FuelRight)?).filter(|t| *t > 0.0);
+    let first = samples.iter().find_map(total)?;
+    let last = samples.iter().rev().find_map(total)?;
+    Some(first - last)
+}
+
 /// How the app names the sim.
 fn simulator(sim: &str) -> (&'static str, &'static str) {
     if sim.starts_with("xplane") { ("X-Plane", "12") } else { ("MSFS", "SimConnect") }
@@ -133,6 +143,14 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
         "takeoff_time": f.takeoff_roll_ms.map_or(Value::Null, app_time),
         "max_entries": maxima(&flight),
     });
+    let doc_mut = doc.as_object_mut().expect("an object");
+    // The frame the takeoff time is: the feed and the aircraft stats measure distance from it.
+    if let Some(at) = f.takeoff_roll_ms.and_then(|ms| flight.iter().find(|s| s.wall_time_ms >= ms)) {
+        doc_mut.insert("takeoff_snapshot".into(), Value::Object(snapshot(at)));
+    }
+    if let Some(burnt) = fuel_consumed(&flight) {
+        doc_mut.insert("fuel_consumed".into(), json!(burnt));
+    }
     if let Some(l) = &f.landing {
         let at = flight.iter().find(|s| s.wall_time_ms >= l.wall_time_ms).copied();
         let mut landing = at.map(snapshot).unwrap_or_default();
@@ -140,7 +158,7 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
         landing.insert("VSpd".into(), json!(l.touchdown_fpm));
         landing.insert("NormAc".into(), json!(l.g));
         landing.insert("gforce".into(), json!(l.g));
-        let doc = doc.as_object_mut().expect("an object");
+        let doc = doc_mut;
         doc.insert("arrival".into(), endpoint(&f.arrival, places));
         doc.insert("landing_time".into(), app_time(l.wall_time_ms));
         doc.insert("landing_snapshot".into(), Value::Object(landing));
@@ -187,5 +205,13 @@ mod tests {
         let at = samples.iter().find(|s| s.wall_time_ms >= l.wall_time_ms).unwrap();
         assert_eq!(landing["Pitch"], json!(-at.get(Field::Pitch).unwrap()));
         assert_eq!(s["landing_score"], json!(l.score()));
+
+        // The takeoff frame is the takeoff time's, on the runway at KAST.
+        let takeoff = &s["takeoff_snapshot"];
+        assert_eq!(takeoff["sim_on_ground"], json!(1.0));
+        assert!((takeoff["Latitude"].as_f64().unwrap() - 46.157).abs() < 0.02, "{}", takeoff["Latitude"]);
+        assert!(takeoff["IAS"].as_f64().unwrap() >= 45.0, "{}", takeoff["IAS"]);
+        let burnt = s["fuel_consumed"].as_f64().unwrap();
+        assert!(burnt > 0.0, "{burnt}");
     }
 }
