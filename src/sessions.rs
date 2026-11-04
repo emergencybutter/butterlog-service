@@ -595,6 +595,15 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>, sync_flight: impl 
                 Err(e) => tracing::error!("telemetry analysis failed: {e}"),
                 _ => {}
             }
+            let made = match &store {
+                Some(store) => crate::analysis::ingest::analyse_open(&db, store, 10).await,
+                None => crate::analysis::ingest::analyse_open(&db, &NoSegments, 10).await,
+            };
+            match made {
+                Ok(n) if n > 0 => tracing::info!(count = n, "made flights over before their session ended"),
+                Err(e) => tracing::error!("open telemetry session analysis failed: {e}"),
+                _ => {}
+            }
             sync_due(&db, &sync_flight).await;
             if let Some(store) = &store {
                 match compact_ready(&db, store, 10).await {

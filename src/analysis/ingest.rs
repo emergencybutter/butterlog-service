@@ -313,6 +313,167 @@ async fn take_over(
     Ok(id)
 }
 
+/// The user's flight an analysed one is, and what the app made of it; the flight made the
+/// service's, or created, when the user's flights are the service's since before it began
+/// (`since`, rollout phase 5).
+async fn link(
+    tx: &mut sqlx::PgConnection,
+    user_id: i64,
+    since: Option<DateTime<Utc>>,
+    f: &FlightSummary,
+    statistics: &Value,
+    track: &[DecodedPoint],
+) -> Result<(Option<i64>, Option<Value>), AppError> {
+    // The user's flights of the day around it, with what the app made of each.
+    let rows: Vec<(i64, Value, bool, Option<Value>)> = sqlx::query_as(
+        "SELECT id, statistics, service_owned, app_statistics FROM flights \
+          WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
+    )
+    .bind(user_id)
+    .bind(timestamp(f.first_ms))
+    .bind(timestamp(f.last_ms))
+    .fetch_all(&mut *tx)
+    .await?;
+    let candidates: Vec<(i64, Value)> = rows.iter().map(|r| (r.0, r.1.clone())).collect();
+    let linked = same_flight(f, &candidates).map(|c| c.0);
+    // The app's document: its own, kept aside on a flight the service owns.
+    let app_doc = linked
+        .and_then(|id| rows.iter().find(|r| r.0 == id))
+        .and_then(|r| if r.2 { r.3.clone() } else { Some(r.1.clone()) });
+    let takes_over = since.is_some_and(|t| f.first_ms >= t.timestamp_millis())
+        && (f.takeoff_ms.is_some() || f.landing.is_some());
+    let flight_id = if takes_over {
+        Some(take_over(&mut *tx, user_id, linked, f, statistics, track).await?)
+    } else {
+        linked
+    };
+    Ok((flight_id, app_doc))
+}
+
+/// How long engine 1 must stay shut down, parked, for a flight to be over.
+const ENGINE_OFF_MS: i64 = 10_000;
+
+/// When the engine was shut down after `after_ms`, parked: engine 1's fuel flow off, on
+/// the ground and stopped, for [`ENGINE_OFF_MS`]. Both sims report the fuel flow, a piston's
+/// or a turbine's, and cut it with the engine.
+fn engine_off(samples: &[Sample], after_ms: i64) -> Option<i64> {
+    use crate::normalise::Field;
+    let mut since = None;
+    for s in samples.iter().filter(|s| s.wall_time_ms >= after_ms) {
+        let off = s.get(Field::OnGround).is_some_and(|g| g > 0.5)
+            && s.get(Field::GroundSpeed).is_some_and(|v| v < 1.0)
+            && s.get(Field::FuelFlow).is_some_and(|f| f < 0.1);
+        match since {
+            _ if !off => since = None,
+            None => since = Some(s.wall_time_ms),
+            Some(t) if s.wall_time_ms - t >= ENGINE_OFF_MS => return Some(t),
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+/// How many of a stream's flights, first to last, are over before it ends: each landed
+/// and shut its engine down, or a later flight followed it (after a teleport).
+fn flights_over(flights: &[FlightSummary], samples: &[Sample]) -> usize {
+    let landed_and_shut_down =
+        |f: &FlightSummary| f.landing.as_ref().is_some_and(|l| engine_off(samples, l.wall_time_ms).is_some());
+    match flights.iter().rposition(landed_and_shut_down) {
+        Some(last) => last + 1,
+        None => flights.len().saturating_sub(1),
+    }
+}
+
+/// Makes the flights of up to `limit` open sessions that are over before their session
+/// ends, for users whose flights the service makes (rollout phase 5): a pilot who lands
+/// and shuts the engine down sees the flight then, not when the sim closes. Only sessions
+/// with chunks since they were last looked at; the flights aren't stored in
+/// `telemetry_flights`, and the session is still analysed when it ends, which updates
+/// the flights made here rather than adding to them.
+pub async fn analyse_open(db: &PgPool, segments: &impl SegmentStore, limit: i64) -> Result<usize, AppError> {
+    let ready: Vec<(Uuid, i64, i32)> = sqlx::query_as(
+        "SELECT s.id, s.user_id, s.chunk_count FROM telemetry_sessions s JOIN users u ON u.id = s.user_id \
+          WHERE s.status = 'open' AND u.service_flights_since <= NOW() \
+            AND s.chunk_count > 0 AND s.invalid_seq IS NULL AND s.next_seq = s.chunk_count \
+            AND s.open_analysed_chunks IS DISTINCT FROM s.chunk_count \
+          ORDER BY s.last_chunk_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    let mut made = 0;
+    for (id, user_id, chunks) in &ready {
+        made += analyse_open_session(db, segments, *id, *user_id, *chunks).await?;
+    }
+    Ok(made)
+}
+
+/// Makes the flights of an open session, and of the stream it continues, that are over
+/// and not yet made; returns how many. `chunks` is how many it was analysed with.
+async fn analyse_open_session(
+    db: &PgPool,
+    segments: &impl SegmentStore,
+    id: Uuid,
+    user_id: i64,
+    chunks: i32,
+) -> Result<usize, AppError> {
+    let new = match load(db, segments, id).await? {
+        Ok(session) => {
+            let mut stream = match resumed(db, segments, id, &session).await? {
+                Some(s) => s,
+                None => Stream { ids: Vec::new(), samples: Vec::new(), header: session.header.clone() },
+            };
+            super::resume::join(&mut stream.samples, session.samples);
+            let Stream { samples, header, .. } = stream;
+            blocking(move || {
+                analyse_samples(&header, &samples).map(|flights| {
+                    let summaries: Vec<FlightSummary> = flights.iter().map(|f| f.0.clone()).collect();
+                    let over = flights_over(&summaries, &samples);
+                    flights.into_iter().take(over).collect::<Analysed>()
+                })
+            })
+            .await?
+        }
+        Err(e) => Err(e),
+    };
+    let mut tx = db.begin().await?;
+    let (status, made): (String, i32) =
+        sqlx::query_as("SELECT status, open_flights_made FROM telemetry_sessions WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut count = 0;
+    let over = match new {
+        // Ended since: the analysis at its end makes them.
+        _ if status != "open" => made as usize,
+        Ok(flights) => {
+            let since: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT service_flights_since FROM users WHERE id = $1")
+                    .bind(user_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .flatten();
+            for (f, _, statistics, track) in flights.iter().skip(made as usize) {
+                link(&mut tx, user_id, since, f, statistics, track).await?;
+                count += 1;
+            }
+            flights.len().max(made as usize)
+        }
+        Err(e) => {
+            tracing::warn!(session = %id, "open telemetry session not analysed: {e}");
+            made as usize
+        }
+    };
+    sqlx::query("UPDATE telemetry_sessions SET open_analysed_chunks = $2, open_flights_made = $3 WHERE id = $1")
+        .bind(id)
+        .bind(chunks)
+        .bind(over as i32)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(count)
+}
+
 /// The app's timestamps: UTC, "2026-11-01 01:09:47.776".
 fn app_time(v: &Value) -> Option<i64> {
     let s = v.as_str()?;
@@ -462,29 +623,7 @@ async fn store(
     let error = match analysed {
         Ok(flights) => {
             for (idx, (f, summary, statistics, track)) in flights.iter().enumerate() {
-                // The user's flights of the day around it, with what the app made of each.
-                let rows: Vec<(i64, Value, bool, Option<Value>)> = sqlx::query_as(
-                    "SELECT id, statistics, service_owned, app_statistics FROM flights \
-                      WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
-                )
-                .bind(user_id)
-                .bind(timestamp(f.first_ms))
-                .bind(timestamp(f.last_ms))
-                .fetch_all(&mut *tx)
-                .await?;
-                let candidates: Vec<(i64, Value)> = rows.iter().map(|r| (r.0, r.1.clone())).collect();
-                let linked = same_flight(f, &candidates).map(|c| c.0);
-                // The app's document: its own, kept aside on a flight the service owns.
-                let app_doc = linked
-                    .and_then(|id| rows.iter().find(|r| r.0 == id))
-                    .and_then(|r| if r.2 { r.3.clone() } else { Some(r.1.clone()) });
-                let takes_over = since.is_some_and(|t| f.first_ms >= t.timestamp_millis())
-                    && (f.takeoff_ms.is_some() || f.landing.is_some());
-                let flight_id = if takes_over {
-                    Some(take_over(&mut tx, user_id, linked, f, statistics, track).await?)
-                } else {
-                    linked
-                };
+                let (flight_id, app_doc) = link(&mut tx, user_id, since, f, statistics, track).await?;
                 sqlx::query(
                     "INSERT INTO telemetry_flights \
                        (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
@@ -896,5 +1035,108 @@ mod tests {
         analyse_session(&db, &segments, session, user).await.unwrap();
         let kept = flights_of(user).await.unwrap();
         assert_eq!(kept[0].4.as_ref().unwrap()["landing_score"], json!(-142.24));
+    }
+
+    fn parked(t: i64, fuel_flow: f64) -> Sample {
+        use crate::normalise::Field;
+        let mut s = Sample::empty();
+        s.wall_time_ms = t;
+        s.set(Field::OnGround, 1.0);
+        s.set(Field::GroundSpeed, 0.0);
+        s.set(Field::FuelFlow, fuel_flow);
+        s
+    }
+
+    #[test]
+    fn the_engine_is_off_once_its_fuel_flow_stays_cut() {
+        // Idling, then cut for 5 s, running again, then cut for good.
+        let mut samples: Vec<Sample> = (0..10).map(|i| parked(i * 1000, 2.0)).collect();
+        samples.extend((10..15).map(|i| parked(i * 1000, 0.0)));
+        samples.extend((15..20).map(|i| parked(i * 1000, 2.0)));
+        samples.extend((20..40).map(|i| parked(i * 1000, 0.0)));
+        assert_eq!(engine_off(&samples, 0), Some(20_000));
+        assert_eq!(engine_off(&samples, 35_000), None);
+        // Rolling with the fuel cut isn't parked.
+        let mut rolling = samples.clone();
+        rolling.iter_mut().for_each(|s| s.set(crate::normalise::Field::GroundSpeed, 5.0));
+        assert_eq!(engine_off(&rolling, 0), None);
+    }
+
+    /// The pattern in a session still open: made once its engine is shut down, not before,
+    /// and once; the analysis at the session's end updates that flight.
+    #[tokio::test]
+    async fn a_flight_over_is_made_before_its_session_ends() {
+        use crate::sessions::{end_session, open_session, store_chunk};
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let path = format!("{}/tests/fixtures/xplane_pattern.blsg.zst", env!("CARGO_MANIFEST_DIR"));
+        let segment = butterlog_wire::decode_segment(&decompress(&std::fs::read(path).unwrap()).unwrap()).unwrap();
+        let payloads: Vec<Vec<u8>> = segment.chunks.iter().map(|c| c.1.clone()).collect();
+        let samples = decode_payloads(&segment.open, &payloads).unwrap().samples;
+        let landing = analyse(&samples, places().unwrap())[0].landing.as_ref().unwrap().wall_time_ms;
+        let off = engine_off(&samples, landing).expect("the pattern ends with the engine shut down");
+        // The first chunks that hold the shutdown.
+        let split = (1..=payloads.len())
+            .find(|&k| {
+                decode_payloads(&segment.open, &payloads[..k])
+                    .is_ok_and(|p| p.samples.last().is_some_and(|s| s.wall_time_ms >= off + ENGINE_OFF_MS))
+            })
+            .unwrap();
+
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (discord_id, username, service_flights_since) VALUES ($1, 'test', '2026-01-01') RETURNING id",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let id = Uuid::new_v4();
+        open_session(&db, user, id, &segment.open).await.unwrap();
+        let upload = |chunks: &[(u32, Vec<u8>)]| {
+            let db = &db;
+            let chunks = chunks.to_vec();
+            async move {
+                for (seq, payload) in &chunks {
+                    store_chunk(db, user, id, *seq, &butterlog_wire::compress(payload, 3)).await.unwrap();
+                }
+            }
+        };
+        let flights = || {
+            sqlx::query_as::<_, (i64, Option<String>, bool)>(
+                "SELECT id, arrival, discord_sync_due FROM flights WHERE user_id = $1",
+            )
+            .bind(user)
+            .fetch_all(&db)
+        };
+        let chunks = |n: usize| n as i32;
+
+        // Still running before the shutdown: nothing yet.
+        upload(&segment.chunks[..split - 1]).await;
+        assert_eq!(analyse_open_session(&db, &TestSegments, id, user, chunks(split - 1)).await.unwrap(), 0);
+        assert!(flights().await.unwrap().is_empty());
+
+        // Shut down: made, landed.
+        upload(&segment.chunks[split - 1..]).await;
+        let all = chunks(segment.chunks.len());
+        assert_eq!(analyse_open_session(&db, &TestSegments, id, user, all).await.unwrap(), 1);
+        let made = flights().await.unwrap();
+        assert_eq!(made.len(), 1);
+        assert_eq!((made[0].1.as_deref(), made[0].2), (Some("KAST"), true));
+        // Looked at again: not made twice.
+        assert_eq!(analyse_open_session(&db, &TestSegments, id, user, all).await.unwrap(), 0);
+
+        // Ended: the same flight.
+        end_session(&db, user, id).await.unwrap();
+        analyse_session(&db, &TestSegments, id, user).await.unwrap();
+        let after = flights().await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].0, made[0].0);
+        let linked: Option<i64> = sqlx::query_scalar("SELECT flight_id FROM telemetry_flights WHERE session_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(linked, Some(made[0].0));
     }
 }
