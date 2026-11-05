@@ -6,6 +6,7 @@
 
 mod chunk;
 mod quantise;
+mod runways;
 mod sampler;
 mod schema;
 mod segment;
@@ -20,6 +21,7 @@ pub use chunk::{
 #[cfg(feature = "zstd")]
 pub use chunk::{compress, decompress};
 pub use quantise::ChangeFilter;
+pub use runways::{RunwayEnd, SimRunway, SimRunways};
 pub use sampler::{period, Phase, PhaseInputs, Sampler, DEFAULT_LOW_HZ, MAX_QUEUED_EVENTS};
 pub use schema::{decode_channels, encode_channels, Channel, DeltaOrder, Kind, RateClass};
 pub use segment::{decode_segment, encode_segment, Segment};

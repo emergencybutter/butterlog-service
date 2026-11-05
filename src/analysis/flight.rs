@@ -18,7 +18,7 @@
 
 use super::places::{Places, Runway};
 use crate::normalise::{Field, Sample};
-use butterlog_wire::flags;
+use butterlog_wire::{flags, RunwayEnd, SimRunway, SimRunways};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -477,15 +477,20 @@ impl Analyser {
         dominant_airport(self.end_coords.iter(), places)
     }
 
-    fn finish(mut self, places: &Places) -> Option<FlightSummary> {
+    /// `sim_runways` are those the sim sent, drawn as it draws them; the touchdown is
+    /// measured against them first, then against OurAirports'.
+    fn finish(mut self, places: &Places, sim_runways: &[Runway]) -> Option<FlightSummary> {
         let (first, last) = (self.points.first()?.t, self.points.last()?.t);
         let departure = self.departure(places);
         let arrival = self.arrival(places);
         if let (Some(landing), Endpoint::Airport(ident)) = (self.landing.as_mut(), &arrival) {
-            if let Some(m) = best_runway_match(landing.latitude, landing.longitude, landing.heading, places.runways(ident)) {
+            let (lat, lon, heading) = (landing.latitude, landing.longitude, landing.heading);
+            if let Some(m) = best_runway_match(lat, lon, heading, sim_runways)
+                .or_else(|| best_runway_match(lat, lon, heading, places.runways(ident)))
+            {
                 landing.runway = m.ident;
-                landing.threshold_dist_ft = Some(m.along_ft);
-                landing.offset_percent = Some(m.offset_percent);
+                landing.threshold_dist_ft = m.along_ft;
+                landing.offset_percent = m.offset_percent;
             }
             let t = landing.wall_time_ms;
             if let Some(g) = peak_average_g(&self.points, t) {
@@ -591,10 +596,13 @@ fn approach_stability(points: &[Point], touchdown: i64) -> Option<f64> {
     Some(100.0 / (1.0 + instability))
 }
 
+/// Where on a runway the touchdown was. A measure that puts a touchdown on the ground off
+/// the pavement, beside the runway or before its end, says the runway is not where the
+/// sim has it, so it is `None`, not a penalty in the score.
 struct RunwayMatch {
     ident: Option<String>,
-    along_ft: f64,
-    offset_percent: f64,
+    along_ft: Option<f64>,
+    offset_percent: Option<f64>,
 }
 
 /// The runway end whose centreline the touchdown is nearest, within 200 ft and a runway
@@ -622,12 +630,47 @@ fn best_runway_match(lat: f64, lon: f64, heading: f64, runways: &[Runway]) -> Op
             };
             let score = lateral.abs() + if off_heading > 30.0 { 10_000.0 } else { 0.0 };
             if best.as_ref().is_none_or(|(s, _)| score < *s) {
-                let m = RunwayMatch { ident: ident.clone(), along_ft: along, offset_percent: lateral / half_width * 100.0 };
+                let displaced = displaced.unwrap_or(0) as f64;
+                let m = RunwayMatch {
+                    ident: ident.clone(),
+                    along_ft: Some(along).filter(|a| *a >= -displaced && (length <= 0.0 || *a <= length - displaced)),
+                    offset_percent: Some(lateral / half_width * 100.0).filter(|o| o.abs() <= 100.0),
+                };
                 best = Some((score, m));
             }
         }
     }
     best.map(|(_, m)| m)
+}
+
+/// The runways the sim sent in the samples' events, as OurAirports rows.
+fn sim_runways(samples: &[Sample]) -> Vec<Runway> {
+    samples
+        .iter()
+        .flat_map(|s| &s.events)
+        .filter(|e| e.kind == butterlog_wire::EventKind::Runways)
+        .filter_map(|e| SimRunways::decode(&e.detail))
+        .flat_map(|sent| {
+            sent.runways.into_iter().map(move |r| {
+                let [le, he] = r.ends;
+                Runway {
+                    airport_ident: sent.airport.clone(),
+                    length_ft: Some(r.length_ft.round() as i32),
+                    width_ft: Some(r.width_ft.round() as i32),
+                    le_ident: Some(le.ident),
+                    le_latitude_deg: Some(le.latitude),
+                    le_longitude_deg: Some(le.longitude),
+                    le_heading_degt: Some(le.heading),
+                    le_displaced_threshold_ft: Some(le.displaced_ft.round() as i32),
+                    he_ident: Some(he.ident),
+                    he_latitude_deg: Some(he.latitude),
+                    he_longitude_deg: Some(he.longitude),
+                    he_heading_degt: Some(he.heading),
+                    he_displaced_threshold_ft: Some(he.displaced_ft.round() as i32),
+                }
+            })
+        })
+        .collect()
 }
 
 /// The touchdown in the runway's frame, flat-earth at runway scale: lateral offset from
@@ -691,6 +734,7 @@ fn split_at_teleports(points: &[Point]) -> Vec<&[Point]> {
 /// The flights in a session's samples, in order: each from the aircraft's first move
 /// after a teleport, or after the session started.
 pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
+    let sim_runways = sim_runways(samples);
     let mut points = Vec::new();
     let mut skipped = false;
     for s in samples {
@@ -707,7 +751,7 @@ pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
             let moving = part.iter().position(|p| p.gs > MOVING_KT)?;
             let mut analyser = Analyser::new();
             part[moving..].iter().for_each(|p| analyser.update(*p));
-            analyser.finish(places)
+            analyser.finish(places, &sim_runways)
         })
         .collect()
 }
@@ -943,9 +987,67 @@ mod tests {
             he_displaced_threshold_ft: None,
         };
         // 1000 ft past the south threshold, heading north.
-        let m = best_runway_match(45.0 + 1000.0 / 364_000.0, 5.0, 2.0, &[runway]).unwrap();
+        let m = best_runway_match(45.0 + 1000.0 / 364_000.0, 5.0, 2.0, &[runway.clone()]).unwrap();
         assert_eq!(m.ident.as_deref(), Some("36"));
-        assert!((m.along_ft - 1000.0).abs() < 10.0, "{}", m.along_ft);
-        assert!(m.offset_percent.abs() < 1.0);
+        assert!((m.along_ft.unwrap() - 1000.0).abs() < 10.0, "{:?}", m.along_ft);
+        assert!(m.offset_percent.unwrap().abs() < 1.0);
+
+        // 70 ft left of a 100 ft runway's centreline, as at PHJH: off the pavement, so the
+        // runway isn't where the sim has it, and there is no offset to score.
+        let left = 70.0 / (364_000.0 * 45f64.to_radians().cos());
+        let m = best_runway_match(45.0 + 1000.0 / 364_000.0, 5.0 - left, 2.0, &[runway.clone()]).unwrap();
+        assert_eq!(m.ident.as_deref(), Some("36"));
+        assert!(m.along_ft.is_some());
+        assert_eq!(m.offset_percent, None);
+        // Before the threshold: on the ground short of the pavement.
+        let m = best_runway_match(45.0 - 200.0 / 364_000.0, 5.0, 2.0, &[runway]).unwrap();
+        assert_eq!(m.along_ft, None);
+        assert!(m.offset_percent.is_some());
+    }
+
+    #[test]
+    fn the_sims_runways_come_first() {
+        let ours = Runway {
+            airport_ident: "X".into(),
+            length_ft: Some(5000),
+            width_ft: Some(100),
+            le_ident: Some("36".into()),
+            le_latitude_deg: Some(45.0),
+            le_longitude_deg: Some(5.0),
+            le_heading_degt: Some(0.0),
+            le_displaced_threshold_ft: None,
+            he_ident: Some("18".into()),
+            he_latitude_deg: Some(45.0 + 5000.0 / 364_000.0),
+            he_longitude_deg: Some(5.0),
+            he_heading_degt: Some(180.0),
+            he_displaced_threshold_ft: None,
+        };
+        // The sim's runway is 70 ft east of ours, and the aircraft lands on its centreline.
+        let east = 70.0 / (364_000.0 * 45f64.to_radians().cos());
+        let sent = SimRunways {
+            airport: "X".into(),
+            runways: vec![SimRunway {
+                width_ft: 100.0,
+                length_ft: 5000.0,
+                ends: [
+                    RunwayEnd { ident: "36".into(), latitude: 45.0, longitude: 5.0 + east, heading: 0.0, displaced_ft: 0.0 },
+                    RunwayEnd {
+                        ident: "18".into(),
+                        latitude: 45.0 + 5000.0 / 364_000.0,
+                        longitude: 5.0 + east,
+                        heading: 180.0,
+                        displaced_ft: 0.0,
+                    },
+                ],
+            }],
+        };
+        let mut s = Sample::empty();
+        s.events.push(butterlog_wire::Event { kind: butterlog_wire::EventKind::Runways, detail: sent.encode() });
+        let sim = sim_runways(&[s]);
+        assert_eq!(sim.len(), 1);
+        let (lat, lon) = (45.0 + 1000.0 / 364_000.0, 5.0 + east);
+        let m = best_runway_match(lat, lon, 2.0, &sim).unwrap();
+        assert!(m.offset_percent.unwrap().abs() < 1.0, "{:?}", m.offset_percent);
+        assert_eq!(best_runway_match(lat, lon, 2.0, &[ours]).unwrap().offset_percent, None);
     }
 }

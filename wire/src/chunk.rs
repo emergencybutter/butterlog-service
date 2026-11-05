@@ -72,11 +72,14 @@ pub enum EventKind {
     PositionChanged,
     ReplayStarted,
     ReplayEnded,
+    /// Detail: the runways of the airport touched down at, as the sim draws them
+    /// ([`SimRunways`](crate::SimRunways)).
+    Runways,
     Other(u8),
 }
 
 impl EventKind {
-    const KNOWN: [EventKind; 11] = [
+    const KNOWN: [EventKind; 12] = [
         Self::SimStart,
         Self::SimStop,
         Self::Paused,
@@ -88,6 +91,7 @@ impl EventKind {
         Self::PositionChanged,
         Self::ReplayStarted,
         Self::ReplayEnded,
+        Self::Runways,
     ];
 
     pub fn code(self) -> u8 {
@@ -829,7 +833,8 @@ mod tests {
         }
         assert_eq!(EventKind::SimStart.code(), 1);
         assert_eq!(EventKind::ReplayEnded.code(), 11);
-        assert_eq!(EventKind::from_code(12), EventKind::Other(12));
+        assert_eq!(EventKind::Runways.code(), 12);
+        assert_eq!(EventKind::from_code(13), EventKind::Other(13));
     }
 
     #[test]
