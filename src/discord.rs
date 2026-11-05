@@ -424,13 +424,20 @@ pub async fn sync_flight_discord(
     }
 
     // 3. Fetch screenshots (cheap, no R2 yet) and compute a signature of the ordered set.
-    let screenshot_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT hash, url FROM screenshots WHERE flight_id = $1 ORDER BY id LIMIT 9"
+    let screenshot_rows: Vec<(String, String, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT hash, url, session_id FROM screenshots WHERE flight_id = $1 ORDER BY id LIMIT 9"
     )
     .bind(flight_id)
     .fetch_all(db)
     .await?;
-    let screenshot_sig = screenshot_rows.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>().join(",");
+    // A screenshot uploaded against a session is marked, so the signature of a flight whose
+    // session screenshots were recorded before their key was found here differs, and they
+    // are downloaded again.
+    let screenshot_sig = screenshot_rows
+        .iter()
+        .map(|(h, _, session)| if session.is_some() { format!("s:{h}") } else { h.clone() })
+        .collect::<Vec<_>>()
+        .join(",");
     let screenshot_count = screenshot_rows.len();
 
     // 4. Existing Discord messages for this flight (one query instead of one per channel).
@@ -492,9 +499,10 @@ pub async fn sync_flight_discord(
     // by referencing them by their original filenames.
     let mut attachments = Vec::new();
     let mut helper_embeds = Vec::new();
+    let mut all_downloaded = true;
     if download_needed {
-        for (index, (hash, _url)) in screenshot_rows.into_iter().enumerate() {
-            let key = format!("screenshots/{}/{}.webp", flight_id, hash);
+        for (index, (hash, url, session)) in screenshot_rows.into_iter().enumerate() {
+            let key = crate::handlers::screenshot_key(Some(flight_id), session, &hash, &url);
             match r2.download_object(&key).await {
                 Ok(bytes) => {
                     let filename = format!("screenshot-{}.jpg", index);
@@ -507,6 +515,7 @@ pub async fn sync_flight_discord(
                 }
                 Err(e) => {
                     tracing::error!("Failed to download screenshot {} from R2: {:?}", hash, e);
+                    all_downloaded = false;
                 }
             }
         }
@@ -617,7 +626,11 @@ pub async fn sync_flight_discord(
     }
 
     // 10. Record the screenshot signature for change detection (the throttle
-    // timestamp was already claimed atomically above).
+    // timestamp was already claimed atomically above). Not when a screenshot failed to
+    // download: the next sync tries again.
+    if !all_downloaded {
+        return Ok(());
+    }
     let _ = sqlx::query(
         "UPDATE flights SET discord_screenshot_sig = $1 WHERE id = $2"
     )

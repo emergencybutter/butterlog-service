@@ -105,3 +105,22 @@ pub async fn place(
     .await?;
     Ok(moved.rows_affected() > 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::screenshot_key;
+    use uuid::Uuid;
+
+    /// The Discord sync, deletes and the anonymous sweep find a screenshot where its upload
+    /// put it: under its session when it came with one, even once placed on a flight.
+    #[test]
+    fn a_session_screenshot_is_found_under_its_session() {
+        let session = Uuid::nil();
+        assert_eq!(
+            screenshot_key(Some(564), Some(session), "h", "https://x/h.webp"),
+            format!("screenshots/sessions/{session}/h.webp")
+        );
+        assert_eq!(screenshot_key(Some(564), None, "h", "https://x/h.webp"), "screenshots/564/h.webp");
+        assert_eq!(screenshot_key(Some(7), None, "h", "https://x/h.jpg"), "screenshots/7/h.jpg");
+    }
+}
