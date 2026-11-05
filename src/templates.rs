@@ -259,6 +259,8 @@ pub struct ShareDetailPage {
     pub nav: Nav,
     pub share_id: String,
     pub is_owner: bool,
+    /// The owner's FlySto export of the shared flight; empty when not theirs or not exportable.
+    pub export_href: String,
     /// `MSFS`, `X-Plane`, or empty when the share predates the flights link.
     /// The renderer reads the track's raw pitch and roll through it.
     pub simulator: String,
@@ -327,6 +329,7 @@ mod tests {
             nav: nav("community"),
             share_id: "abc-123".into(),
             is_owner: false,
+            export_href: String::new(),
             simulator: r#"" ; alert(1); //"#.into(),
             json_escaped: "{}".into(),
         }
@@ -345,6 +348,7 @@ mod tests {
             nav: nav("community"),
             share_id: "abc-123".into(),
             is_owner: false,
+            export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -581,6 +585,7 @@ mod tests {
             nav: nav("community"),
             share_id: "abc".into(),
             is_owner: true,
+            export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -621,20 +626,25 @@ mod tests {
             nav: nav("community"),
             share_id: "abc-123".into(),
             is_owner: true,
+            export_href: "/content/flights/7/export/flysto.csv".into(),
             simulator: "MSFS".into(),
             json_escaped: r#"{"summary":{"x":"<\/script>"}}"#.into(),
         };
         let html = owner.render().unwrap();
         assert!(html.contains("/api/v0/flights/share/abc-123"));
+        assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
         assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"<\/script>"}};"#));
 
         let visitor = ShareDetailPage {
             nav: nav("community"),
             share_id: "abc-123".into(),
             is_owner: false,
+            export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         };
-        assert!(!visitor.render().unwrap().contains("Delete Share"));
+        let html = visitor.render().unwrap();
+        assert!(!html.contains("Delete Share"));
+        assert!(!html.contains("flysto.csv"));
     }
 }

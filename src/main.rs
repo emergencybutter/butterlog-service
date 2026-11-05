@@ -1640,14 +1640,14 @@ async fn flight_share_detail_handler(
     // blob has never carried it, and the renderer needs it to read the track's
     // raw pitch and roll. `remote_flight_id` is null on shares made before the
     // flights table linked them, which reads as unknown.
-    let row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
-        "SELECT s.r2_key, s.user_id, f.statistics->>'simulator'            FROM flight_shares s            LEFT JOIN flights f ON f.id = s.remote_flight_id           WHERE s.id = $1"
+    let row: Option<(String, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT s.r2_key, s.user_id, f.statistics->>'simulator', f.id            FROM flight_shares s            LEFT JOIN flights f ON f.id = s.remote_flight_id           WHERE s.id = $1"
     )
     .bind(&share_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (key, share_owner_id, simulator) = match row {
+    let (key, share_owner_id, simulator, flight_id) = match row {
         Some(r) => r,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Share not found</h1>".to_string())).into_response()),
     };
@@ -1655,6 +1655,13 @@ async fn flight_share_detail_handler(
     // Check if the logged-in user owns this share
     let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
     let is_owner = logged_in_user_id.is_some() && logged_in_user_id == share_owner_id;
+    // The share is the page Discord and the app link to, so the owner's export is here too.
+    let export_href = match flight_id {
+        Some(id) if is_owner && export::exportable(&state.db, id).await? => {
+            format!("/content/flights/{id}/export/flysto.csv")
+        }
+        _ => String::new(),
+    };
 
     let compressed = match state.r2.download_object(&key).await {
         Ok(d) => d,
@@ -1676,6 +1683,7 @@ async fn flight_share_detail_handler(
         nav: nav_for(&state, &headers, "community", "Flight").await,
         share_id,
         is_owner,
+        export_href,
         simulator: simulator.unwrap_or_default(),
         json_escaped: json_str.replace('\\', "\\\\").replace("</", "<\\/"),
     };

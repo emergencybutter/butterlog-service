@@ -30,6 +30,7 @@
             </nav>
             {% if is_owner %}
             <div class="view-actions">
+                {% if !export_href.is_empty() %}<a class="ctl-btn" href="{{ export_href }}" download>Export for FlySto (CSV) ↓</a>{% endif %}
                 <button class="ctl-btn" onclick="deleteShare()" id="delete-btn">Delete share</button>
             </div>
             {% endif %}
