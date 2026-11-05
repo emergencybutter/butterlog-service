@@ -170,6 +170,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/flights/share",
             post(handlers::upload_flight_share_bearer_handler),
         )
+        .route("/api/v0/flights/covering", get(shares::covering_handler))
+        .route("/api/v0/flights/:id/share", post(shares::share_handler))
         .route(
             "/api/v0/multiplayer/ping",
             post(handlers::multiplayer_ping_bearer_handler),
@@ -1846,6 +1848,8 @@ mod tests {
             .route("/api/v0/flights/:id/screenshots/:hash", delete(|| async {}))
             .route("/api/v0/flights/share", post(|| async {}))
             .route("/api/v0/flights/share/:share_id", get(|| async {}).delete(|| async {}))
+            .route("/api/v0/flights/covering", get(|| async {}))
+            .route("/api/v0/flights/:id/share", post(|| async {}))
             .route("/api/v0/flights/:id/track", post(|| async {}))
             .route("/api/v0/flights/:id/track/cursor", get(|| async {}))
             .route("/api/v0/flights/:id/end", post(|| async {}))

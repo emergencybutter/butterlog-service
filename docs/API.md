@@ -256,6 +256,24 @@ A share is a self-contained, gzip-compressed JSON document (track, summary, scre
     *   `201 Created`: Returns `{ "url": "<public share page url>", "id": "<share uuid>" }`.
     *   `400 Bad Request`: Empty body, invalid gzip/JSON, or decompressed size over the limit.
 
+#### Find the Flight the Service Made
+`GET /flights/covering?from=<epoch s>&to=<epoch s>`
+
+The app has no id for a flight the service made from its telemetry; it finds it from its own log's span. Returns the caller's flight the service owns whose telemetry overlaps the span most.
+
+*   **Response:**
+    *   `200 OK`: `{ "id": 565, "share_url": "<share page url>" | null, "export_url": "<FlySto CSV url>" }`.
+    *   `404 Not Found`: No flight the service made covers the span.
+
+#### Share a Flight the Service Made
+`POST /flights/:id/share`
+
+Shares the caller's flight the service owns from the service's own document (no body), and updates its Discord post with the link; if it is already shared, that share.
+
+*   **Response:**
+    *   `201 Created` (new) or `200 OK` (existing): `{ "url": "<public share page url>", "id": "<share uuid>" }`.
+    *   `404 Not Found`: Not the caller's, not made by the service, or no track left to share.
+
 #### Delete a Share
 `DELETE /flights/share/:share_id`
 
@@ -273,7 +291,7 @@ Returns the decompressed share JSON. No authentication; served with `Access-Cont
 #### Export for FlySto
 `GET /content/flights/:id/export/flysto.csv`
 
-The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie), linked from the flight page when the flight was found in telemetry.
+The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie, or `Authorization: Bearer` from the app), linked from the flight and share pages when the flight was found in telemetry.
 
 *   **Response:** `200 OK` with `Content-Type: text/csv` as an attachment; `404 Not Found` for someone else's flight, or one with no telemetry.
 

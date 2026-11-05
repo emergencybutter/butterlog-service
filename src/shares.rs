@@ -7,6 +7,12 @@
 //! A flight the service made has no id in the app, so its share arrives with none; such a
 //! share takes the flight it covers most, by the time span of its track, once one exists.
 
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use flate2::{write::GzEncoder, Compression};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -14,6 +20,7 @@ use std::io::Write;
 
 use crate::error::AppError;
 use crate::r2::R2Client;
+use crate::AppState;
 
 /// How long after its upload a share without a flight is still matched to one.
 const ADOPT_WITHIN: &str = "2 days";
@@ -163,6 +170,131 @@ pub async fn adopt(db: &PgPool) -> Result<Vec<i64>, AppError> {
         tx.commit().await?;
     }
     Ok(adopted)
+}
+
+/// The user's flight the service owns that a span of time (epoch seconds) covers most,
+/// by the telemetry it was made from: how the app, which has no id for a flight the
+/// service made, finds it from its own log. The telemetry's span outlives the track's
+/// points, pruned past retention.
+pub async fn covering(db: &PgPool, user_id: i64, from: i64, to: i64) -> Result<Option<i64>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT f.id FROM telemetry_flights t JOIN flights f ON f.id = t.flight_id \
+          WHERE f.user_id = $1 AND f.service_owned \
+            AND t.first_at < to_timestamp($3) AND t.last_at > to_timestamp($2) \
+          ORDER BY LEAST(t.last_at, to_timestamp($3)) - GREATEST(t.first_at, to_timestamp($2)) DESC, \
+                   t.analyser_version DESC \
+          LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(from as f64)
+    .bind(to as f64)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// The id of a flight's share, its latest.
+pub async fn of_flight(db: &PgPool, flight_id: i64) -> Result<Option<String>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(flight_id)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Shares a flight the service owns from its own document, or gives back the share it
+/// already has. `None` while the flight has no track to share.
+pub async fn create(db: &PgPool, r2: &R2Client, user_id: i64, flight_id: i64) -> Result<Option<String>, AppError> {
+    if let Some(id) = of_flight(db, flight_id).await? {
+        return Ok(Some(id));
+    }
+    let Some(doc) = document(db, flight_id).await? else { return Ok(None) };
+    let (from, to): (Option<f64>, Option<f64>) = sqlx::query_as(
+        "SELECT MIN(sample_epoch)::float8, MAX(sample_epoch)::float8 FROM flight_track_points WHERE flight_id = $1",
+    )
+    .bind(flight_id)
+    .fetch_one(db)
+    .await?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let key = format!("shares/{id}.json.gz");
+    r2.upload_object(&key, doc, "application/octet-stream")
+        .await
+        .map_err(AppError::Storage)?;
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "INSERT INTO flight_shares (id, user_id, remote_flight_id, r2_key, starts_at, ends_at) \
+         VALUES ($1, $2, $3, $4, COALESCE(to_timestamp($5), NOW()), COALESCE(to_timestamp($6), NOW()))",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .bind(flight_id)
+    .bind(&key)
+    .bind(from)
+    .bind(to)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE flights SET share_id = COALESCE(share_id, $1) WHERE id = $2")
+        .bind(&id)
+        .bind(flight_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(id))
+}
+
+#[derive(serde::Deserialize)]
+pub struct Span {
+    pub from: i64,
+    pub to: i64,
+}
+
+/// `GET /api/v0/flights/covering?from=&to=`: the signed-in user's flight the service
+/// made over that span of their log, with its share and export, for the app's buttons.
+pub async fn covering_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(span): Query<Span>,
+) -> Result<Response, AppError> {
+    let user_id = crate::handlers::get_user_id_from_session(&state.db, &headers).await?;
+    let Some(id) = covering(&state.db, user_id, span.from, span.to).await? else {
+        return Err(AppError::NotFound("No flight the service made covers this".to_string()));
+    };
+    let base = &state.config.public_base_url;
+    let share_url = of_flight(&state.db, id).await?.map(|s| format!("{base}/content/flights/share/{s}"));
+    Ok(Json(json!({
+        "id": id,
+        "share_url": share_url,
+        "export_url": format!("{base}/content/flights/{id}/export/flysto.csv"),
+    }))
+    .into_response())
+}
+
+/// `POST /api/v0/flights/:id/share`: shares the signed-in user's flight the service made,
+/// from the service's own document; the share it has if it has one.
+pub async fn share_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(flight_id): Path<i64>,
+) -> Result<Response, AppError> {
+    let user_id = crate::handlers::get_user_id_from_session(&state.db, &headers).await?;
+    let owned: Option<bool> = sqlx::query_scalar("SELECT service_owned FROM flights WHERE id = $1 AND user_id = $2")
+        .bind(flight_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if owned != Some(true) {
+        return Err(AppError::NotFound("Flight not found".to_string()));
+    }
+    let had = of_flight(&state.db, flight_id).await?.is_some();
+    let Some(id) = create(&state.db, &state.r2, user_id, flight_id).await? else {
+        return Err(AppError::NotFound("The flight has no track to share".to_string()));
+    };
+    if !had {
+        crate::handlers::spawn_discord_sync(&state, flight_id);
+    }
+    let url = format!("{}/content/flights/share/{id}", state.config.public_base_url);
+    let status = if had { StatusCode::OK } else { StatusCode::CREATED };
+    Ok((status, Json(json!({ "url": url, "id": id }))).into_response())
 }
 
 /// Against a real Postgres, given by `TEST_DATABASE_URL` (skipped without it).

@@ -1289,6 +1289,12 @@ mod tests {
         assert!(csv.lines().nth(3).unwrap().contains(", 46.1"), "{}", csv.lines().nth(3).unwrap());
         assert!(flight_samples(&db, &segments, -1).await.unwrap().is_none());
 
+        // The app finds it from its log's span, which has no id for it; a span before it, nothing.
+        let (from, to) = (samples[0].wall_time_ms / 1_000, samples.last().unwrap().wall_time_ms / 1_000);
+        assert_eq!(crate::shares::covering(&db, user, from + 60, to + 600).await.unwrap(), Some(id));
+        assert_eq!(crate::shares::covering(&db, user, from - 7_200, from - 3_600).await.unwrap(), None);
+        assert_eq!(crate::shares::covering(&db, user + 1_000_000, from, to).await.unwrap(), None);
+
         // Analysed again: the same flight, not another.
         sqlx::query("UPDATE flights SET discord_sync_due = FALSE WHERE id = $1").bind(id).execute(&db).await.unwrap();
         analyse_session(&db, &segments, session, user).await.unwrap();
