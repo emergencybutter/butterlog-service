@@ -22,6 +22,7 @@ mod live;
 mod templates;
 mod track;
 mod sessions;
+mod screenshots;
 mod anonymous;
 mod normalise;
 mod analysis;
@@ -193,6 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(axum::extract::DefaultBodyLimit::max(sessions::MAX_CHUNK_BYTES)),
         )
         .route("/api/v0/sessions/:id/end", post(sessions::end_session_handler))
+        .route(
+            "/api/v0/sessions/:id/screenshots",
+            post(screenshots::upload_session_screenshot_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(handlers::MAX_SCREENSHOT_UPLOAD)),
+        )
         // Anonymous accounts (docs/sim-native-telemetry.md §6.2).
         .route("/api/v0/anonymous", post(anonymous::create_handler))
         .route("/api/v0/anonymous/link", post(anonymous::rotate_link_handler))

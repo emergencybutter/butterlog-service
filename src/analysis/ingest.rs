@@ -344,6 +344,8 @@ async fn take_over(
         .execute(&mut *tx)
         .await?;
     }
+    // Its screenshots uploaded against the session: those taken while it flew.
+    crate::screenshots::place(&mut *tx, user_id, id, timestamp(f.first_ms), ended_at).await?;
     Ok(id)
 }
 
@@ -1297,7 +1299,6 @@ mod tests {
         .await
         .unwrap();
         let id = Uuid::new_v4();
-        open_session(&db, user, id, &segment.open).await.unwrap();
         let upload = |chunks: &[(u32, Vec<u8>)]| {
             let db = &db;
             let chunks = chunks.to_vec();
@@ -1318,7 +1319,35 @@ mod tests {
         };
         let due_no_more = || sqlx::query("UPDATE flights SET discord_sync_due = FALSE WHERE user_id = $1").bind(user).execute(&db);
 
+        // Screenshots uploaded against the session: one in the air, one after shutdown.
+        let shot = |hash: &'static str, at: i64| {
+            let db = &db;
+            async move {
+                sqlx::query(
+                    "INSERT INTO screenshots (hash, url, created_at, session_id, user_id, taken_at) \
+                     VALUES ($1, 'u.webp', $2, $3, $4, $2)",
+                )
+                .bind(hash)
+                .bind(timestamp(at))
+                .bind(id)
+                .bind(user)
+                .execute(db)
+                .await
+                .unwrap();
+            }
+        };
+        let placed = || {
+            sqlx::query_as::<_, (String, Option<i64>)>(
+                "SELECT hash, flight_id FROM screenshots WHERE user_id = $1 ORDER BY hash",
+            )
+            .bind(user)
+            .fetch_all(&db)
+        };
+
         // A minute after takeoff: active, its takeoff marked, a track so far, its post due.
+        open_session(&db, user, id, &segment.open).await.unwrap();
+        shot("a-air", takeoff + 30_000).await;
+        shot("b-parked", off + ENGINE_OFF_MS + 2_000).await;
         upload(&segment.chunks[..airborne]).await;
         assert_eq!(analyse_open_session(&db, &TestSegments, id, user, airborne as i32, true).await.unwrap(), 1);
         let flying = flights().await.unwrap();
@@ -1327,6 +1356,9 @@ mod tests {
         assert_eq!((arrival, status.as_str(), end_reason, due), (None, "active", None, true));
         assert!(points > 30, "{points} track points");
         assert_eq!(statistics["events"][0]["eventType"], json!("takeoff"));
+        // While it flies, every screenshot since it began is its own.
+        let on = placed().await.unwrap();
+        assert_eq!(on, vec![("a-air".into(), Some(flight_id)), ("b-parked".into(), Some(flight_id))]);
         due_no_more().await.unwrap();
 
         // Between analyses, the newest chunks move it: its track and position, not its
@@ -1379,6 +1411,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, points as i64);
+        // Once it is over, the one taken after it ended is no longer its.
+        assert_eq!(placed().await.unwrap(), vec![("a-air".into(), Some(flight_id)), ("b-parked".into(), None)]);
         let landing = statistics["events"].as_array().unwrap().iter().find(|e| e["eventType"] == "landing").cloned();
         assert!(landing.unwrap()["touchdownFpm"].is_number());
         // Looked at again with no new chunks, or with them: nothing more.

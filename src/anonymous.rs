@@ -285,10 +285,6 @@ pub struct Swept {
 }
 
 /// The R2 key of a screenshot, as `delete_screenshot_core` derives it.
-fn screenshot_key(flight_id: i64, hash: &str, url: &str) -> String {
-    let ext = if url.ends_with(".webp") { "webp" } else { "jpg" };
-    format!("screenshots/{flight_id}/{hash}.{ext}")
-}
 
 /// Deletes what anonymous users have kept past retention: flights with their screenshots
 /// and shares, sessions with their segments, then accounts left with nothing and unused.
@@ -307,8 +303,8 @@ pub async fn sweep(db: &PgPool, store: &impl ObjectStore) -> Result<Swept, AppEr
     .fetch_all(db)
     .await?;
     'flights: for flight_id in flights {
-        let screenshots: Vec<(String, String)> =
-            sqlx::query_as("SELECT hash, url FROM screenshots WHERE flight_id = $1")
+        let screenshots: Vec<(String, String, Option<uuid::Uuid>)> =
+            sqlx::query_as("SELECT hash, url, session_id FROM screenshots WHERE flight_id = $1")
                 .bind(flight_id)
                 .fetch_all(db)
                 .await?;
@@ -321,7 +317,7 @@ pub async fn sweep(db: &PgPool, store: &impl ObjectStore) -> Result<Swept, AppEr
                 .await?;
         let keys = screenshots
             .iter()
-            .map(|(hash, url)| screenshot_key(flight_id, hash, url))
+            .map(|(hash, url, session)| crate::handlers::screenshot_key(Some(flight_id), *session, hash, url))
             .chain(shares);
         for key in keys {
             if let Err(e) = store.delete_public(&key).await {

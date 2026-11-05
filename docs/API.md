@@ -197,6 +197,20 @@ Chunks continue from the previous one, so the service decodes them in order from
 
 `status` goes `open` → `ended` → `compacted`. Without this call a session is ended 30 minutes after its last chunk, and reopens if chunks arrive again. An ended session whose chunks are all in is compacted into one segment object in a private R2 bucket (`R2_TELEMETRY_BUCKET`; unset, chunks stay in Postgres), at once if the client ended it, after 24 hours if it went silent, so a client back from an outage can still resend.
 
+#### Upload a Screenshot to a Session
+`POST /sessions/:id/screenshots`
+
+For a flight the service makes, which the app has no id for (design §5.5).
+
+*   **Request Body:** `multipart/form-data`, at most **15MB**: `screenshot`, a WebP of at most 1600 px each way, and `taken_at`, when it was taken (RFC 3339).
+*   **Response:**
+    *   `201 Created`: `{ "hash", "url", "flight_id" }`. `flight_id` is the flight it was placed on, or `null` when none of the user's flights contains `taken_at` yet: the service places it again each time it makes or updates a flight, so one taken before the flight is made lands on it then.
+    *   `200 OK`: the same image was uploaded before; it is answered as it was.
+    *   `400 Bad Request`: not a WebP, too large, or no `taken_at`.
+    *   `404 Not Found`: no such session for this user.
+
+Its `created_at`, which the pages place screenshots on the track by, is `taken_at`. Deleting it goes through its flight, `DELETE /flights/:id/screenshots/:hash`.
+
 ---
 
 ### Screenshot Management

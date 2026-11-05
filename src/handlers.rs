@@ -604,23 +604,58 @@ async fn upload_screenshot_core(
     state: AppState,
     user_id: i64,
     flight_id: i64,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     if !flight_belongs_to_user(&state.db, flight_id, user_id).await? {
         return Err(AppError::NotFound("Flight not found".to_string()));
     }
+    let ScreenshotUpload { bytes: raw_bytes, hash, .. } = read_screenshot(multipart).await?;
 
-    // Extract image field
+    // Upload to Cloudflare R2
+    let key = format!("screenshots/{}/{}.webp", flight_id, hash);
+    let url = state.r2.upload_object(&key, raw_bytes, "image/webp").await
+        .map_err(AppError::Storage)?;
+
+    // Save/update to DB (avoid duplicate check via UNIQUE constraint)
+    sqlx::query(
+        "INSERT INTO screenshots (flight_id, hash, url) VALUES ($1, $2, $3) ON CONFLICT (flight_id, hash) DO NOTHING"
+    )
+    .bind(flight_id)
+    .bind(&hash)
+    .bind(&url)
+    .execute(&state.db)
+    .await?;
+
+    // Trigger Discord Sync in background
+    spawn_discord_sync(&state, flight_id);
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash, "url": url }))))
+}
+
+/// A screenshot as uploaded: the WebP image, checked, its SHA-256, and the other text
+/// fields of the form (`taken_at`, on an upload against a session).
+pub(crate) struct ScreenshotUpload {
+    pub bytes: Vec<u8>,
+    pub hash: String,
+    pub fields: std::collections::HashMap<String, String>,
+}
+
+/// Reads a screenshot upload's form: the `screenshot` field, a WebP no larger than 1600 px
+/// either way, and any text fields beside it.
+pub(crate) async fn read_screenshot(mut multipart: Multipart) -> Result<ScreenshotUpload, AppError> {
     let mut field_bytes = None;
+    let mut fields = std::collections::HashMap::new();
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         AppError::BadRequest(format!("Failed to read multipart field: {}", e))
     })? {
-        if field.name() == Some("screenshot") {
-            let bytes = field.bytes().await.map_err(|e| {
-                AppError::BadRequest(format!("Failed to read field bytes: {}", e))
-            })?;
+        let name = field.name().unwrap_or("").to_string();
+        let bytes = field.bytes().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to read field bytes: {}", e))
+        })?;
+        if name == "screenshot" {
             field_bytes = Some(bytes.to_vec());
-            break;
+        } else if bytes.len() <= 256 {
+            fields.insert(name, String::from_utf8_lossy(&bytes).into_owned());
         }
     }
 
@@ -657,26 +692,18 @@ async fn upload_screenshot_core(
     let mut hasher = Sha256::new();
     hasher.update(&raw_bytes);
     let hash = format!("{:x}", hasher.finalize());
+    Ok(ScreenshotUpload { bytes: raw_bytes, hash, fields })
+}
 
-    // Upload to Cloudflare R2
-    let key = format!("screenshots/{}/{}.webp", flight_id, hash);
-    let url = state.r2.upload_object(&key, raw_bytes, "image/webp").await
-        .map_err(AppError::Storage)?;
-
-    // Save/update to DB (avoid duplicate check via UNIQUE constraint)
-    sqlx::query(
-        "INSERT INTO screenshots (flight_id, hash, url) VALUES ($1, $2, $3) ON CONFLICT (flight_id, hash) DO NOTHING"
-    )
-    .bind(flight_id)
-    .bind(&hash)
-    .bind(&url)
-    .execute(&state.db)
-    .await?;
-
-    // Trigger Discord Sync in background
-    spawn_discord_sync(&state, flight_id);
-
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "hash": hash, "url": url }))))
+/// Where a screenshot is in R2: under its session, uploaded against it, or under its
+/// flight, uploaded the old way (`.jpg` before uploads were WebP).
+pub(crate) fn screenshot_key(flight_id: Option<i64>, session_id: Option<uuid::Uuid>, hash: &str, url: &str) -> String {
+    let ext = if url.ends_with(".webp") { "webp" } else { "jpg" };
+    match (session_id, flight_id) {
+        (Some(session), _) => format!("screenshots/sessions/{session}/{hash}.{ext}"),
+        (None, Some(flight)) => format!("screenshots/{flight}/{hash}.{ext}"),
+        (None, None) => format!("screenshots/{hash}.{ext}"),
+    }
 }
 
 pub async fn delete_screenshot_handler(
@@ -707,11 +734,12 @@ async fn delete_screenshot_core(
     }
 
     // Query URL from DB to determine file extension for R2 key
-    let url: Option<String> = sqlx::query_scalar("SELECT url FROM screenshots WHERE flight_id = $1 AND hash = $2")
-        .bind(flight_id)
-        .bind(&hash)
-        .fetch_optional(&state.db)
-        .await?;
+    let row: Option<(String, Option<uuid::Uuid>)> =
+        sqlx::query_as("SELECT url, session_id FROM screenshots WHERE flight_id = $1 AND hash = $2")
+            .bind(flight_id)
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
 
     // Delete from DB first
     sqlx::query("DELETE FROM screenshots WHERE flight_id = $1 AND hash = $2")
@@ -720,14 +748,11 @@ async fn delete_screenshot_core(
         .execute(&state.db)
         .await?;
 
-    // R2 keys are namespaced per flight (screenshots/{flight_id}/{hash}), so
-    // this flight's object is never shared with other flights — always delete it.
-    let key = match url {
-        Some(url_str) if !url_str.ends_with(".webp") => {
-            format!("screenshots/{}/{}.jpg", flight_id, hash)
-        }
-        _ => format!("screenshots/{}/{}.webp", flight_id, hash),
-    };
+    // R2 keys are namespaced per flight (screenshots/{flight_id}/{hash}), or per
+    // session for one uploaded against it, so this object is never another
+    // flight's — always delete it.
+    let (url, session) = row.map_or((String::from(".webp"), None), |(u, s)| (u, s));
+    let key = screenshot_key(Some(flight_id), session, &hash, &url);
     state.r2.delete_object(&key).await
         .map_err(AppError::Storage)?;
 
