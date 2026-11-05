@@ -106,6 +106,7 @@
         <div class="pilot">Flown by {{ pilot }}</div>
         {{ landing_badge|safe }}
         {% if !share_href.is_empty() %}<div><a href="{{ share_href }}" class="share-link">View 3D flight path →</a></div>{% endif %}
+        {% if !export_href.is_empty() %}<div><a href="{{ export_href }}" class="share-link" download>Export for FlySto (CSV) ↓</a></div>{% endif %}
         {% if !touchdown_stats.is_empty() || !peak_stats.is_empty() %}
         <div class="stats-grid">
             {% if !touchdown_stats.is_empty() %}

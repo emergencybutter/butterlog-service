@@ -214,6 +214,10 @@ pub(crate) fn spawn_discord_sync(state: &crate::AppState, flight_id: i64) {
     let http = state.discord_http.clone();
     let base_url = state.config.public_base_url.clone();
     tokio::spawn(async move {
+        // A flight the service owns has its share written from it again first.
+        if let Err(e) = crate::shares::refresh(&db, &r2, flight_id).await {
+            tracing::error!("Share refresh failed for flight {}: {:?}", flight_id, e);
+        }
         if let Err(e) = crate::discord::sync_flight_discord(&db, &r2, &http, flight_id, &base_url).await {
             tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
         }
@@ -807,13 +811,19 @@ async fn upload_flight_share_core(
         .await
         .map_err(AppError::Storage)?;
 
+    // Its track's span, which matches it to the flight the service made when the app has
+    // no id for it (`shares::adopt`).
+    let (starts, ends) = crate::shares::span(&share).map_or((None, None), |(a, b)| (Some(a as f64), Some(b as f64)));
     sqlx::query(
-        "INSERT INTO flight_shares (id, user_id, remote_flight_id, r2_key) VALUES ($1, $2, $3, $4)"
+        "INSERT INTO flight_shares (id, user_id, remote_flight_id, r2_key, starts_at, ends_at) \
+         VALUES ($1, $2, $3, $4, COALESCE(to_timestamp($5), NOW()), COALESCE(to_timestamp($6), NOW()))"
     )
     .bind(&share_id)
     .bind(user_id)
     .bind(remote_flight_id)
     .bind(&r2_key)
+    .bind(starts)
+    .bind(ends)
     .execute(&state.db)
     .await?;
 

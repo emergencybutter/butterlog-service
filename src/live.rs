@@ -364,6 +364,59 @@ pub async fn live_flight_handler(
         return Ok((StatusCode::NOT_MODIFIED, cache_headers(status, &etag)).into_response());
     }
 
+    let transposed = load_track(&state.db, flight_id, q.since).await?;
+
+    // On a delta the client already has the summary and gallery; sending them
+    // again on every 10s poll is most of the payload.
+    let is_delta = q.since.is_some();
+    let (summary, screenshots) = if is_delta {
+        (None, None)
+    } else {
+        let shots = load_screenshots(&state.db, flight_id).await?;
+
+        let summary = adapt_summary(
+            &statistics,
+            notes.as_deref(),
+            shots.len(),
+            status == "ended",
+        );
+        (Some(summary), Some(shots))
+    };
+
+    let doc = LiveDocument {
+        status: status.to_string(),
+        simulator: statistics
+            .get("simulator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        last_epoch,
+        updated_ago_secs,
+        share_id,
+        track_points: track_points as i64,
+        commands: crate::commands::advertised_commands(&statistics),
+        pilot: Pilot {
+            user_id,
+            name: global_name.unwrap_or(username),
+        },
+        current: extract_current(&statistics),
+        summary,
+        summary_unchanged: is_delta,
+        transposed_data: transposed,
+        screenshots,
+        remote_flight_id: id,
+    };
+
+    Ok((StatusCode::OK, cache_headers(status, &etag), Json(doc)).into_response())
+}
+
+/// A flight's stored track in the share's columnar shape, from after `since` (an epoch)
+/// or whole.
+pub(crate) async fn load_track(
+    db: &sqlx::PgPool,
+    flight_id: i64,
+    since: Option<i64>,
+) -> Result<TransposedPoints, AppError> {
     // sqlx only derives FromRow for tuples up to 16 elements, so the row is a
     // named struct. Every added column is nullable: a flight recorded before
     // the client sent it has none, and the renderer omits that chart.
@@ -404,8 +457,8 @@ pub async fn live_flight_handler(
           ORDER BY sample_epoch",
     )
     .bind(flight_id)
-    .bind(q.since.unwrap_or(i64::MIN))
-    .fetch_all(&state.db)
+    .bind(since.unwrap_or(i64::MIN))
+    .fetch_all(db)
     .await?;
 
     // Transpose back into the columnar wire format the renderer decodes. The
@@ -439,61 +492,21 @@ pub async fn live_flight_handler(
         };
     }
     column!(heading, track, ground_speed, true_airspeed, baro, magvar, g_load, oat, wind_speed, wind_dir, fuel_flow, fuel_left, fuel_right, rpm, pct_power, manifold, oil_temp, oil_press);
+    Ok(transposed)
+}
 
-    // On a delta the client already has the summary and gallery; sending them
-    // again on every 10s poll is most of the payload.
-    let is_delta = q.since.is_some();
-    let (summary, screenshots) = if is_delta {
-        (None, None)
-    } else {
-        let shots: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT url, created_at FROM screenshots WHERE flight_id = $1 ORDER BY id",
-        )
-        .bind(flight_id)
-        .fetch_all(&state.db)
-        .await?;
-
-        let summary = adapt_summary(
-            &statistics,
-            notes.as_deref(),
-            shots.len(),
-            status == "ended",
-        );
-        let shots = shots
-            .into_iter()
-            .map(|(url, created_at)| ShareScreenshot {
-                timestamp: created_at.timestamp(),
-                url,
-            })
-            .collect();
-        (Some(summary), Some(shots))
-    };
-
-    let doc = LiveDocument {
-        status: status.to_string(),
-        simulator: statistics
-            .get("simulator")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        last_epoch,
-        updated_ago_secs,
-        share_id,
-        track_points: track_points as i64,
-        commands: crate::commands::advertised_commands(&statistics),
-        pilot: Pilot {
-            user_id,
-            name: global_name.unwrap_or(username),
-        },
-        current: extract_current(&statistics),
-        summary,
-        summary_unchanged: is_delta,
-        transposed_data: transposed,
-        screenshots,
-        remote_flight_id: id,
-    };
-
-    Ok((StatusCode::OK, cache_headers(status, &etag), Json(doc)).into_response())
+/// A flight's screenshots, as the share and the live document list them.
+pub(crate) async fn load_screenshots(db: &sqlx::PgPool, flight_id: i64) -> Result<Vec<ShareScreenshot>, AppError> {
+    let shots: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT url, COALESCE(taken_at, created_at) FROM screenshots WHERE flight_id = $1 ORDER BY id",
+    )
+    .bind(flight_id)
+    .fetch_all(db)
+    .await?;
+    Ok(shots
+        .into_iter()
+        .map(|(url, at)| ShareScreenshot { timestamp: at.timestamp(), url })
+        .collect())
 }
 
 /// A finished flight never changes, so it caches hard; a live one must not.

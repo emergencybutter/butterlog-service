@@ -286,6 +286,7 @@ async fn take_over(
                     status = CASE WHEN service_made THEN $4 ELSE status END, \
                     ended_at = CASE WHEN service_made THEN $5 ELSE ended_at END, \
                     end_reason = CASE WHEN service_made THEN $6 ELSE end_reason END, \
+                    created_at = CASE WHEN service_made THEN $7 ELSE created_at END, \
                     discord_sync_due = TRUE, updated_at = CURRENT_TIMESTAMP \
               WHERE id = $1 RETURNING id, service_made",
         )
@@ -295,6 +296,7 @@ async fn take_over(
         .bind(status)
         .bind(ended_at)
         .bind(end_reason)
+        .bind(timestamp(f.first_ms))
         .fetch_one(&mut *tx)
         .await?,
         None => sqlx::query_as(
@@ -749,6 +751,51 @@ fn summary_json(f: &FlightSummary, places: &Places) -> Value {
         obj.insert("score".into(), json!(landing.score()));
     }
     v
+}
+
+/// The samples of a flight the analysis found, from the first to the last, decoded again
+/// from the stream of sessions it was found in, with the stream's aircraft title. `None`
+/// when no analysis found it: a flight the app made with no telemetry, or one whose
+/// sessions have not been analysed yet.
+pub async fn flight_samples(
+    db: &PgPool,
+    segments: &impl SegmentStore,
+    flight_id: i64,
+) -> Result<Option<(String, Vec<Sample>)>, AppError> {
+    let found: Option<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT session_id, first_at, last_at FROM telemetry_flights \
+          WHERE flight_id = $1 ORDER BY analyser_version DESC, last_at DESC LIMIT 1",
+    )
+    .bind(flight_id)
+    .fetch_optional(db)
+    .await?;
+    let Some((first, from, to)) = found else { return Ok(None) };
+    let mut ids = vec![first];
+    let mut samples = Vec::new();
+    let mut title = None;
+    loop {
+        let at = *ids.last().expect("not empty");
+        let part = match load(db, segments, at).await? {
+            Ok(p) => p,
+            Err(e) => return Err(AppError::Storage(format!("session {at} not loaded: {e}"))),
+        };
+        title.get_or_insert(part.header.aircraft.title.clone());
+        super::resume::join(&mut samples, part.samples);
+        if samples.last().is_some_and(|s| s.wall_time_ms > to.timestamp_millis()) {
+            break;
+        }
+        let next: Option<Uuid> = sqlx::query_scalar("SELECT id FROM telemetry_sessions WHERE continues = $1 ORDER BY started_at LIMIT 1")
+            .bind(at)
+            .fetch_optional(db)
+            .await?;
+        match next.filter(|n| !ids.contains(n) && ids.len() < MAX_CHAIN) {
+            Some(n) => ids.push(n),
+            None => break,
+        }
+    }
+    let (from, to) = (from.timestamp_millis(), to.timestamp_millis());
+    samples.retain(|s| (from..=to).contains(&s.wall_time_ms));
+    Ok(Some((title.unwrap_or_default(), samples)))
 }
 
 /// Analyses up to `limit` ended sessions whose chunks are all in and decoded, and that
@@ -1225,6 +1272,22 @@ mod tests {
             .unwrap();
         assert_eq!(stored, points as i64);
         assert_eq!(linked(session).await.unwrap(), (Some(id), None));
+
+        // Its export: the flight's samples from its session, a row a second.
+        let (title, samples) = flight_samples(&db, &segments, id).await.unwrap().unwrap();
+        assert!(!title.is_empty());
+        let csv = crate::export::flysto_csv(&title, &samples);
+        let rows = csv.lines().count() - 3;
+        let seconds = (samples.last().unwrap().wall_time_ms - samples[0].wall_time_ms) / 1_000;
+        // Every second but those of a silence too long to carry over, a pause in the fixture.
+        let silent: i64 = samples
+            .windows(2)
+            .map(|w| (w[1].wall_time_ms - w[0].wall_time_ms) / 1_000)
+            .filter(|g| *g > 10)
+            .sum();
+        assert!((rows as i64 - (seconds - silent)).abs() <= 2, "{rows} rows over {seconds} s, {silent} silent");
+        assert!(csv.lines().nth(3).unwrap().contains(", 46.1"), "{}", csv.lines().nth(3).unwrap());
+        assert!(flight_samples(&db, &segments, -1).await.unwrap().is_none());
 
         // Analysed again: the same flight, not another.
         sqlx::query("UPDATE flights SET discord_sync_due = FALSE WHERE id = $1").bind(id).execute(&db).await.unwrap();

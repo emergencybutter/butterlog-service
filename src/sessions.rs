@@ -631,6 +631,19 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>, sync_flight: impl 
                     _ => {}
                 }
                 sync_due(&db, &sync_flight).await;
+                // Shares the app uploaded for flights the service made take those flights.
+                if let Err(e) = crate::shares::fill_spans(&db, &store.r2, 10).await {
+                    tracing::error!("share spans not read: {e}");
+                }
+                match crate::shares::adopt(&db).await {
+                    Ok(flights) => {
+                        if !flights.is_empty() {
+                            tracing::info!(count = flights.len(), "linked shares to the flights the service made");
+                        }
+                        flights.into_iter().for_each(&sync_flight);
+                    }
+                    Err(e) => tracing::error!("share linking failed: {e}"),
+                }
             }
         }
     });

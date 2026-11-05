@@ -23,6 +23,8 @@ mod templates;
 mod track;
 mod sessions;
 mod screenshots;
+mod shares;
+mod export;
 mod anonymous;
 mod normalise;
 mod analysis;
@@ -256,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::get_flight_share_json_handler).delete(handlers::delete_flight_share_session_handler),
         )
         .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
+        .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
         .route("/content/flights/:id", get(flight_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
@@ -631,6 +634,7 @@ async fn flight_detail_page(
             .bind(flight_id)
             .fetch_optional(&state.db)
             .await?;
+    let owner = live.as_ref().map(|l| l.2);
     if let Some((status, track_points, owner_id)) = live {
         if status != "ended" && track_points > 0 {
             let viewer = handlers::get_user_id_from_session(&state.db, &headers)
@@ -702,6 +706,13 @@ async fn flight_detail_page(
         .map(|id| format!("/content/flights/share/{}", id))
         .unwrap_or_default();
 
+    let viewer = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+    let export_href = if viewer.is_some() && viewer == owner && export::exportable(&state.db, flight_id).await? {
+        format!("/content/flights/{flight_id}/export/flysto.csv")
+    } else {
+        String::new()
+    };
+
     let page = templates::FlightDetailPage {
         nav: nav_for(&state, &headers, "community", "Flight").await,
         dep,
@@ -723,6 +734,7 @@ async fn flight_detail_page(
         touchdown_stats,
         peak_stats,
         share_href,
+        export_href,
     };
 
     Ok(Html(page.render()?).into_response())

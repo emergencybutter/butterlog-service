@@ -18,7 +18,7 @@
 
 use super::places::{Places, Runway};
 use crate::normalise::{Field, Sample};
-use butterlog_wire::{flags, RunwayEnd, SimRunway, SimRunways};
+use butterlog_wire::{flags, SimRunways};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -759,6 +759,7 @@ pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use butterlog_wire::{RunwayEnd, SimRunway};
     use crate::analysis::places::mock_airport;
 
     /// Parked on the ground at 45,45 with full tanks, `secs` into the flight.

@@ -251,6 +251,7 @@ A share is a self-contained, gzip-compressed JSON document (track, summary, scre
 `POST /flights/share`
 
 *   **Request Body:** gzip-compressed JSON (`Content-Type: application/octet-stream`). The decompressed document may be at most 32MB. When the document contains a `remoteFlightId` (or `remote_flight_id`) field, the flight's Discord notification is updated with the share link.
+*   The share of a flight the service owns (rollout phase 5) is the service's: its document is written again from the flight, its statistics, track and screenshots, each time the flight changes, under the same id. A document without a `remoteFlightId`, from an app whose flight the service made, is given the user's flight the service owns that its track (`transposedData.timestamps`) overlaps most, within a minute or so, if that flight has no share yet.
 *   **Response:**
     *   `201 Created`: Returns `{ "url": "<public share page url>", "id": "<share uuid>" }`.
     *   `400 Bad Request`: Empty body, invalid gzip/JSON, or decompressed size over the limit.
@@ -268,6 +269,13 @@ Deletes a share you own (database record and stored object).
 `GET /api/v0/flights/share/:share_id`
 
 Returns the decompressed share JSON. No authentication; served with `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=86400`.
+
+#### Export for FlySto
+`GET /content/flights/:id/export/flysto.csv`
+
+The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie), linked from the flight page when the flight was found in telemetry.
+
+*   **Response:** `200 OK` with `Content-Type: text/csv` as an attachment; `404 Not Found` for someone else's flight, or one with no telemetry.
 
 ---
 

@@ -108,6 +108,8 @@ pub struct FlightDetailPage {
     pub peak_stats: Vec<StatItem>,
     /// Relative link to this flight's public 3D share page; empty when unshared.
     pub share_href: String,
+    /// The FlySto export, for its pilot when its telemetry has it; empty hides it.
+    pub export_href: String,
 }
 
 /// A single label/value row in a flight-detail stats card.
@@ -371,6 +373,7 @@ mod tests {
             touchdown_stats: vec![StatItem { label: "Vertical Speed".into(), value: "-121.00 fpm".into() }],
             peak_stats: vec![StatItem { label: "Indicated Airspeed".into(), value: "142.00 kts".into() }],
             share_href: "/content/flights/share/abc123".into(),
+            export_href: "/content/flights/7/export/flysto.csv".into(),
         };
         let html = page.render().unwrap();
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
