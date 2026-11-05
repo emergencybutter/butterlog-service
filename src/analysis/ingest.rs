@@ -32,6 +32,11 @@ pub const ANALYSER_VERSION: i32 = 9;
 /// the same flight.
 const SAME_FLIGHT_MS: i64 = 5 * 60_000;
 
+/// A flight the service owns holds its own analysis's times, so the same flight analysed
+/// again lands within this; another takeoff minutes later, a new session after a reload
+/// or a second circuit, is another flight.
+const SAME_ANALYSIS_MS: i64 = 5_000;
+
 /// Airports and runways, loaded on first use from `BUTTERLOG_DATA_DIR` (default `data`,
 /// beside the binary in the image). `None` if they don't load.
 fn places() -> Option<&'static Places> {
@@ -371,7 +376,7 @@ async fn link(
     .bind(timestamp(f.last_ms))
     .fetch_all(&mut *tx)
     .await?;
-    let candidates: Vec<(i64, Value)> = rows.iter().map(|r| (r.0, r.1.clone())).collect();
+    let candidates: Vec<(i64, Value, bool)> = rows.iter().map(|r| (r.0, r.1.clone(), r.2)).collect();
     let linked = same_flight(f, &candidates).map(|c| c.0);
     // The app's document: its own, kept aside on a flight the service owns.
     let app_doc = linked
@@ -687,9 +692,11 @@ fn timestamp(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
 
-/// The old-path flight this one is, by takeoff time (the app's is the roll's), or start
-/// time with no takeoff.
-fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value)]) -> Option<&'a (i64, Value)> {
+/// The flight this one is, by takeoff time (the app's is the roll's), or start time with
+/// no takeoff: an old-path flight within [`SAME_FLIGHT_MS`], or one the service owns, its
+/// document the service's, within [`SAME_ANALYSIS_MS`]. Candidates are `(id, statistics,
+/// service_owned)`.
+fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value, bool)]) -> Option<&'a (i64, Value, bool)> {
     let (ours, key) = match f.takeoff_roll_ms.or(f.takeoff_ms) {
         Some(t) => (t, "takeoff_time"),
         None => (f.first_ms, "start_time"),
@@ -697,7 +704,7 @@ fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value)]) -> Option<
     candidates
         .iter()
         .filter_map(|c| Some((c, (app_time(&c.1[key])? - ours).abs())))
-        .filter(|(_, gap)| *gap <= SAME_FLIGHT_MS)
+        .filter(|(c, gap)| *gap <= if c.2 { SAME_ANALYSIS_MS } else { SAME_FLIGHT_MS })
         .min_by_key(|(_, gap)| *gap)
         .map(|(c, _)| c)
 }
@@ -892,14 +899,20 @@ mod tests {
     fn matches_the_old_path_flight_by_takeoff() {
         let t = app_time(&json!("2026-11-01 01:09:47.776")).unwrap();
         let candidates = vec![
-            (1, json!({ "takeoff_time": "2026-10-31 18:00:00.000" })),
-            (2, json!({ "takeoff_time": "2026-11-01 01:09:47.776", "start_time": "2026-11-01 01:08:56.650" })),
-            (3, json!({ "start_time": "2026-11-01 01:10:00" })),
+            (1, json!({ "takeoff_time": "2026-10-31 18:00:00.000" }), false),
+            (2, json!({ "takeoff_time": "2026-11-01 01:09:47.776", "start_time": "2026-11-01 01:08:56.650" }), false),
+            (3, json!({ "start_time": "2026-11-01 01:10:00" }), false),
         ];
         assert_eq!(same_flight(&flight(Some(t + 400), t - 50_000), &candidates).unwrap().0, 2);
         // No takeoff: by start, within five minutes.
         assert_eq!(same_flight(&flight(None, t + 60_000), &candidates).unwrap().0, 3);
         assert!(same_flight(&flight(Some(t + 3_600_000), t), &candidates).is_none());
+
+        // The service's own flight is the one it analysed, not a second circuit minutes
+        // later (flight 564 took two sessions' circuits, 4.5 minutes apart, as one).
+        let owned = vec![(4, json!({ "takeoff_time": "2026-11-01 01:09:47.776" }), true)];
+        assert_eq!(same_flight(&flight(Some(t + 20_000), t - 50_000), &owned).unwrap().0, 4);
+        assert!(same_flight(&flight(Some(t + 270_000), t + 200_000), &owned).is_none());
     }
 
     #[test]
