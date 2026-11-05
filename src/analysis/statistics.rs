@@ -134,9 +134,19 @@ fn closest_airport(s: &Sample, places: &Places) -> Option<Value> {
 /// A flight's track as the app uploads it to `flight_track_points`: the first sample of
 /// each second, in the app's keys and signs.
 pub fn track(f: &FlightSummary, samples: &[Sample]) -> Vec<crate::track::DecodedPoint> {
+    points(samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)))
+}
+
+/// The newest sample in the app's keys, as `current_snapshot`.
+pub fn current_snapshot(s: &Sample) -> Value {
+    Value::Object(snapshot(s))
+}
+
+/// Samples as track points: the first of each second with a position.
+pub fn points<'a>(samples: impl Iterator<Item = &'a Sample>) -> Vec<crate::track::DecodedPoint> {
     let mut points = Vec::new();
     let mut last_epoch = None;
-    for s in samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)) {
+    for s in samples {
         let epoch = s.wall_time_ms.div_euclid(1000);
         if last_epoch == Some(epoch) {
             continue;

@@ -569,6 +569,10 @@ pub async fn compact_ready(
     Ok(ready.len())
 }
 
+/// How often the flights of open sessions move with their newest chunks
+/// (`analysis::ingest::tail_open`). The app sends a chunk every 5 s.
+const TAIL_EVERY_SECS: u64 = 15;
+
 /// Ends silent sessions, analyses ended ones and compacts analysed ones, every minute, then
 /// analyses compacted sessions again from their segments after an analyser change. Without
 /// a telemetry bucket configured, chunks stay in Postgres. `sync_flight` syncs the Discord
@@ -578,9 +582,19 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>, sync_flight: impl 
         tracing::warn!("R2_TELEMETRY_BUCKET is not set; telemetry sessions are not compacted");
     }
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(TAIL_EVERY_SECS));
+        let mut tick = 0u64;
         loop {
             ticker.tick().await;
+            tick += 1;
+            // Every tick, the flights in the air move with their newest chunks; the rest,
+            // each minute.
+            if let Err(e) = crate::analysis::ingest::tail_open(&db, 20).await {
+                tracing::error!("open telemetry session tail failed: {e}");
+            }
+            if (tick - 1) % (60 / TAIL_EVERY_SECS) != 0 {
+                continue;
+            }
             match end_abandoned(&db, END_AFTER_SECS).await {
                 Ok(n) if n > 0 => tracing::info!(count = n, "ended silent telemetry sessions"),
                 Err(e) => tracing::error!("telemetry session reaper failed: {e}"),
@@ -600,7 +614,7 @@ pub fn spawn_compactor(db: PgPool, store: Option<R2Segments>, sync_flight: impl 
                 None => crate::analysis::ingest::analyse_open(&db, &NoSegments, 10).await,
             };
             match made {
-                Ok(n) if n > 0 => tracing::info!(count = n, "made flights over before their session ended"),
+                Ok(n) if n > 0 => tracing::info!(count = n, "made or updated flights from open telemetry sessions"),
                 Err(e) => tracing::error!("open telemetry session analysis failed: {e}"),
                 _ => {}
             }

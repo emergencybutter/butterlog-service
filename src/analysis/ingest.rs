@@ -310,21 +310,32 @@ async fn take_over(
         .fetch_one(&mut *tx)
         .await?,
     };
-    // The app's track, for a flight it made, stays; the service's own is the analysis's:
-    // replaced once the flight is over, added to while it flies.
+    // The app's track, for a flight it made, stays; the service's own is the analysis's,
+    // added to while it flies. Once it is over, the points stored past its end, while it
+    // flew, go; only those missing are sent, not the whole track again.
     if service_made {
         if over {
-            sqlx::query("DELETE FROM flight_track_points WHERE flight_id = $1").bind(id).execute(&mut *tx).await?;
-            crate::track::insert_points(&mut *tx, id, track).await?;
-        } else {
-            let last: Option<i64> =
-                sqlx::query_scalar("SELECT MAX(sample_epoch) FROM flight_track_points WHERE flight_id = $1")
-                    .bind(id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            let from = track.partition_point(|p| last.is_some_and(|l| p.epoch <= l));
-            crate::track::insert_points(&mut *tx, id, &track[from..]).await?;
+            let (first, last) = (track.first().map_or(i64::MAX, |p| p.epoch), track.last().map_or(i64::MIN, |p| p.epoch));
+            sqlx::query("DELETE FROM flight_track_points WHERE flight_id = $1 AND NOT (sample_epoch BETWEEN $2 AND $3)")
+                .bind(id)
+                .bind(first)
+                .bind(last)
+                .execute(&mut *tx)
+                .await?;
         }
+        let (lo, hi): (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT MIN(sample_epoch), MAX(sample_epoch) FROM flight_track_points WHERE flight_id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let (before, after) = match (lo, hi) {
+            (Some(lo), Some(hi)) => (track.partition_point(|p| p.epoch < lo), track.partition_point(|p| p.epoch <= hi)),
+            _ => (0, 0),
+        };
+        if over {
+            crate::track::insert_points(&mut *tx, id, &track[..before]).await?;
+        }
+        crate::track::insert_points(&mut *tx, id, &track[after..]).await?;
         sqlx::query(
             "UPDATE flights SET track_points = (SELECT COUNT(*) FROM flight_track_points WHERE flight_id = $1) \
               WHERE id = $1",
@@ -525,6 +536,7 @@ async fn analyse_open_session(
             .fetch_one(&mut *tx)
             .await?;
     let mut count = 0;
+    let mut flying_id = None;
     let over = match new {
         // Ended since: the analysis at its end makes them.
         _ if status != "open" => made as usize,
@@ -540,7 +552,7 @@ async fn analyse_open_session(
                 count += 1;
             }
             if let Some((f, _, statistics, track)) = &flying {
-                link(&mut tx, user_id, since, f, statistics, track, false).await?;
+                flying_id = link(&mut tx, user_id, since, f, statistics, track, false).await?.0;
                 count += 1;
             }
             over.len().max(made as usize)
@@ -550,14 +562,116 @@ async fn analyse_open_session(
             made as usize
         }
     };
-    sqlx::query("UPDATE telemetry_sessions SET open_analysed_chunks = $2, open_flights_made = $3 WHERE id = $1")
+    sqlx::query(
+        "UPDATE telemetry_sessions \
+            SET open_analysed_chunks = $2, open_flights_made = $3, open_flight_id = $4, open_tailed_chunks = $2 \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(chunks)
+    .bind(over as i32)
+    .bind(flying_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(count)
+}
+
+/// Adds the chunks open sessions received since their last analysis to the flight each is
+/// flying, up to `limit` sessions: its track, its position (`current_snapshot`) and
+/// `updated_at`, which the live page polls, so it moves with the chunks rather than with
+/// the analysis each minute. Only the chunks since the last keyframe before them are
+/// decoded. The document and the Discord post wait for the analysis. Returns how many
+/// flights moved.
+pub async fn tail_open(db: &PgPool, limit: i64) -> Result<usize, AppError> {
+    let ready: Vec<(Uuid, i64, i32, i32, Vec<u8>)> = sqlx::query_as(
+        "SELECT s.id, s.open_flight_id, s.open_tailed_chunks, s.chunk_count, s.open_blob \
+           FROM telemetry_sessions s JOIN flights f ON f.id = s.open_flight_id \
+          WHERE s.status = 'open' AND f.status = 'active' AND f.service_made \
+            AND s.invalid_seq IS NULL AND s.next_seq = s.chunk_count \
+            AND s.open_tailed_chunks < s.chunk_count \
+          ORDER BY s.last_chunk_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    let mut moved = 0;
+    for (id, flight_id, tailed, chunks, open) in ready {
+        if tail_session(db, id, flight_id, tailed, chunks, open).await? {
+            moved += 1;
+        }
+    }
+    Ok(moved)
+}
+
+/// Adds chunks `tailed..chunks` of session `id` to `flight_id`; whether any point was new.
+async fn tail_session(
+    db: &PgPool,
+    id: Uuid,
+    flight_id: i64,
+    tailed: i32,
+    chunks: i32,
+    open: Vec<u8>,
+) -> Result<bool, AppError> {
+    let data: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT data FROM telemetry_chunks \
+          WHERE session_id = $1 AND seq < $3 AND seq >= \
+                (SELECT MAX(seq) FROM telemetry_chunks WHERE session_id = $1 AND keyframe AND seq <= $2) \
+          ORDER BY seq",
+    )
+    .bind(id)
+    .bind(tailed)
+    .bind(chunks)
+    .fetch_all(db)
+    .await?;
+    let samples = match blocking(move || decode_chunks(&open, &data)).await? {
+        Ok(part) => part.samples,
+        Err(e) => {
+            tracing::warn!(session = %id, "open telemetry session not tailed: {e}");
+            Vec::new()
+        }
+    };
+    let mut tx = db.begin().await?;
+    // The analysis may have moved on meanwhile: then it has these chunks.
+    let current: Option<(i32,)> = sqlx::query_as(
+        "SELECT open_tailed_chunks FROM telemetry_sessions \
+          WHERE id = $1 AND status = 'open' AND open_flight_id = $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(flight_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none_or(|(t,)| t != tailed) {
+        return Ok(false);
+    }
+    let last: Option<i64> = sqlx::query_scalar("SELECT MAX(sample_epoch) FROM flight_track_points WHERE flight_id = $1")
+        .bind(flight_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let new = super::statistics::points(
+        samples.iter().filter(|s| last.is_none_or(|l| s.wall_time_ms.div_euclid(1000) > l)),
+    );
+    if let Some(latest) = samples.last().filter(|_| !new.is_empty()) {
+        let added = crate::track::insert_points(&mut tx, flight_id, &new).await?;
+        sqlx::query(
+            "UPDATE flights \
+                SET statistics = jsonb_set(statistics, '{current_snapshot}', $2), \
+                    track_points = track_points + $3, updated_at = CURRENT_TIMESTAMP \
+              WHERE id = $1 AND status = 'active'",
+        )
+        .bind(flight_id)
+        .bind(super::statistics::current_snapshot(latest))
+        .bind(added as i32)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("UPDATE telemetry_sessions SET open_tailed_chunks = $2 WHERE id = $1")
         .bind(id)
         .bind(chunks)
-        .bind(over as i32)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(count)
+    Ok(!new.is_empty())
 }
 
 /// The app's timestamps: UTC, "2026-11-01 01:09:47.776".
@@ -1215,8 +1329,32 @@ mod tests {
         assert_eq!(statistics["events"][0]["eventType"], json!("takeoff"));
         due_no_more().await.unwrap();
 
+        // Between analyses, the newest chunks move it: its track and position, not its
+        // post.
+        let tail = airborne + 6;
+        upload(&segment.chunks[airborne..tail]).await;
+        tail_open(&db, 20).await.unwrap();
+        let tailed = flights().await.unwrap();
+        let (_, _, status, _, tailed_points, due, tailed_statistics) = tailed[0].clone();
+        assert_eq!((status.as_str(), due), ("active", false));
+        assert!(tailed_points > points + 20, "{points} then {tailed_points} track points");
+        assert_ne!(tailed_statistics["current_snapshot"], statistics["current_snapshot"]);
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flight_track_points WHERE flight_id = $1")
+            .bind(flight_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored, tailed_points as i64);
+        let to: i32 = sqlx::query_scalar("SELECT open_tailed_chunks FROM telemetry_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(to, tail as i32);
+        let points = tailed_points;
+
         // Landed, the engine still running: the same flight, active, its track longer.
-        upload(&segment.chunks[airborne..shut_down - 1]).await;
+        upload(&segment.chunks[tail..shut_down - 1]).await;
         assert_eq!(analyse_open_session(&db, &TestSegments, id, user, shut_down as i32 - 1, false).await.unwrap(), 1);
         let landed = flights().await.unwrap();
         assert_eq!(landed.len(), 1);
