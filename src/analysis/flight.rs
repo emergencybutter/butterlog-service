@@ -174,6 +174,9 @@ const G_AVERAGE_MS: i64 = 200;
 pub const GROUND_HOLD_MS: i64 = 500;
 /// A flight starts when the aircraft first moves faster than this, as the app's logs do.
 const MOVING_KT: f64 = 10.0;
+/// A stop at least this long after the last touchdown ends the flight; the next move
+/// starts another, as the app ends its log once the aircraft has landed and stopped.
+const STOP_AFTER_TOUCHDOWN_MS: i64 = 10_000;
 /// A position change beyond what the ground speed allows, times this, plus
 /// [`TELEPORT_MARGIN_NM`], is a teleport (the app's X-Plane rule).
 const TELEPORT_SPEED_FACTOR: f64 = 8.0;
@@ -249,6 +252,10 @@ struct Analyser {
     pending_toc: Option<(i64, f64, f64)>,
     pending_tod: Option<(i64, f64, f64)>,
     landing: Option<Landing>,
+    /// The latest touchdown, a touch-and-go's included.
+    last_touchdown_ms: Option<i64>,
+    /// Landed and stopped: the flight is over, and the next move starts another.
+    stopped: bool,
 }
 
 impl Analyser {
@@ -273,6 +280,8 @@ impl Analyser {
             pending_toc: None,
             pending_tod: None,
             landing: None,
+            last_touchdown_ms: None,
+            stopped: false,
         }
     }
 
@@ -303,6 +312,7 @@ impl Analyser {
 
     fn touchdown(&mut self, p: &Point) {
         self.phase = Phase::Landing;
+        self.last_touchdown_ms = Some(p.t);
         self.pending_toc = None;
         self.pending_tod = None;
         self.event(EventKind::Landing, p.t, p.lat, p.lon, Some(p.heading));
@@ -450,6 +460,9 @@ impl Analyser {
                 if p.gs < 1.0 {
                     self.phase = Phase::Parked;
                     self.event(EventKind::Parked, p.t, p.lat, p.lon, Some(p.heading));
+                    // As the app closes its log: landed, then stopped once the rollout is
+                    // well over, so a stop then another takeoff is two flights.
+                    self.stopped = self.landed && self.last_touchdown_ms.is_some_and(|t| p.t - t >= STOP_AFTER_TOUCHDOWN_MS);
                 } else if !ground {
                     self.phase = Phase::Climb;
                 }
@@ -732,7 +745,7 @@ fn split_at_teleports(points: &[Point]) -> Vec<&[Point]> {
 }
 
 /// The flights in a session's samples, in order: each from the aircraft's first move
-/// after a teleport, or after the session started.
+/// after a teleport, a stop after landing, or the session's start, to the next of these.
 pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
     let sim_runways = sim_runways(samples);
     let mut points = Vec::new();
@@ -745,15 +758,24 @@ pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
         }
     }
     debounce_ground(&mut points);
-    split_at_teleports(&points)
-        .into_iter()
-        .filter_map(|part| {
-            let moving = part.iter().position(|p| p.gs > MOVING_KT)?;
+    let mut flights = Vec::new();
+    for part in split_at_teleports(&points) {
+        let mut rest = part;
+        while let Some(moving) = rest.iter().position(|p| p.gs > MOVING_KT) {
             let mut analyser = Analyser::new();
-            part[moving..].iter().for_each(|p| analyser.update(*p));
-            analyser.finish(places, &sim_runways)
-        })
-        .collect()
+            let mut used = rest.len();
+            for (i, p) in rest.iter().enumerate().skip(moving) {
+                analyser.update(*p);
+                if analyser.stopped {
+                    used = i + 1;
+                    break;
+                }
+            }
+            flights.extend(analyser.finish(places, &sim_runways));
+            rest = &rest[used..];
+        }
+    }
+    flights
 }
 
 #[cfg(test)]
@@ -947,6 +969,51 @@ mod tests {
         }
         let parts = split_at_teleports(&points);
         assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [6, 4]);
+    }
+
+    /// A circuit as samples, one a second from `t0`: a taxi, the roll, a minute airborne,
+    /// the touchdown and rollout, then stopped for 30 s.
+    fn circuit(t0: i64) -> Vec<Sample> {
+        let mut out = Vec::new();
+        let mut at = |secs: i64, ground: bool, gs: f64, ias: f64| {
+            let mut s = Sample::empty();
+            s.wall_time_ms = (t0 + secs) * 1_000;
+            s.set(Field::Latitude, 45.0);
+            s.set(Field::Longitude, 45.0);
+            s.set(Field::AltitudeIndicated, if ground { 1000.0 } else { 2000.0 });
+            s.set(Field::AltitudeMsl, if ground { 1000.0 } else { 2000.0 });
+            s.set(Field::OnGround, if ground { 1.0 } else { 0.0 });
+            s.set(Field::GroundSpeed, gs);
+            s.set(Field::Ias, ias);
+            s.set(Field::GNormal, 1.0);
+            out.push(s);
+        };
+        (0..10).for_each(|i| at(i, true, 15.0, 15.0));
+        (10..20).for_each(|i| at(i, true, 60.0, 60.0));
+        (20..80).for_each(|i| at(i, false, 90.0, 90.0));
+        (80..90).for_each(|i| at(i, true, 50.0, 50.0));
+        (90..100).for_each(|i| at(i, true, 10.0, 10.0));
+        (100..130).for_each(|i| at(i, true, 0.0, 0.0));
+        out
+    }
+
+    #[test]
+    fn a_stop_after_landing_ends_the_flight() {
+        let places = places(&[("XX", 45.0, 45.0)]);
+        // Two circuits, back to back in one session: two flights, as the app makes.
+        let mut samples = circuit(0);
+        samples.extend(circuit(130));
+        let flights = analyse(&samples, &places);
+        assert_eq!(flights.len(), 2, "{flights:?}");
+        assert_eq!(flights[0].takeoff_ms, Some(20_000));
+        assert_eq!(flights[1].takeoff_ms, Some(150_000));
+        assert!(flights[0].last_ms <= 130_000 && flights[0].landing.is_some());
+        assert_eq!(flights[1].first_ms, 130_000);
+        // A touch-and-go stops nowhere: one flight.
+        let mut touch_and_go = circuit(0);
+        touch_and_go.truncate(85);
+        touch_and_go.extend(circuit(85).into_iter().skip(10));
+        assert_eq!(analyse(&touch_and_go, &places).len(), 1);
     }
 
     #[test]
