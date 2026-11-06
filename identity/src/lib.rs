@@ -135,6 +135,22 @@ mod tests {
         );
     }
 
+    /// Titles pilots flew whose type was missed: Boeing's short name, and the Fokker jets
+    /// the FAA table leaves out, which fell to the F.VIIa (F7), a piston, and so lost
+    /// their airline too.
+    #[test]
+    fn short_names_and_fokkers_get_their_type() {
+        let r = Resolver::embedded();
+        let fjs = r.resolve("FJS 732 TwinJet", "Aircraft/FlyJSim_732_TwinJet_V4/liveries/Alaska Airlines (90s Livery) N744AS/");
+        assert_eq!((fjs.icao_code(), fjs.airline_icao()), ("B732", "ASA"));
+        let f28 = r.resolve("Just Flight Fokker F28-1000 Canadian", "");
+        assert_eq!((f28.icao_code(), f28.airline_name()), ("F28", "Canadian Airlines"));
+        for (title, icao) in [("Just Flight Fokker F70", "F70"), ("Fokker 100", "F100"), ("Fokker 50", "F50"), ("Fokker F27 Friendship", "F27")] {
+            assert_eq!(r.resolve(title, "").icao_code(), icao, "{title}");
+        }
+        assert_eq!(r.resolve("Boeing 767-300ER XP12", "Aircraft/FlightFactor & StepToSky/Boeing 767 Global Package Plus/liveries/[763 GE] Atlas Air (N641GT)/").icao_code(), "B763");
+    }
+
     #[test]
     fn a_light_aircraft_gets_no_airline() {
         let r = Resolver::embedded().resolve("Cessna Skyhawk", "United");

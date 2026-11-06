@@ -122,6 +122,17 @@ const NICKNAMES: &[(&str, &str)] = &[
     // Phenom 300E: the glued "300E" matches no model token, leaving "Phenom" tied between
     // the 100 (E50P) and the 300 (E55P).
     ("300E", "E55P"),
+    // Boeing's three-digit short names, as FlyJSim's "732 TwinJet" and FlightFactor's
+    // "[763 GE]" liveries write them: the model columns store "737" and "200" apart, so a
+    // bare "732" matched nothing. "737", "757" and the like name a family and stay out.
+    ("721", "B721"), ("722", "B722"),
+    ("732", "B732"), ("733", "B733"), ("734", "B734"), ("735", "B735"), ("736", "B736"),
+    ("738", "B738"), ("739", "B739"),
+    ("744", "B744"), ("748", "B748"),
+    ("752", "B752"), ("753", "B753"),
+    ("762", "B762"), ("763", "B763"), ("764", "B764"),
+    ("772", "B772"), ("773", "B773"), ("77W", "B77W"),
+    ("788", "B788"), ("789", "B789"), ("78X", "B78X"),
 ];
 
 /// Weaker nicknames for words the model columns already share across several types, used

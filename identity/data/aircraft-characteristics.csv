@@ -435,3 +435,8 @@ C205,C205,CESSNA,Cessna 205,Cessna 205A,Piston,1,,,,,,,,,,,,,,,,,,,Light,,Fixed-
 CP10,CP10,CAP AVIATION,Mudry CAP 10,CAP Aviation CAP-10B,Piston,1,,,,,,,,,,,,,,,,,,,Light,,Fixed-wing,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 U16,U16,GRUMMAN,Grumman HU-16 Albatross,Grumman HU-16 Albatross,Piston,2,,,,,,,,,,,,,,,,,,,Medium,,Amphibian,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 JAS4,JAS4,JOBY AVIATION,Joby Aviation S4,Joby S4,,0,,,,,,,,,,,,,,,,,,,Light,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+F27,F27,FOKKER,Fokker F27 Friendship,Fokker F27 Friendship,Turboprop,2,,,,,,,,,95.2,,77.3,,,,,"45,900",,,Medium,,Fixed-wing,,,,,,,,,,,,Added by hand: missing from the FAA table.,,,,,,,,,,,,,,,,
+F28,F28,FOKKER,Fokker F28 Fellowship,Fokker F28 Fellowship,Jet,2,,,,,,,,,82.3,,97.1,,,,,"73,000",,,Medium,,Fixed-wing,,,,,,,,,,,,Added by hand: missing from the FAA table.,,,,,,,,,,,,,,,,
+F50,F50,FOKKER,Fokker 50,Fokker 50,Turboprop,2,,,,,,,,,95.2,,82.7,,,,,"45,900",,,Medium,,Fixed-wing,,,,,,,,,,,,Added by hand: missing from the FAA table.,,,,,,,,,,,,,,,,
+F70,F70,FOKKER,Fokker 70,Fokker 70,Jet,2,,,,,,,,,92.1,,101.4,,,,,"92,000",,,Medium,,Fixed-wing,,,,,,,,,,,,Added by hand: missing from the FAA table.,,,,,,,,,,,,,,,,
+F100,F100,FOKKER,Fokker 100,Fokker 100,Jet,2,,,,,,,,,92.1,,116.6,,,,,"101,000",,,Medium,,Fixed-wing,,,,,,,,,,,,Added by hand: missing from the FAA table.,,,,,,,,,,,,,,,,

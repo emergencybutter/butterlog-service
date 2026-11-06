@@ -314,6 +314,9 @@ impl AirlineIndex {
                     .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                     // Smaller ICAO wins ties: invert so it sorts as the max.
                     .then_with(|| self.icaos[b.0 as usize].cmp(&self.icaos[a.0 as usize]))
+                    // Airlines sharing a designator (CDN is Canadian Airlines and Canadian
+                    // Helicopters) tie on everything: the first name wins, not the hash order.
+                    .then_with(|| self.names[b.0 as usize].cmp(&self.names[a.0 as usize]))
             })
             .map(|(idx, score, _named)| AirlineMatch {
                 icao: self.icaos[idx as usize].clone(),
