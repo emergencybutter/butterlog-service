@@ -492,7 +492,7 @@ mod tests {
         let off: Vec<_> = lines.iter().filter(|l| l.off).map(|l| l.label.as_str()).collect();
         assert_eq!(off, ["Feed · Takeoff", "Feed and aircraft stats · Flight time"]);
         let line = |label: &str| lines.iter().find(|l| l.label == label).unwrap();
-        assert_eq!(line("Flight page · Badge").service, "HARD");
+        assert_eq!(line("Flight page · Badge").service, "Hard");
         assert_eq!(line("Feed · Fuel used").app, "", "the app never sends it");
 
         // The service without a takeoff frame or fuel: what only the app has is off.

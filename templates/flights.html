@@ -28,8 +28,7 @@
         }
         .flight-route .arrow { color: var(--accent-text); font-weight: 400; }
         .flight-route .pilot {
-            font-family: var(--font-mono); font-size: 0.68rem; font-weight: 400;
-            letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted);
+            font-family: var(--font-body); font-size: 0.8rem; font-weight: 400; color: var(--text-muted);
             margin-left: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
 
@@ -37,7 +36,7 @@
            the list scans as a table instead of a ragged stack. */
         .flight-meta {
             margin-top: 2px;
-            font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.03em;
+            font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem;
             color: var(--text-muted);
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
@@ -47,7 +46,7 @@
 
         .flight-right { display: flex; align-items: center; gap: 8px; }
         .flight-date {
-            font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.02em;
+            font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem;
             color: var(--text-muted); white-space: nowrap; text-align: right;
         }
         .flight-shots { display: flex; gap: 3px; }
@@ -56,14 +55,13 @@
             border: 1px solid var(--border); cursor: zoom-in; display: block;
         }
         .flight-shots .more {
-            font-family: var(--font-mono); font-size: 0.64rem; color: var(--text-muted);
+            font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--text-muted);
             align-self: center; padding-left: 2px;
         }
 
         /* Badges are set by the server; keep them compact in a dense row. */
         .flight-right .badge {
-            font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700;
-            letter-spacing: 0.06em; text-transform: uppercase;
+            font-family: var(--font-body); font-size: 0.8rem; font-weight: 700;
             padding: 3px 7px; border-radius: var(--radius-sm); white-space: nowrap;
         }
         .flight-right .badge-detail { font-weight: 400; opacity: 0.85; margin-left: 4px; }
@@ -96,7 +94,7 @@
         .lb-close:hover, .lb-btn:hover { color: #fff; }
         .lightbox-counter {
             position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
-            font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.1em;
+            font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem;
             color: rgba(255,255,255,0.6);
         }
     </style>

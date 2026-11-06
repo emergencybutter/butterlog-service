@@ -51,8 +51,7 @@
         width: 100%; padding: 10px 4px 8px;
         background: none; border: 0; cursor: pointer;
         color: var(--text-muted); text-decoration: none;
-        font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.02em;
-        text-transform: uppercase; text-align: center;
+        font-family: var(--font-body); font-size: 11px; text-align: center;
         transition: color var(--t), background-color var(--t);
     }
     .rail-item svg { width: 20px; height: 20px; display: block; }
@@ -64,7 +63,7 @@
         content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
         width: 2px; background: var(--accent); border-radius: 0 2px 2px 0;
     }
-    .rail-item.is-minor { font-size: 8px; color: var(--text-muted); opacity: 0.85; }
+    .rail-item.is-minor { font-size: 11px; color: var(--text-muted); }
     .rail-item.is-minor svg { width: 17px; height: 17px; }
     /* Settings lives in the footer but is still a destination: without this the
        quieter `is-minor` colour, declared later, would win over the active one. */
@@ -82,8 +81,8 @@
     .rail-user {
         display: flex; flex-direction: column; align-items: center; gap: 4px;
         padding: 10px 6px 4px;
-        font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.04em;
-        color: var(--text-muted); text-transform: uppercase;
+        font-family: var(--font-body); font-size: 11px;
+        color: var(--text-muted);
     }
     .rail-user img {
         width: 22px; height: 22px; border-radius: 50%;
@@ -128,12 +127,10 @@
         height: 100%; max-width: 900px;
     }
     .view-title {
-        font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
-        letter-spacing: 0.16em; text-transform: uppercase; color: var(--text);
+        font-family: var(--font-body); font-size: 0.8rem; font-weight: 500; color: var(--text);
     }
     .view-sub {
-        font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
-        text-transform: uppercase; color: var(--text-muted);
+        font-family: var(--font-body); font-size: 0.8rem; color: var(--text-muted);
     }
     .view-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
@@ -147,8 +144,7 @@
         position: relative;
         background: none; border: 0; cursor: pointer;
         padding: 0 12px; color: var(--text-muted);
-        font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.12em;
-        text-transform: uppercase;
+        font-family: var(--font-body); font-size: 0.8rem;
         transition: color var(--t);
     }
     .subnav-tab:hover { color: var(--text); }
@@ -173,8 +169,7 @@
     .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
     .seg a {
         padding: 5px 11px; text-decoration: none;
-        font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
-        text-transform: uppercase; color: var(--text-muted);
+        font-family: var(--font-body); font-size: 0.8rem; color: var(--text-muted);
         transition: color var(--t), background-color var(--t);
     }
     .seg a + a { border-left: 1px solid var(--border); }
@@ -195,7 +190,7 @@
         font-size: 0.9rem;
     }
     .empty p { margin: 0 0 4px; }
-    .empty .hint { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; color: var(--text-muted); }
+    .empty .hint { font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--text-muted); }
 
     /* ── Narrow: the rail becomes a drawer ────────────────────────────────── */
     @media (max-width: 899px) {
@@ -235,8 +230,7 @@
             background: var(--surface); border-bottom: 1px solid var(--border);
         }
         .topbar-section {
-            font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.14em;
-            text-transform: uppercase; color: var(--text);
+            font-family: var(--font-body); font-size: 0.8rem; color: var(--text);
         }
         /* The top bar already names the section; repeating it in the view
            header would spend two of a phone's rows saying the same word. */

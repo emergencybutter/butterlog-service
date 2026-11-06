@@ -17,14 +17,13 @@
                border-radius: var(--radius); cursor: pointer; font-size: 0.85rem; line-height: 1; }
     .rp-play:hover { border-color: var(--purple); color: var(--purple); }
     .rp-scrub { flex: 1 1 auto; min-width: 0; accent-color: var(--purple); cursor: pointer; }
-    .rp-time { flex: none; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); letter-spacing: 0.04em; }
+    .rp-time { flex: none; font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--text); }
     .rp-time .sep, .rp-time .total { color: var(--dim); }
-    .rp-rate { flex: none; font-family: var(--font-mono); font-size: 0.66rem; color: var(--dim); letter-spacing: 0.08em;
+    .rp-rate { flex: none; font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--dim);
                border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.15rem 0.4rem; }
     .rp-link { flex: none; height: 34px; display: inline-flex; align-items: center; gap: 0.35rem; padding: 0 0.6rem;
                background: transparent; color: var(--dim); border: 1px solid var(--border);
-               border-radius: var(--radius); cursor: pointer; font-family: var(--font-mono); font-size: 0.66rem;
-               letter-spacing: 0.08em; text-transform: uppercase; }
+               border-radius: var(--radius); cursor: pointer; font-family: var(--font-body); font-size: 0.8rem; }
     .rp-link:hover { border-color: var(--purple); color: var(--purple); }
     .rp-link svg { width: 14px; height: 14px; }
     @media (max-width: 600px) { .rp-rate, .rp-link span { display: none; } .rp { gap: 0.6rem; padding: 0.5rem 0.6rem; } }

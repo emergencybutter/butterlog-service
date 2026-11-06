@@ -775,13 +775,13 @@ fn esc(s: &str) -> String {
 /// badge CSS class and label.
 fn landing_rating(vspd: f64) -> (&'static str, &'static str) {
     if vspd >= -150.0 {
-        ("butter", "BUTTER")
+        ("butter", "Butter")
     } else if vspd >= -250.0 {
-        ("smooth", "SMOOTH")
+        ("smooth", "Smooth")
     } else if vspd >= -350.0 {
-        ("firm", "FIRM")
+        ("firm", "Firm")
     } else {
-        ("hard", "HARD")
+        ("hard", "Hard")
     }
 }
 
@@ -1733,13 +1733,13 @@ mod tests {
 
     #[test]
     fn landing_rating_thresholds() {
-        assert_eq!(landing_rating(-50.0).1, "BUTTER");
-        assert_eq!(landing_rating(-150.0).1, "BUTTER");
-        assert_eq!(landing_rating(-151.0).1, "SMOOTH");
-        assert_eq!(landing_rating(-250.0).1, "SMOOTH");
-        assert_eq!(landing_rating(-300.0).1, "FIRM");
-        assert_eq!(landing_rating(-350.0).1, "FIRM");
-        assert_eq!(landing_rating(-500.0).1, "HARD");
+        assert_eq!(landing_rating(-50.0).1, "Butter");
+        assert_eq!(landing_rating(-150.0).1, "Butter");
+        assert_eq!(landing_rating(-151.0).1, "Smooth");
+        assert_eq!(landing_rating(-250.0).1, "Smooth");
+        assert_eq!(landing_rating(-300.0).1, "Firm");
+        assert_eq!(landing_rating(-350.0).1, "Firm");
+        assert_eq!(landing_rating(-500.0).1, "Hard");
     }
 
     /// The app writes `2026-08-05 06:36:35.351`, not RFC3339. An RFC3339-only
