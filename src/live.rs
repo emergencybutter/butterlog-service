@@ -402,22 +402,21 @@ pub async fn live_flight_handler(
 
     let transposed = load_track(&state.db, flight_id, q.since).await?;
 
-    // On a delta the client already has the summary and gallery; sending them
-    // again on every 10s poll is most of the payload.
+    // The summary goes out on every poll: it is a few hundred bytes made from
+    // the row already loaded, and it is how a watching page learns of the
+    // takeoff, the landing and the duration so far. Left off deltas, the live
+    // page never saw the landing at all. The gallery is the heavy part and
+    // only goes out on a full read.
     let is_delta = q.since.is_some();
-    let (summary, screenshots) = if is_delta {
-        (None, None)
-    } else {
-        let shots = load_screenshots(&state.db, flight_id).await?;
-
-        let summary = adapt_summary(
-            &statistics,
-            notes.as_deref(),
-            shots.len(),
-            status == "ended",
-        );
-        (Some(summary), Some(shots))
+    let screenshots = if is_delta { None } else { Some(load_screenshots(&state.db, flight_id).await?) };
+    let screenshot_count = match &screenshots {
+        Some(shots) => shots.len(),
+        None => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM screenshots WHERE flight_id = $1")
+            .bind(flight_id)
+            .fetch_one(&state.db)
+            .await? as usize,
     };
+    let summary = Some(adapt_summary(&statistics, notes.as_deref(), screenshot_count, status == "ended"));
 
     let doc = LiveDocument {
         status: status.to_string(),

@@ -40,9 +40,25 @@
     :is(.fv-btn, .fv-icon, .fv-seg button, .fv-tab, .fv-play, .fv-chan):focus-visible,
     .fv-plot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+    /* ── Live ─────────────────────────────────────────────────────────── */
+    .fv-head .live-meta { font-size: 0.82rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .fv-live { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border-radius: 999px;
+               background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); font-size: 0.875rem; font-weight: 600; }
+    .fv-live[hidden], .fv-play[hidden], .fv-seg[hidden] { display: none; }
+    .fv-live .live-dot { background: var(--ok); animation: none; }
+    .fv-strip.is-live .fv-plot { cursor: default; }
+    .fv-seg button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .fv-simctl { position: absolute; right: 16px; top: calc(100% + 6px); z-index: 900; width: min(440px, calc(100vw - 32px));
+                 max-height: 70vh; overflow-y: auto; }
+    .fv-simctl[hidden] { display: none; }
+    .fv-simctl .ctl-card { margin: 0; border: 0; background: transparent; }
+    .fv-head .view-head-inner { position: relative; }
+
     /* ── Frame: the map takes what the strip leaves ───────────────────── */
     .fv { display: flex; flex-direction: column; height: calc(100vh - 60px); height: calc(100dvh - 60px); min-height: 640px; }
-    .fv-map { position: relative; flex: 1 1 auto; min-height: 240px; background: var(--surface); overflow: hidden; }
+    /* isolation keeps Leaflet's pane z-indexes (400-1000) inside the map, so
+       the header's panels and the menu drawer can sit over it. */
+    .fv-map { position: relative; isolation: isolate; flex: 1 1 auto; min-height: 240px; background: var(--surface); overflow: hidden; }
     .fv-map #map, .fv-map #map3d-section, .fv-map #map3d { position: absolute; inset: 0; height: auto; margin: 0; border: 0; border-radius: 0; }
     /* Above Leaflet's panes (z-index 400), below the map controls. */
     .fv-map #map3d-section { z-index: 450; }

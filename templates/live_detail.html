@@ -7,84 +7,42 @@
     <meta property="og:site_name" content="ButterLog">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
     {% include "_theme_head.html" %}
     {% include "_app_shell_head.html" %}
     {% include "_flight_detail_style.html" %}
+    {% include "_flight_strip_style.html" %}
 </head>
-<body>
+<body class="fv-page">
 {% include "_app_shell.html" %}
 
-    <div class="view-head">
+    <!-- The same one screen as a finished flight, pinned to now: the strip
+         follows the aeroplane until it lands, then becomes the replay. -->
+    <div class="view-head fv-head">
         <div class="view-head-inner">
             <a class="view-back" href="/content" aria-label="Back to flights" title="Back to flights">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
             </a>
-            <span class="view-title" id="view-route">Flight</span>
-            <nav class="subnav" role="tablist" aria-label="Flight views">
-                <button class="subnav-tab" data-pane="summary" role="tab" type="button">Summary</button>
-                <button class="subnav-tab" data-pane="replay" role="tab" type="button">Replay</button>
-                <button class="subnav-tab" data-pane="maps" role="tab" type="button">Maps</button>
-                <button class="subnav-tab" data-pane="graphs" role="tab" type="button">Graphs</button>
-            </nav>
-            <div class="view-actions">
-                <span class="live-chip" id="live-chip"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
-                <span class="live-meta" id="live-updated"></span>
+            <div class="fv-id">
+                <span class="fv-route" id="view-route">Flight</span>
+                <span class="fv-meta" id="fv-meta"></span>
             </div>
+            <span class="live-chip" id="live-chip"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
+            <span class="live-meta" id="live-updated"></span>
+            <span class="fv-grade" id="fv-grade" hidden></span>
+            <div class="view-actions">
+                {% if is_owner %}
+                <button class="fv-btn fv-btn-quiet" id="fv-simctl-open" type="button" aria-expanded="false" aria-controls="fv-simctl">Sim controls</button>
+                {% endif %}
+                <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Details</button>
+            </div>
+            {% if is_owner %}
+            <div class="fv-float fv-simctl" id="fv-simctl" hidden><div id="controls-mount"></div></div>
+            {% endif %}
         </div>
     </div>
 
-    <div class="view-body">
-        <div id="live-handoff"></div>
-        {% if is_owner %}<div id="controls-mount"></div>{% endif %}
-        <div id="header-mount"></div>
-        <div id="gallery-mount"></div>
-
-        <section data-pane="summary">
-            <div id="stats-mount"></div>
-            <div id="landing-mount"></div>
-        </section>
-
-        <section data-pane="replay" hidden>
-            <div id="replay-mount" class="rp is-hidden"></div>
-            <div id="pfd-mount" class="pfd is-hidden"></div>
-            <div class="section-title" style="margin-bottom:0.75rem">Cockpit View</div>
-            <div id="cockpit">
-                <canvas id="cockpit-canvas"></canvas>
-                <div class="m3d-panel m3d-hint">the view from the aeroplane, following the flight</div>
-            </div>
-        </section>
-
-        <section data-pane="maps">
-            <div id="map"></div>
-
-            <div id="touchdown-section" style="display:none">
-                <div class="section-title" style="margin-bottom:0.75rem">Touchdown</div>
-                <div id="map-touchdown"></div>
-            </div>
-            <div id="map3d-section" style="display:none">
-                <div class="section-title" style="margin-bottom:0.75rem">3D Flight Path</div>
-                <div id="map3d">
-                    <canvas id="deck3d"></canvas>
-                    <div class="m3d-panel m3d-play">
-                        <button id="m3d-play" title="Play flight">&#9654;</button>
-                        <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
-                    </div>
-                    <div class="m3d-panel m3d-controls">
-                        <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="78" aria-label="Camera tilt angle"></label>
-                        <button id="m3d-reset">Reset view</button>
-                    </div>
-                    <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
-                    <div class="m3d-panel m3d-hint">drag to pan &middot; scroll to zoom &middot; ctrl-drag to tilt</div>
-                </div>
-            </div>
-        </section>
-
-        <section data-pane="graphs" hidden>
-            <div class="charts" id="charts-mount"></div>
-        </section>
-    </div>
+    {% include "_flight_screen.html" %}
 
 {% include "_app_shell_foot.html" %}
 
@@ -95,12 +53,14 @@
 {% include "_flight_render.html" %}
 {% include "_pfd.html" %}
 {% include "_replay.html" %}
-{% include "_flight_panes.html" %}
+{% include "_flight_strip.html" %}
 <script>
 (function () {
     const FLIGHT_ID = {{ flight_id }};
     const POLL_MS = 10000;
     let handle = null;
+    let strip = null;
+    let doc3d = null;
     let lastEpoch = null;
     let threeDeeDone = false;
     let stopped = false;
@@ -119,14 +79,6 @@
             : ago < 60 ? `updated ${ago}s ago` : `updated ${Math.floor(ago / 60)}m ago`;
     }
 
-    // Once the flight is over this same address shows the whole of it: offer the
-    // reload rather than leaving a frozen live page.
-    function handoff(doc) {
-        if (doc.status !== 'ended') return;
-        document.getElementById('live-handoff').innerHTML =
-            `<div class="landing-card" style="margin-bottom:1.5rem"><div class="section-title">Flight complete</div>
-             <div>This flight has finished. <a href="/content/flights/${FLIGHT_ID}" style="color:var(--purple)">View the full flight →</a></div></div>`;
-    }
 
     async function poll(first) {
         if (stopped) return;
@@ -153,7 +105,12 @@
         if (first) {
             handle = renderFlightDoc(doc);
             window.flightHandle = handle;
-            if (window.flightPanesRefresh) window.flightPanesRefresh();
+            strip = initFlightStrip(handle, {
+                live: true,
+                sim: doc.simulator || '',
+                pilot: doc.pilot && doc.pilot.name,
+                doc3d: () => doc3d,
+            });
         } else {
             handle.append(doc);
         }
@@ -165,17 +122,18 @@
         // when the fix was true rather than from when it arrived.
         handle.setCurrent(doc.current, doc.updatedAgoSecs);
         setStatus(doc);
+        strip.update(doc);
 
         if (doc.status === 'ended') {
-            handoff(doc);
-            // The 3D view assumes a complete track — its camera fit and scrub
-            // both span the whole flight — so it only appears once there is one.
+            // The 3D path assumes a complete track — its camera fit and scrub
+            // both span the whole flight — so its switch turns on only now,
+            // and the strip stops following and becomes the replay.
             if (!threeDeeDone) {
                 threeDeeDone = true;
                 // Replay first: the 3D view binds its play button to the
                 // cursor this creates.
                 handle.enableReplay();
-                renderFlight3D({
+                doc3d = {
                     transposedData: {
                         timestamps: handle.state.timestamps.map((t, i, a) => i === 0 ? t : t - a[i-1]),
                         latitudes: handle.state.lats,
@@ -183,7 +141,8 @@
                         altitudes: handle.state.alts,
                     },
                     summary: handle.state.summary,
-                });
+                };
+                strip.toReplay();
             }
             // Nothing more will change; stop polling rather than hammering a
             // finished flight forever.
@@ -285,7 +244,21 @@
         ap_nav_mode: { label: 'NAV mode', toggle: true },
     };
 
+    const openBtn = document.getElementById('fv-simctl-open');
+    const panel = document.getElementById('fv-simctl');
+    openBtn.addEventListener('click', () => {
+        panel.hidden = !panel.hidden;
+        openBtn.setAttribute('aria-expanded', !panel.hidden);
+        openBtn.classList.toggle('is-on', !panel.hidden);
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !panel.hidden) { panel.hidden = true; openBtn.setAttribute('aria-expanded', false); openBtn.classList.remove('is-on'); openBtn.focus(); }
+    });
+
     window.renderControls = function (doc) {
+        // Nothing to drive once it has landed.
+        openBtn.hidden = doc.status === 'ended';
+        if (doc.status === 'ended') panel.hidden = true;
         const available = doc.commands || [];
         // Rebuild only when the advertised set actually changes, so a click is
         // never yanked out from under the pointer on a poll.

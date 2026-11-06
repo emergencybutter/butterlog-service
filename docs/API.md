@@ -387,7 +387,7 @@ Identical response to the numeric-id endpoint above, but keyed by the pilot's Di
 
 The in-progress equivalent of a share: the same document shape (`summary`, `transposedData`, `screenshots`), so one client-side renderer draws both. Public, mirroring the live map and the flight history pages.
 
-*   **Query:** `since=<epoch>` returns only samples newer than that timestamp, and omits `summary`/`screenshots` (setting `summaryUnchanged: true`) — a typical delta at a 10s poll is a few hundred bytes. Omit it for the whole track.
+*   **Query:** `since=<epoch>` returns only samples newer than that timestamp, and omits `screenshots` (setting `summaryUnchanged: true`, which now means only the gallery is left out; `summary` is always sent) — a typical delta at a 10s poll is a few hundred bytes. Omit it for the whole track.
 *   **Response:** `200 OK`
     ```jsonc
     {

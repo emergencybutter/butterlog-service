@@ -1,0 +1,124 @@
+<!-- The one-screen flight view: map, bottom strip (timeline, instruments,
+     graphs) and the Details dialog. Shared by the finished-flight page and
+     the live page; _flight_strip.html drives it. -->
+    <div class="fv" id="fv">
+        <section class="fv-map" id="fv-map" aria-label="Map">
+            <div id="map"></div>
+            <div id="map3d-section" hidden>
+                <div id="map3d">
+                    <canvas id="deck3d"></canvas>
+                    <!-- The 3D path's own transport stays out of sight: the
+                         strip below is the one replay control. -->
+                    <div class="m3d-panel m3d-play" hidden>
+                        <button id="m3d-play" title="Play flight">&#9654;</button>
+                        <input id="m3d-scrub" type="range" min="0" max="1000" value="0" aria-label="Flight progress">
+                    </div>
+                    <div class="m3d-panel m3d-controls">
+                        <label class="m3d-tilt" title="Camera tilt">Tilt<input id="m3d-pitch" type="range" min="0" max="85" value="78" aria-label="Camera tilt angle"></label>
+                        <button id="m3d-reset">Reset view</button>
+                    </div>
+                    <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
+                </div>
+            </div>
+            <div class="fv-float fv-mapctl">
+                <div class="fv-seg" role="group" aria-label="Map view">
+                    <button type="button" class="is-on" data-map="2d" aria-pressed="true">2D</button>
+                    <button type="button" data-map="3d" aria-pressed="false">3D terrain</button>
+                </div>
+                <button type="button" class="fv-icon" id="fv-fit" aria-label="Fit the whole flight" title="Fit the whole flight">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+                </button>
+            </div>
+        </section>
+
+        <section class="fv-strip" aria-label="Timeline">
+            <div class="fv-transport">
+                <button type="button" class="fv-play" id="fv-play" aria-label="Play replay" title="Play / pause (space)">
+                    <svg class="i-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4l13 8-13 8z"/></svg>
+                    <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+                    <svg class="i-again" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                </button>
+                <div class="fv-seg" role="group" aria-label="Replay speed" id="fv-speeds"></div>
+                <span class="fv-live" id="fv-live" hidden><span class="live-dot" aria-hidden="true"></span>Following now</span>
+                <span class="fv-clock" id="fv-clock">--:--:--</span>
+                <span class="fv-elapsed" id="fv-elapsed"></span>
+                <span class="fv-spacer"></span>
+                <span class="fv-key"><span class="fv-key-line" aria-hidden="true"></span>Altitude</span>
+                <span class="fv-key" id="fv-key-terrain" hidden><span class="fv-key-fill" aria-hidden="true"></span>Terrain below</span>
+            </div>
+
+            <div class="fv-grid">
+                <div class="fv-axis" id="fv-axis" aria-hidden="true"></div>
+                <div class="fv-plot fv-profile" id="fv-profile" role="slider" tabindex="0" aria-label="Flight timeline: altitude over the terrain below" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <canvas id="fv-profile-canvas"></canvas>
+                    <div class="fv-events" id="fv-events"></div>
+                    <div class="fv-cursor"></div>
+                </div>
+            </div>
+
+            <div class="fv-tabsrow">
+                <div class="fv-tabs" role="tablist" aria-label="Bottom panel">
+                    <button type="button" class="fv-tab" role="tab" id="tab-instruments" data-tab="instruments" aria-controls="panel-instruments">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 13h6l2-2h2l2 2h6"/></svg>Instruments</button>
+                    <button type="button" class="fv-tab" role="tab" id="tab-graphs" data-tab="graphs" aria-controls="panel-graphs">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 4 8-9M3 21h18"/></svg>Graphs <span class="fv-count" id="fv-count"></span></button>
+                </div>
+                <span class="fv-spacer"></span>
+                <div class="fv-seg" role="group" aria-label="Camera" id="fv-cam">
+                    <button type="button" class="is-on" data-cam="cockpit" aria-pressed="true">Cockpit</button>
+                    <button type="button" data-cam="chase" aria-pressed="false">Chase</button>
+                </div>
+                <button type="button" class="fv-btn fv-btn-sm" id="fv-channels" aria-expanded="false" aria-controls="fv-picker" hidden>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Channels</button>
+                <button type="button" class="fv-btn fv-btn-sm fv-btn-quiet" id="fv-hide" aria-expanded="true">Hide panel</button>
+
+                <div class="fv-float fv-picker" id="fv-picker" role="dialog" aria-label="Choose channels" hidden>
+                    <div class="fv-picker-head">
+                        <div>
+                            <div class="fv-picker-title" id="fv-picker-title">Channels</div>
+                            <div class="fv-muted">Recorded on this flight. Ticked ones become lanes on the same timeline.</div>
+                        </div>
+                        <button type="button" class="fv-icon" id="fv-picker-close" aria-label="Close">&#10005;</button>
+                    </div>
+                    <div class="fv-picker-body" id="fv-picker-body"></div>
+                </div>
+            </div>
+
+            <div class="fv-panel" id="panel-instruments" role="tabpanel" aria-labelledby="tab-instruments">
+                <div class="fv-pfd"><div id="pfd-mount" class="pfd is-hidden"></div></div>
+                <div class="fv-3d">
+                    <div id="cockpit"><canvas id="cockpit-canvas"></canvas></div>
+                    <span class="fv-float fv-3d-label" id="fv-cam-label">3D · Cockpit</span>
+                    <button type="button" class="fv-float fv-icon fv-3d-full" id="fv-3d-full" aria-label="Show the 3D view full screen" title="Full screen">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+                    </button>
+                </div>
+                <dl class="fv-readouts" id="fv-readouts"></dl>
+            </div>
+
+            <div class="fv-panel fv-lanes" id="panel-graphs" role="tabpanel" aria-labelledby="tab-graphs" hidden>
+                <div class="fv-empty" id="fv-lanes-empty" hidden>
+                    <span class="fv-muted">No channels picked. Choose some to compare them on the timeline.</span>
+                    <button type="button" class="fv-btn fv-btn-sm" id="fv-lanes-pick">Choose channels</button>
+                </div>
+                <div class="fv-grid" id="fv-lanes"></div>
+            </div>
+        </section>
+    </div>
+
+    <dialog class="fv-details" id="fv-details" aria-labelledby="fv-details-title">
+        <div class="fv-details-head">
+            <span class="fv-details-title" id="fv-details-title">Flight details</span>
+            <button type="button" class="fv-icon" id="fv-details-close" aria-label="Close">&#10005;</button>
+        </div>
+        <div class="fv-details-body">
+            <div id="header-mount"></div>
+            <div id="stats-mount"></div>
+            <div id="landing-mount"></div>
+            <div id="gallery-mount"></div>
+            <div id="touchdown-section" style="display:none">
+                <div class="section-title" style="margin-bottom:0.75rem">Touchdown</div>
+                <div id="map-touchdown"></div>
+            </div>
+        </div>
+    </dialog>

@@ -252,8 +252,8 @@ Returns a document deliberately **shaped like `FlightDetailShare`** plus a live 
 ### 5.2 `GET /api/v0/flights/:id/live?since=<epoch>` — delta
 
 Same envelope, but `transposedData` carries only samples with `sample_epoch > since` —
-a single range scan on the primary key — and `summary` / `screenshots` are included only
-when they changed (`"summaryUnchanged": true`). The client passes back the `lastEpoch` it
+a single range scan on the primary key. `summary` is always included, so a watching page
+learns of the landing; `screenshots` are left out (`"summaryUnchanged": true`). The client passes back the `lastEpoch` it
 last saw. The page appends to its arrays and pushes new points onto the Leaflet polyline,
 the deck.gl path, and each Chart.js dataset. Typical delta at a 10 s poll is **a few
 hundred bytes**.

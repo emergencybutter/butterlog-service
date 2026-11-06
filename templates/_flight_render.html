@@ -1162,6 +1162,8 @@ function renderFlightDoc(d) {
                 state.oil_temp = state.oil_temp.concat(t.oil_temp || []);
                 state.oil_press = state.oil_press.concat(t.oil_press || []);
                 rebuildAxis();
+                // The chase view draws the track; let it pick up the new end.
+                if (state.cockpit) state.cockpit.chaseTrack = null;
             }
             if (doc.summary) state.summary = doc.summary;
             if (doc.screenshots) {
