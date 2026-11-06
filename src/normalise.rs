@@ -366,32 +366,46 @@ pub fn normalise(
     open: &SessionOpen,
     ticks: impl IntoIterator<Item = Tick>,
 ) -> Result<Vec<Sample>, NormaliseError> {
-    let sim =
-        Sim::of(&open.header).ok_or_else(|| NormaliseError::UnknownSim(open.header.sim.clone()))?;
-    let channels: std::collections::HashMap<u16, &Channel> =
-        open.channels.iter().map(|c| (c.id, c)).collect();
-    let mappings: std::collections::HashMap<u16, Mapping> =
-        mappings(sim, &open.channels).into_iter().collect();
-    let mut state = [None; FIELDS];
-    let mut samples = Vec::new();
-    for tick in ticks {
+    let mut normaliser = Normaliser::new(open)?;
+    Ok(ticks.into_iter().map(|t| normaliser.sample(t)).collect())
+}
+
+/// [`normalise`] a tick at a time, for a session still arriving: a tick carries only the
+/// channels that changed, so each sample is the last value of every one.
+pub struct Normaliser {
+    channels: std::collections::HashMap<u16, Channel>,
+    mappings: std::collections::HashMap<u16, Mapping>,
+    state: [Option<f64>; FIELDS],
+}
+
+impl Normaliser {
+    pub fn new(open: &SessionOpen) -> Result<Self, NormaliseError> {
+        let sim =
+            Sim::of(&open.header).ok_or_else(|| NormaliseError::UnknownSim(open.header.sim.clone()))?;
+        Ok(Self {
+            channels: open.channels.iter().map(|c| (c.id, c.clone())).collect(),
+            mappings: mappings(sim, &open.channels).into_iter().collect(),
+            state: [None; FIELDS],
+        })
+    }
+
+    pub fn sample(&mut self, tick: Tick) -> Sample {
         for (id, value) in &tick.values {
-            let (Some(mapping), Value::Int(q)) = (mappings.get(id), value) else {
+            let (Some(mapping), Value::Int(q)) = (self.mappings.get(id), value) else {
                 continue;
             };
-            state[mapping.field.index()] = Some((mapping.convert)(channels[id].dequantise(*q)));
+            self.state[mapping.field.index()] = Some((mapping.convert)(self.channels[id].dequantise(*q)));
         }
-        let mut values = state;
+        let mut values = self.state;
         derive_headings(&mut values);
-        samples.push(Sample {
+        Sample {
             sim_time: tick.sim_time,
             wall_time_ms: tick.wall_time_ms,
             flags: tick.flags,
             events: tick.events,
             values,
-        });
+        }
     }
-    Ok(samples)
 }
 
 /// Fills a true or magnetic heading the sim doesn't report from the other one and the

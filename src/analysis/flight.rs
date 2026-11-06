@@ -231,9 +231,24 @@ impl Point {
     }
 }
 
+/// How much of the latest stretch the analyser keeps: enough for the minute before a
+/// touchdown that the landing's statistics read.
+const KEEP_RECENT_MS: i64 = 65_000;
+/// How long after the first touchdown its points are kept: the second its peak G is
+/// taken over, and the average that reaches past it.
+const KEEP_AFTER_TOUCHDOWN_MS: i64 = TOUCHDOWN_G_MS + G_AVERAGE_MS;
+
+#[derive(Clone)]
 struct Analyser {
     phase: Phase,
-    points: Vec<Point>,
+    /// The first and the latest point's times.
+    first_t: Option<i64>,
+    last_t: i64,
+    /// The latest [`KEEP_RECENT_MS`] of points.
+    recent: VecDeque<Point>,
+    /// The points around the first touchdown, which the landing's statistics read: those
+    /// from [`KEEP_RECENT_MS`] before it to [`KEEP_AFTER_TOUCHDOWN_MS`] after.
+    landing_points: Vec<Point>,
     start_coords: Vec<(i64, f64, f64)>,
     /// The latest stretch on the ground, from touchdown through the taxi in.
     end_coords: VecDeque<(i64, f64, f64)>,
@@ -262,7 +277,10 @@ impl Analyser {
     fn new() -> Self {
         Self {
             phase: Phase::Parked,
-            points: Vec::new(),
+            first_t: None,
+            last_t: 0,
+            recent: VecDeque::new(),
+            landing_points: Vec::new(),
             start_coords: Vec::new(),
             end_coords: VecDeque::new(),
             max_alt: 0.0,
@@ -290,7 +308,7 @@ impl Analyser {
     }
 
     fn add_position(&mut self, p: &Point) {
-        let first = self.points.first().map_or(p.t, |f| f.t);
+        let first = self.first_t.unwrap_or(p.t);
         let spaced = |last: Option<&(i64, f64, f64)>| last.is_none_or(|l| p.t - l.0 >= ENDPOINT_SPACING_MS);
         if p.t - first < ENDPOINT_WINDOW_MS && spaced(self.start_coords.last()) {
             self.start_coords.push((p.t, p.lat, p.lon));
@@ -317,6 +335,7 @@ impl Analyser {
         self.pending_tod = None;
         self.event(EventKind::Landing, p.t, p.lat, p.lon, Some(p.heading));
         if self.landing.is_none() {
+            self.landing_points = self.recent.iter().copied().collect();
             self.landing = Some(Landing {
                 wall_time_ms: p.t,
                 latitude: p.lat,
@@ -339,7 +358,15 @@ impl Analyser {
             self.pending_toc = None;
             self.pending_tod = None;
         }
-        self.points.push(p);
+        self.first_t.get_or_insert(p.t);
+        self.last_t = p.t;
+        self.recent.push_back(p);
+        while self.recent.front().is_some_and(|f| p.t - f.t > KEEP_RECENT_MS) {
+            self.recent.pop_front();
+        }
+        if self.landing.as_ref().is_some_and(|l| p.t <= l.wall_time_ms + KEEP_AFTER_TOUCHDOWN_MS) {
+            self.landing_points.push(p);
+        }
         self.add_position(&p);
         self.max_alt = self.max_alt.max(p.alt_msl);
         self.max_gs = self.max_gs.max(p.gs);
@@ -493,7 +520,7 @@ impl Analyser {
     /// `sim_runways` are those the sim sent, drawn as it draws them; the touchdown is
     /// measured against them first, then against OurAirports'.
     fn finish(mut self, places: &Places, sim_runways: &[Runway]) -> Option<FlightSummary> {
-        let (first, last) = (self.points.first()?.t, self.points.last()?.t);
+        let (first, last) = (self.first_t?, self.last_t);
         let departure = self.departure(places);
         let arrival = self.arrival(places);
         if let (Some(landing), Endpoint::Airport(ident)) = (self.landing.as_mut(), &arrival) {
@@ -506,19 +533,18 @@ impl Analyser {
                 landing.offset_percent = m.offset_percent;
             }
             let t = landing.wall_time_ms;
-            if let Some(g) = peak_average_g(&self.points, t) {
+            let points = &self.landing_points;
+            if let Some(g) = peak_average_g(points, t) {
                 landing.g = g;
             }
-            let stat = |from, to, value: fn(&Point) -> f64| {
-                weighted_stats(&self.points, from, to, value)
-            };
+            let stat = |from, to, value: fn(&Point) -> f64| weighted_stats(points, from, to, value);
             if let (Some(vs), Some(ias)) =
                 (stat(t - 60_000, t, |p| p.vs), stat(t - 60_000, t, |p| p.ias))
             {
                 landing.vs_variance = Some(vs.1);
                 landing.ias_variance = Some(ias.1);
             }
-            landing.approach_stability = approach_stability(&self.points, t);
+            landing.approach_stability = approach_stability(points, t);
         }
         Some(FlightSummary {
             departure,
@@ -700,7 +726,9 @@ fn project_onto_runway(lat: f64, lon: f64, thr_lat: f64, thr_lon: f64, hdg: f64,
 }
 
 /// Ground contact as it held: a change lasting less than [`GROUND_HOLD_MS`] is dropped,
-/// and one that lasts takes effect from its first sample.
+/// and one that lasts takes effect from its first sample. The whole-session form of
+/// [`Debounce`], which the tests hold it to.
+#[cfg(test)]
 fn debounce_ground(points: &mut [Point]) {
     let Some(first) = points.first() else { return };
     let mut state = first.on_ground;
@@ -727,7 +755,8 @@ fn distance_nm(a: &Point, b: &Point) -> f64 {
 }
 
 /// Splits at teleports: a move further than the ground speed could have carried the
-/// aircraft.
+/// aircraft. The whole-session form of [`FlightStream`]'s, which the tests hold it to.
+#[cfg(test)]
 fn split_at_teleports(points: &[Point]) -> Vec<&[Point]> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -747,35 +776,283 @@ fn split_at_teleports(points: &[Point]) -> Vec<&[Point]> {
 /// The flights in a session's samples, in order: each from the aircraft's first move
 /// after a teleport, a stop after landing, or the session's start, to the next of these.
 pub fn analyse(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
-    let sim_runways = sim_runways(samples);
-    let mut points = Vec::new();
-    let mut skipped = false;
-    for s in samples {
-        if s.flags & SKIPPED != 0 {
-            skipped = true;
-        } else if let Some(p) = Point::of(s) {
-            points.push(Point { resumed: std::mem::take(&mut skipped), ..p });
+    let mut stream = FlightStream::<()>::new();
+    samples.iter().for_each(|s| stream.push(s));
+    stream.flights(places).into_iter().map(|(f, _)| f).collect()
+}
+
+/// What the analysis knows of a flight while its samples go by, for a [`FlightSink`].
+#[derive(Debug, Clone, Copy)]
+pub struct Progress {
+    pub takeoff_roll_ms: Option<i64>,
+    pub landing_ms: Option<i64>,
+}
+
+/// Whatever else is built from a flight's samples as they go by: each sample from its
+/// first point's to its last's, in order, as [`analyse`]'s flights span them.
+pub trait FlightSink: Clone + Default {
+    fn sample(&mut self, s: &Sample, progress: Progress);
+}
+
+impl FlightSink for () {
+    fn sample(&mut self, _: &Sample, _: Progress) {}
+}
+
+/// How long engine 1 must stay shut down, parked, for a flight to be over.
+const ENGINE_OFF_MS: i64 = 10_000;
+
+/// Ground contact as it held, a point at a time: [`GROUND_HOLD_MS`]'s rule, a change kept
+/// back until it has lasted or given way.
+#[derive(Clone, Default)]
+struct Debounce {
+    state: Option<bool>,
+    /// Points since the ground contact last differed from `state`, not yet decided.
+    run: Vec<Point>,
+}
+
+impl Debounce {
+    fn push(&mut self, p: Point, out: &mut Vec<Point>) {
+        let Some(state) = self.state else {
+            self.state = Some(p.on_ground);
+            out.push(p);
+            return;
+        };
+        if self.run.is_empty() {
+            if p.on_ground == state {
+                out.push(p);
+            } else {
+                self.run.push(p);
+            }
+            return;
+        }
+        if p.on_ground != state {
+            self.run.push(p);
+            // Already as long as it must be, however it ends.
+            if p.t - self.run[0].t >= GROUND_HOLD_MS {
+                self.state = Some(!state);
+                out.append(&mut self.run);
+            }
+            return;
+        }
+        if p.t - self.run[0].t >= GROUND_HOLD_MS {
+            self.state = Some(!state);
+            out.append(&mut self.run);
+            self.run.push(p);
+        } else {
+            out.extend(self.run.drain(..).map(|r| Point { on_ground: state, ..r }));
+            out.push(p);
         }
     }
-    debounce_ground(&mut points);
-    let mut flights = Vec::new();
-    for part in split_at_teleports(&points) {
-        let mut rest = part;
-        while let Some(moving) = rest.iter().position(|p| p.gs > MOVING_KT) {
-            let mut analyser = Analyser::new();
-            let mut used = rest.len();
-            for (i, p) in rest.iter().enumerate().skip(moving) {
-                analyser.update(*p);
-                if analyser.stopped {
-                    used = i + 1;
-                    break;
+
+    /// At the end of the samples: a change still holding counts.
+    fn flush(&mut self, out: &mut Vec<Point>) {
+        if !self.run.is_empty() {
+            self.state = self.state.map(|s| !s);
+            out.append(&mut self.run);
+        }
+    }
+}
+
+/// When engine 1 was shut down, parked, after a landing: engine 1's fuel flow off, on the
+/// ground and stopped, for [`ENGINE_OFF_MS`]. Both sims report the fuel flow, a piston's or
+/// a turbine's, and cut it with the engine.
+#[derive(Clone)]
+struct EngineOff {
+    after_ms: i64,
+    since: Option<i64>,
+    off: bool,
+}
+
+impl EngineOff {
+    fn sample(&mut self, s: &Sample) {
+        if self.off || s.wall_time_ms < self.after_ms {
+            return;
+        }
+        let off = s.get(Field::OnGround).is_some_and(|g| g > 0.5)
+            && s.get(Field::GroundSpeed).is_some_and(|v| v < 1.0)
+            && s.get(Field::FuelFlow).is_some_and(|f| f < 0.1);
+        match self.since {
+            _ if !off => self.since = None,
+            None => self.since = Some(s.wall_time_ms),
+            Some(t) if s.wall_time_ms - t >= ENGINE_OFF_MS => self.off = true,
+            Some(_) => {}
+        }
+    }
+}
+
+/// One flight of a stream: its analysis, what its sink built, and whether its engine was
+/// shut down after it landed.
+#[derive(Clone)]
+struct StreamFlight<S> {
+    analyser: Analyser,
+    sink: S,
+    engine: Option<EngineOff>,
+}
+
+impl<S: FlightSink> StreamFlight<S> {
+    fn progress(&self) -> Progress {
+        Progress {
+            takeoff_roll_ms: self.analyser.takeoff_roll_ms,
+            landing_ms: self.analyser.landing.as_ref().map(|l| l.wall_time_ms),
+        }
+    }
+}
+
+/// [`analyse`] a sample at a time, for a session still arriving: what it keeps is bounded
+/// by the flights, not by how long they last. Its flights at any point are [`analyse`]'s
+/// of the samples so far.
+#[derive(Clone)]
+pub struct FlightStream<S> {
+    runways: Vec<Runway>,
+    skipped: bool,
+    ground: Debounce,
+    last: Option<Point>,
+    flights: Vec<StreamFlight<S>>,
+    /// Whether the last of `flights` is still being flown.
+    flying: bool,
+    /// Samples later than the last point, not yet known to be in a flight or not.
+    queue: VecDeque<Sample>,
+    /// Those given out last, at the last one's time: a flight starting at that time takes
+    /// them too.
+    same_time: Vec<Sample>,
+}
+
+impl<S: FlightSink> FlightStream<S> {
+    pub fn new() -> Self {
+        Self {
+            runways: Vec::new(),
+            skipped: false,
+            ground: Debounce::default(),
+            last: None,
+            flights: Vec::new(),
+            flying: false,
+            queue: VecDeque::new(),
+            same_time: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, s: &Sample) {
+        self.runways.extend(sim_runways(std::slice::from_ref(s)));
+        let point = if s.flags & SKIPPED != 0 {
+            self.skipped = true;
+            None
+        } else {
+            Point::of(s).map(|p| Point { resumed: std::mem::take(&mut self.skipped), ..p })
+        };
+        self.queue.push_back(s.clone());
+        if let Some(p) = point {
+            let mut settled = Vec::new();
+            self.ground.push(p, &mut settled);
+            settled.into_iter().for_each(|p| self.point(p));
+        }
+    }
+
+    /// A point, its ground contact settled: as [`analyse`] went through them.
+    fn point(&mut self, p: Point) {
+        if let Some(last) = self.last {
+            let hours = (p.t - last.t).max(0) as f64 / 3_600_000.0;
+            let plausible = last.gs.max(0.0) * hours * TELEPORT_SPEED_FACTOR + TELEPORT_MARGIN_NM;
+            if distance_nm(&last, &p) > plausible {
+                self.flying = false;
+            }
+        }
+        self.last = Some(p);
+        if !self.flying && p.gs > MOVING_KT {
+            self.flights.push(StreamFlight { analyser: Analyser::new(), sink: S::default(), engine: None });
+            self.flying = true;
+            // The samples at its first point's time, given out already.
+            let flight = self.flights.last_mut().expect("just pushed");
+            flight.analyser.update(p);
+            let progress = flight.progress();
+            for s in self.same_time.iter().filter(|s| s.wall_time_ms >= p.t) {
+                flight.sink.sample(s, progress);
+            }
+        } else if self.flying {
+            self.flights.last_mut().expect("flying").analyser.update(p);
+        }
+        if let Some(flight) = self.flights.last_mut().filter(|_| self.flying) {
+            if flight.engine.is_none() {
+                flight.engine = flight.analyser.landing.as_ref().map(|l| EngineOff { after_ms: l.wall_time_ms, since: None, off: false });
+            }
+        }
+        self.give_out(p.t);
+        if self.flying && self.flights.last().is_some_and(|f| f.analyser.stopped) {
+            self.flying = false;
+        }
+    }
+
+    /// Gives the samples up to `t` to the flight flying and to the engine watches.
+    fn give_out(&mut self, t: i64) {
+        while self.queue.front().is_some_and(|s| s.wall_time_ms <= t) {
+            let s = self.queue.pop_front().expect("not empty");
+            self.watch(&s);
+            if let Some(flight) = self.flights.last_mut().filter(|_| self.flying) {
+                if flight.analyser.first_t.is_some_and(|f| s.wall_time_ms >= f) {
+                    let progress = flight.progress();
+                    flight.sink.sample(&s, progress);
                 }
             }
-            flights.extend(analyser.finish(places, &sim_runways));
-            rest = &rest[used..];
+            if self.same_time.first().is_some_and(|f| f.wall_time_ms != s.wall_time_ms) {
+                self.same_time.clear();
+            }
+            self.same_time.push(s);
         }
     }
-    flights
+
+    fn watch(&mut self, s: &Sample) {
+        self.flights.iter_mut().filter_map(|f| f.engine.as_mut()).for_each(|e| e.sample(s));
+    }
+
+    /// The samples so far as if they ended here: the change of ground contact still
+    /// holding counts, and the samples after the last point are in no flight.
+    fn ended(&self) -> Self {
+        let mut end = self.clone();
+        let mut settled = Vec::new();
+        end.ground.flush(&mut settled);
+        settled.into_iter().for_each(|p| end.point(p));
+        for s in std::mem::take(&mut end.queue) {
+            end.watch(&s);
+        }
+        end
+    }
+
+    /// The flights so far, each with what its sink built.
+    pub fn flights(&self, places: &Places) -> Vec<(FlightSummary, S)> {
+        self.snapshot(places).0
+    }
+
+    /// How many of the flights so far, first to last, are over: each landed and shut its
+    /// engine down, or a later flight followed it.
+    #[cfg(test)]
+    pub fn over(&self) -> usize {
+        self.snapshot_over(&self.ended())
+    }
+
+    fn snapshot_over(&self, end: &Self) -> usize {
+        let shut_down = |f: &StreamFlight<S>| f.engine.as_ref().is_some_and(|e| e.off);
+        match end.flights.iter().rposition(shut_down) {
+            Some(last) => last + 1,
+            None => end.flights.len().saturating_sub(1),
+        }
+    }
+
+    /// The flights so far, and how many of them are over.
+    pub fn snapshot(&self, places: &Places) -> (Vec<(FlightSummary, S)>, usize) {
+        let end = self.ended();
+        let over = self.snapshot_over(&end);
+        let flights = end
+            .flights
+            .into_iter()
+            .filter_map(|f| Some((f.analyser.finish(places, &end.runways)?, f.sink)))
+            .collect();
+        (flights, over)
+    }
+}
+
+impl<S: FlightSink> Default for FlightStream<S> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1272,103 @@ mod tests {
         (90..100).for_each(|i| at(i, true, 10.0, 10.0));
         (100..130).for_each(|i| at(i, true, 0.0, 0.0));
         out
+    }
+
+    /// [`analyse`] as it was, on the whole session at once: what the stream must find at
+    /// every point.
+    fn analyse_whole(samples: &[Sample], places: &Places) -> Vec<FlightSummary> {
+        let sim_runways = sim_runways(samples);
+        let mut points = Vec::new();
+        let mut skipped = false;
+        for s in samples {
+            if s.flags & SKIPPED != 0 {
+                skipped = true;
+            } else if let Some(p) = Point::of(s) {
+                points.push(Point { resumed: std::mem::take(&mut skipped), ..p });
+            }
+        }
+        debounce_ground(&mut points);
+        let mut flights = Vec::new();
+        for part in split_at_teleports(&points) {
+            let mut rest = part;
+            while let Some(moving) = rest.iter().position(|p| p.gs > MOVING_KT) {
+                let mut analyser = Analyser::new();
+                let mut used = rest.len();
+                for (i, p) in rest.iter().enumerate().skip(moving) {
+                    analyser.update(*p);
+                    if analyser.stopped {
+                        used = i + 1;
+                        break;
+                    }
+                }
+                flights.extend(analyser.finish(places, &sim_runways));
+                rest = &rest[used..];
+            }
+        }
+        flights
+    }
+
+    /// How many flights were over, as it was: landed and shut down, or followed.
+    fn over_whole(flights: &[FlightSummary], samples: &[Sample]) -> usize {
+        let shut_down = |f: &FlightSummary| {
+            f.landing.as_ref().is_some_and(|l| {
+                let mut e = EngineOff { after_ms: l.wall_time_ms, since: None, off: false };
+                samples.iter().for_each(|s| e.sample(s));
+                e.off
+            })
+        };
+        match flights.iter().rposition(shut_down) {
+            Some(last) => last + 1,
+            None => flights.len().saturating_sub(1),
+        }
+    }
+
+    /// The stream, fed a sample at a time, finds at every point what the whole analysis
+    /// finds of the samples so far.
+    fn holds_to_the_whole(samples: &[Sample], places: &Places, every: usize) -> usize {
+        let mut stream = FlightStream::<()>::new();
+        for (i, s) in samples.iter().enumerate() {
+            stream.push(s);
+            if i % every == 0 || i + 1 == samples.len() {
+                let so_far = &samples[..=i];
+                let whole = analyse_whole(so_far, places);
+                let streamed: Vec<FlightSummary> = stream.flights(places).into_iter().map(|(f, _)| f).collect();
+                assert_eq!(streamed, whole, "after {} of {} samples", i + 1, samples.len());
+                assert_eq!(stream.over(), over_whole(&whole, so_far), "over, after {} samples", i + 1);
+            }
+        }
+        stream.flights(places).len()
+    }
+
+    fn fixture(name: &str) -> Vec<Sample> {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        crate::normalise::normalise_segment(&std::fs::read(path).unwrap()).unwrap().1
+    }
+
+    #[test]
+    fn the_stream_finds_what_the_whole_analysis_finds() {
+        let real = Places::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data")).unwrap();
+        for name in ["msfs_pattern.blsg.zst", "xplane_pattern.blsg.zst"] {
+            let samples = fixture(name);
+            assert_eq!(holds_to_the_whole(&samples, &real, 97), 1, "{name}");
+            // Twice in a row, the second moved away: a teleport, then another flight.
+            let mut twice = samples.clone();
+            let shift = samples.last().unwrap().wall_time_ms - samples[0].wall_time_ms + 1_000;
+            twice.extend(samples.iter().cloned().map(|mut s| {
+                s.wall_time_ms += shift;
+                if let Some(lat) = s.get(Field::Latitude) {
+                    s.set(Field::Latitude, lat + 1.0);
+                }
+                s
+            }));
+            assert_eq!(holds_to_the_whole(&twice, &real, 211), 2, "{name} twice");
+        }
+        // Circuits with a stop between, and a flicker of ground contact in the air.
+        let airports = places(&[("XX", 45.0, 45.0)]);
+        let mut circuits = circuit(0);
+        circuits.extend(circuit(130));
+        circuits[40].set(Field::OnGround, 1.0);
+        assert_eq!(holds_to_the_whole(&circuits, &airports, 1), 2);
     }
 
     #[test]

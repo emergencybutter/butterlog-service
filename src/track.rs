@@ -127,6 +127,7 @@ pub struct TrackCursor {
 }
 
 /// One decoded sample.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedPoint {
     pub epoch: i64,
     pub latitude: f32,

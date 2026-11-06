@@ -11,10 +11,11 @@
 //! (`analysis/resume.rs`), is analysed with it as one stream, and the stream's flights are
 //! stored under its first session.
 
-use super::flight::Endpoint;
+use super::flight::{Endpoint, FlightStream};
+use super::statistics::FlightStats;
 use super::{analyse, FlightSummary, Places};
 use crate::error::AppError;
-use crate::normalise::{normalise, Sample};
+use crate::normalise::{normalise, Normaliser, Sample};
 use crate::sessions::SegmentStore;
 use crate::track::DecodedPoint;
 use butterlog_wire::{decode_segment, decompress, SessionDecoder, SessionHeader, SessionOpen};
@@ -94,15 +95,21 @@ fn decode_payloads(open: &[u8], payloads: &[Vec<u8>]) -> Result<Part, String> {
 /// The flights of a stream of samples, each as stored. `header` is its first session's.
 fn analyse_samples(header: &SessionHeader, samples: &[Sample]) -> Result<Analysed, String> {
     let places = places().ok_or("airport data is not loaded")?;
-    Ok(analyse(samples, places)
+    let mut stream = FlightStream::<FlightStats>::new();
+    samples.iter().for_each(|s| stream.push(s));
+    Ok(analysed(header, stream.snapshot(places).0, places))
+}
+
+/// Flights as stored, from what the stream gathered of each.
+fn analysed(header: &SessionHeader, flights: Vec<(FlightSummary, FlightStats)>, places: &Places) -> Analysed {
+    flights
         .into_iter()
-        .map(|f| {
+        .map(|(f, stats)| {
             let json = summary_json(&f, places);
-            let statistics = super::statistics::statistics(header, &f, samples, places);
-            let track = super::statistics::track(&f, samples);
-            (f, json, statistics, track)
+            let statistics = super::statistics::document(header, &f, &stats, places);
+            (f, json, statistics, stats.track)
         })
-        .collect())
+        .collect()
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, AppError> {
@@ -394,12 +401,15 @@ async fn link(
     Ok((flight_id, app_doc))
 }
 
-/// How long engine 1 must stay shut down, parked, for a flight to be over.
+/// How long engine 1 must stay shut down, parked, for a flight to be over (the stream's,
+/// `flight.rs`, which the tests check against).
+#[cfg(test)]
 const ENGINE_OFF_MS: i64 = 10_000;
 
 /// When the engine was shut down after `after_ms`, parked: engine 1's fuel flow off, on
 /// the ground and stopped, for [`ENGINE_OFF_MS`]. Both sims report the fuel flow, a piston's
 /// or a turbine's, and cut it with the engine.
+#[cfg(test)]
 fn engine_off(samples: &[Sample], after_ms: i64) -> Option<i64> {
     use crate::normalise::Field;
     let mut since = None;
@@ -417,17 +427,6 @@ fn engine_off(samples: &[Sample], after_ms: i64) -> Option<i64> {
     None
 }
 
-/// How many of a stream's flights, first to last, are over before it ends: each landed
-/// and shut its engine down, or a later flight followed it (after a teleport).
-fn flights_over(flights: &[FlightSummary], samples: &[Sample]) -> usize {
-    let landed_and_shut_down =
-        |f: &FlightSummary| f.landing.as_ref().is_some_and(|l| engine_off(samples, l.wall_time_ms).is_some());
-    match flights.iter().rposition(landed_and_shut_down) {
-        Some(last) => last + 1,
-        None => flights.len().saturating_sub(1),
-    }
-}
-
 /// Makes the flights of up to `limit` open sessions as they fly, for users whose flights
 /// the service makes (rollout phase 5): a flight is created, active, once it takes off,
 /// its document, track and Discord post kept current each pass, and ended once it is over
@@ -435,7 +434,12 @@ fn flights_over(flights: &[FlightSummary], samples: &[Sample]) -> usize {
 /// were last looked at. The flights aren't stored in `telemetry_flights`: the session is
 /// still analysed when it ends, which updates the flights made here rather than adding
 /// to them. Returns how many flights were made or updated.
+///
+/// Each session's analysis is kept between passes ([`OpenAnalysis`]), so a pass decodes
+/// and analyses only the chunks since the last: its cost is a minute of flight, not the
+/// whole of it. A restart builds it again from the session, once.
 pub async fn analyse_open(db: &PgPool, segments: &impl SegmentStore, limit: i64) -> Result<usize, AppError> {
+    forget_closed(db).await?;
     let ready: Vec<(Uuid, i64, i32, bool)> = sqlx::query_as(
         "SELECT s.id, s.user_id, s.chunk_count, s.open_analysed_chunks IS NULL \
            FROM telemetry_sessions s JOIN users u ON u.id = s.user_id \
@@ -454,16 +458,122 @@ pub async fn analyse_open(db: &PgPool, segments: &impl SegmentStore, limit: i64)
     Ok(made)
 }
 
-/// An open session's stream: the sessions it continues, then itself. Whether it continues
-/// one is settled on its `first` look, and kept in `continues`: the stream before it is
-/// over, and checking again each pass would analyse it again each time.
-async fn open_stream(
+/// An open session's analysis, kept from one pass to the next: its decoder and
+/// normaliser where its chunks left them, and the stream's flights so far. Bounded by the
+/// flights, not by how long they fly.
+struct OpenAnalysis {
+    /// How many of the session's chunks it has.
+    chunks: i32,
+    decoder: SessionDecoder,
+    normaliser: Normaliser,
+    /// The stream's first session's.
+    header: SessionHeader,
+    /// Whether the session continues another's stream, and so whether its first sample
+    /// is the pause between the two (`resume::join`).
+    continues: bool,
+    started: bool,
+    stream: FlightStream<FlightStats>,
+    used: std::time::Instant,
+}
+
+impl OpenAnalysis {
+    /// Adds the session's next chunks, in order.
+    fn add(&mut self, chunks: &[Vec<u8>]) -> Result<(), String> {
+        for chunk in chunks {
+            let payload = decompress(chunk).map_err(|e| e.to_string())?;
+            for tick in self.decoder.decode(&payload).map_err(|e| e.to_string())?.ticks {
+                let sample = self.normaliser.sample(tick);
+                self.push(sample);
+            }
+            self.chunks += 1;
+        }
+        Ok(())
+    }
+
+    fn push(&mut self, mut sample: Sample) {
+        if self.continues && !self.started {
+            sample.flags |= butterlog_wire::flags::PAUSED;
+        }
+        self.started = true;
+        self.stream.push(&sample);
+    }
+}
+
+type OpenAnalyses = std::sync::Mutex<std::collections::HashMap<Uuid, OpenAnalysis>>;
+
+/// The open sessions' analyses, by session.
+fn open_analyses() -> &'static OpenAnalyses {
+    static OPEN: OnceLock<OpenAnalyses> = OnceLock::new();
+    OPEN.get_or_init(Default::default)
+}
+
+/// An open session's analysis left unused this long is dropped; it is built again if the
+/// session sends more.
+const FORGET_AFTER: std::time::Duration = std::time::Duration::from_secs(3_600);
+
+/// Drops the analyses of sessions no longer open, or idle past [`FORGET_AFTER`].
+async fn forget_closed(db: &PgPool) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = open_analyses().lock().expect("not poisoned").keys().copied().collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let open: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM telemetry_sessions WHERE id = ANY($1) AND status = 'open'")
+        .bind(&ids)
+        .fetch_all(db)
+        .await?;
+    open_analyses()
+        .lock()
+        .expect("not poisoned")
+        .retain(|id, a| !ids.contains(id) || (open.contains(id) && a.used.elapsed() < FORGET_AFTER));
+    Ok(())
+}
+
+/// An open session's chunks from `from` up to `to`, as uploaded.
+async fn open_chunks(db: &PgPool, id: Uuid, from: i32, to: i32) -> Result<Vec<Vec<u8>>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT data FROM telemetry_chunks WHERE session_id = $1 AND seq >= $2 AND seq < $3 ORDER BY seq",
+    )
+    .bind(id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Builds an open session's analysis from the start: the stream it continues, then its
+/// chunks up to `chunks`. Whether it continues one is settled on its `first` look, and
+/// kept in `continues`: the stream before it is over, and checking again each pass would
+/// load it again each time.
+async fn build_open(
     db: &PgPool,
     segments: &impl SegmentStore,
     id: Uuid,
-    session: Part,
+    chunks: i32,
     first: bool,
-) -> Result<Result<Stream, String>, AppError> {
+) -> Result<Result<OpenAnalysis, String>, AppError> {
+    let blob: Vec<u8> = sqlx::query_scalar("SELECT open_blob FROM telemetry_sessions WHERE id = $1")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    let data = open_chunks(db, id, 0, chunks).await?;
+    // The session's own samples, and its decoder and normaliser where they leave them.
+    let decoded = blocking(move || -> Result<_, String> {
+        let (open, _) = SessionOpen::decode(&blob).map_err(|e| e.to_string())?;
+        let mut decoder = SessionDecoder::new(open.channels.clone());
+        let mut normaliser = Normaliser::new(&open).map_err(|e| e.to_string())?;
+        let mut samples = Vec::new();
+        for chunk in &data {
+            let payload = decompress(chunk).map_err(|e| e.to_string())?;
+            let ticks = decoder.decode(&payload).map_err(|e| e.to_string())?.ticks;
+            samples.extend(ticks.into_iter().map(|t| normaliser.sample(t)));
+        }
+        Ok((Part { header: open.header, samples }, decoder, normaliser))
+    })
+    .await?;
+    let (session, decoder, normaliser) = match decoded {
+        Ok(d) => d,
+        Err(e) => return Ok(Err(e)),
+    };
     let before = if first {
         let before = resumed(db, segments, id, &session).await?;
         sqlx::query("UPDATE telemetry_sessions SET continues = $2 WHERE id = $1")
@@ -497,10 +607,31 @@ async fn open_stream(
             }
         }
     };
-    let mut stream = before.unwrap_or_else(|| Stream { ids: Vec::new(), samples: Vec::new(), header: session.header.clone() });
-    stream.ids.push(id);
-    super::resume::join(&mut stream.samples, session.samples);
-    Ok(Ok(stream))
+    let built = blocking(move || {
+        let mut stream = FlightStream::new();
+        let continues = before.is_some();
+        let header = match before {
+            Some(before) => {
+                before.samples.iter().for_each(|s| stream.push(s));
+                before.header
+            }
+            None => session.header.clone(),
+        };
+        let mut analysis = OpenAnalysis {
+            chunks,
+            decoder,
+            normaliser,
+            header,
+            continues,
+            started: false,
+            stream,
+            used: std::time::Instant::now(),
+        };
+        session.samples.into_iter().for_each(|s| analysis.push(s));
+        analysis
+    })
+    .await?;
+    Ok(Ok(built))
 }
 
 /// The flights of an open session's stream it makes: those over, and the one flying
@@ -521,21 +652,36 @@ async fn analyse_open_session(
     chunks: i32,
     first: bool,
 ) -> Result<usize, AppError> {
-    let new = match load(db, segments, id).await? {
-        Ok(session) => match open_stream(db, segments, id, session, first).await? {
-            Ok(Stream { samples, header, .. }) => {
-                blocking(move || {
-                    analyse_samples(&header, &samples).map(|mut flights| {
-                        let summaries: Vec<FlightSummary> = flights.iter().map(|f| f.0.clone()).collect();
-                        let over = flights_over(&summaries, &samples);
-                        let flying = flights.drain(over..).next().filter(|f| f.0.takeoff_ms.is_some());
-                        OpenFlights { over: flights, flying }
-                    })
-                })
-                .await?
+    let kept = open_analyses()
+        .lock()
+        .expect("not poisoned")
+        .remove(&id)
+        .filter(|a| !first && a.chunks <= chunks);
+    let analysis = match kept {
+        Some(mut analysis) => {
+            let data = open_chunks(db, id, analysis.chunks, chunks).await?;
+            blocking(move || analysis.add(&data).map(|_| analysis)).await?
+        }
+        None => build_open(db, segments, id, chunks, first).await?,
+    };
+    let new = match analysis {
+        Ok(analysis) => {
+            let (flights, mut analysis) = blocking(move || {
+                let flights = places().ok_or_else(|| "airport data is not loaded".to_string()).map(|places| {
+                    let (flights, over) = analysis.stream.snapshot(places);
+                    let mut flights = analysed(&analysis.header, flights, places);
+                    let flying = flights.drain(over.min(flights.len())..).next().filter(|f| f.0.takeoff_ms.is_some());
+                    OpenFlights { over: flights, flying }
+                });
+                (flights, analysis)
+            })
+            .await?;
+            analysis.used = std::time::Instant::now();
+            if flights.is_ok() {
+                open_analyses().lock().expect("not poisoned").insert(id, analysis);
             }
-            Err(e) => Err(e),
-        },
+            flights
+        }
         Err(e) => Err(e),
     };
     let mut tx = db.begin().await?;
@@ -1497,6 +1643,17 @@ mod tests {
         assert_eq!(placed().await.unwrap(), vec![("a-air".into(), Some(flight_id)), ("b-parked".into(), None)]);
         let landing = statistics["events"].as_array().unwrap().iter().find(|e| e["eventType"] == "landing").cloned();
         assert!(landing.unwrap()["touchdownFpm"].is_number());
+        // The passes after the first added their chunks to the analysis kept from the one
+        // before, which finds what one built from the whole session does.
+        let kept = open_analyses().lock().unwrap().remove(&id).expect("kept between passes");
+        assert_eq!(kept.chunks, all);
+        let built = build_open(&db, &TestSegments, id, all, false).await.unwrap().unwrap();
+        let p = places().unwrap();
+        assert_eq!(
+            analysed(&kept.header, kept.stream.snapshot(p).0, p),
+            analysed(&built.header, built.stream.snapshot(p).0, p)
+        );
+        open_analyses().lock().unwrap().insert(id, built);
         // Looked at again with no new chunks, or with them: nothing more.
         assert_eq!(analyse_open_session(&db, &TestSegments, id, user, all, false).await.unwrap(), 0);
 

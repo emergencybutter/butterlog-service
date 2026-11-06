@@ -6,7 +6,7 @@
 //! Keys and conventions are the app's, so every reader takes it unchanged. That includes
 //! the app's attitude signs: `Pitch` positive nose down, `Roll` positive left wing down.
 
-use super::flight::{Endpoint, FlightSummary};
+use super::flight::{Endpoint, FlightSink, FlightSummary, Progress};
 use super::Places;
 use crate::normalise::{Field, Sample};
 use butterlog_wire::SessionHeader;
@@ -87,12 +87,10 @@ fn snapshot(s: &Sample) -> Map<String, Value> {
 
 /// Each field's largest value over the flight, as the app's `max_entries` (a field's
 /// maximum, not its largest magnitude: `VSpd` is the best climb).
-fn maxima(samples: &[&Sample]) -> Map<String, Value> {
+fn maxima(max: &[Option<f64>]) -> Map<String, Value> {
     KEYS.iter()
-        .filter_map(|(key, field, convert)| {
-            let max = samples.iter().filter_map(|s| s.get(*field).map(convert)).reduce(f64::max)?;
-            Some((key.to_string(), json!(max)))
-        })
+        .zip(max)
+        .filter_map(|((key, _, _), max)| Some((key.to_string(), json!((*max)?))))
         .collect()
 }
 
@@ -101,23 +99,36 @@ fn maxima(samples: &[&Sample]) -> Map<String, Value> {
 /// uploaded, so the feed's is empty for its flights. None when fuel was added on the way, by
 /// a refuel or a reload, which makes the difference meaningless: the flight that began in
 /// the air after an LFBO-EGJJ reload on 2026-11-02 came out at -24.2.
-fn fuel_consumed(samples: &[&Sample]) -> Option<f64> {
-    let totals: Vec<f64> = samples
-        .iter()
-        .filter_map(|s| Some(s.get(Field::FuelLeft)? + s.get(Field::FuelRight)?))
-        .filter(|t| *t > 0.0)
-        .collect();
-    let (&first, &last) = (totals.first()?, totals.last()?);
-    // More than sloshing: a quantity the gauges don't wander by.
-    let added = REFUEL_FRACTION * first.max(1.0 / REFUEL_FRACTION);
-    let mut lowest = first;
-    for &t in &totals {
-        if t > lowest + added {
-            return None;
+#[derive(Debug, Clone, Default)]
+struct Fuel {
+    first: Option<f64>,
+    lowest: f64,
+    last: f64,
+    added: bool,
+}
+
+impl Fuel {
+    fn sample(&mut self, s: &Sample) {
+        let Some(total) = s.get(Field::FuelLeft).zip(s.get(Field::FuelRight)).map(|(l, r)| l + r) else { return };
+        if total <= 0.0 {
+            return;
         }
-        lowest = lowest.min(t);
+        let first = *self.first.get_or_insert_with(|| {
+            self.lowest = total;
+            total
+        });
+        // More than sloshing: a quantity the gauges don't wander by.
+        if total > self.lowest + REFUEL_FRACTION * first.max(1.0 / REFUEL_FRACTION) {
+            self.added = true;
+        }
+        self.lowest = self.lowest.min(total);
+        self.last = total;
     }
-    Some(first - last)
+
+    fn consumed(&self) -> Option<f64> {
+        let first = self.first.filter(|_| !self.added)?;
+        Some(first - self.last)
+    }
 }
 
 /// Fuel going up by this fraction of the starting quantity (or by 1) is fuel added.
@@ -132,7 +143,9 @@ fn closest_airport(s: &Sample, places: &Places) -> Option<Value> {
 }
 
 /// A flight's track as the app uploads it to `flight_track_points`: the first sample of
-/// each second, in the app's keys and signs.
+/// each second, in the app's keys and signs. What [`FlightStats`] gathers as it goes,
+/// which the tests hold it to.
+#[cfg(test)]
 pub fn track(f: &FlightSummary, samples: &[Sample]) -> Vec<crate::track::DecodedPoint> {
     points(samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)))
 }
@@ -245,10 +258,60 @@ fn events(f: &FlightSummary) -> Value {
     Value::Array(events)
 }
 
-/// The statistics document for one flight of a session. `samples` are the session's.
+/// What a flight's statistics document is built from, gathered from its samples as they
+/// go by (a [`FlightSink`]), so a flight still flying needs none of them kept.
+#[derive(Debug, Clone, Default)]
+pub struct FlightStats {
+    max: Vec<Option<f64>>,
+    fuel: Fuel,
+    /// The first sample at or after the takeoff roll's start, the landing's, and the last.
+    takeoff: Option<Sample>,
+    landing: Option<Sample>,
+    last: Option<Sample>,
+    /// The flight's track, as [`track`] makes it.
+    pub track: Vec<crate::track::DecodedPoint>,
+}
+
+impl FlightSink for FlightStats {
+    fn sample(&mut self, s: &Sample, progress: Progress) {
+        if self.max.is_empty() {
+            self.max = vec![None; KEYS.len()];
+        }
+        for ((_, field, convert), max) in KEYS.iter().zip(self.max.iter_mut()) {
+            if let Some(v) = s.get(*field).map(convert) {
+                *max = Some(max.map_or(v, |m| m.max(v)));
+            }
+        }
+        self.fuel.sample(s);
+        if self.takeoff.is_none() && progress.takeoff_roll_ms.is_some_and(|t| s.wall_time_ms >= t) {
+            self.takeoff = Some(s.clone());
+        }
+        if self.landing.is_none() && progress.landing_ms.is_some_and(|t| s.wall_time_ms >= t) {
+            self.landing = Some(s.clone());
+        }
+        self.track.extend(points(std::iter::once(s).filter(|s| {
+            self.track.last().is_none_or(|p| s.wall_time_ms.div_euclid(1000) != p.epoch)
+        })));
+        self.last = Some(s.clone());
+    }
+}
+
+/// The statistics document for one flight of a session, from all its samples at once.
+/// `samples` are the session's. What [`FlightStats`] gathers as it goes, which the tests
+/// hold it to.
+#[cfg(test)]
 pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample], places: &Places) -> Value {
-    let flight: Vec<&Sample> =
-        samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)).collect();
+    let progress = Progress { takeoff_roll_ms: f.takeoff_roll_ms, landing_ms: f.landing.as_ref().map(|l| l.wall_time_ms) };
+    let mut stats = FlightStats::default();
+    samples
+        .iter()
+        .filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms))
+        .for_each(|s| stats.sample(s, progress));
+    document(header, f, &stats, places)
+}
+
+/// The statistics document for one flight, from what was gathered of it.
+pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, places: &Places) -> Value {
     let a = &header.aircraft;
     let identity = butterlog_identity::Resolver::embedded().resolve(&a.title, &a.livery);
     let (sim, sim_version) = simulator(&header.sim);
@@ -266,20 +329,20 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
         "end_time": app_time(f.last_ms),
         "departure": endpoint(&f.departure, places),
         "takeoff_time": f.takeoff_roll_ms.map_or(Value::Null, app_time),
-        "max_entries": maxima(&flight),
+        "max_entries": maxima(&stats.max),
         "events": events(f),
     });
     let doc_mut = doc.as_object_mut().expect("an object");
     // The frame the takeoff time is: the feed and the aircraft stats measure distance from it.
-    if let Some(at) = f.takeoff_roll_ms.and_then(|ms| flight.iter().find(|s| s.wall_time_ms >= ms)) {
+    if let Some(at) = stats.takeoff.as_ref().filter(|_| f.takeoff_roll_ms.is_some()) {
         doc_mut.insert("takeoff_snapshot".into(), Value::Object(snapshot(at)));
     }
-    if let Some(burnt) = fuel_consumed(&flight) {
+    if let Some(burnt) = stats.fuel.consumed() {
         doc_mut.insert("fuel_consumed".into(), json!(burnt));
     }
     // Where it ended: the post of a flight that ends in the air says how far it was from
     // the airport nearest, as the app's last update did.
-    if let Some(last) = flight.last() {
+    if let Some(last) = &stats.last {
         doc_mut.insert("current_snapshot".into(), Value::Object(snapshot(last)));
         if f.landing.is_none() {
             if let Some(closest) = closest_airport(last, places) {
@@ -288,8 +351,7 @@ pub fn statistics(header: &SessionHeader, f: &FlightSummary, samples: &[Sample],
         }
     }
     if let Some(l) = &f.landing {
-        let at = flight.iter().find(|s| s.wall_time_ms >= l.wall_time_ms).copied();
-        let mut landing = at.map(snapshot).unwrap_or_default();
+        let mut landing = stats.landing.as_ref().map(snapshot).unwrap_or_default();
         // The touchdown as the frames show it, rather than the sample after.
         landing.insert("VSpd".into(), json!(l.touchdown_fpm));
         landing.insert("NormAc".into(), json!(l.g));
@@ -313,6 +375,78 @@ mod tests {
     use crate::analysis::analyse;
     use crate::normalise::normalise_segment;
     use std::path::Path;
+
+    /// `fuel_consumed` as it was, over the flight's samples at once.
+    fn fuel_consumed_whole(samples: &[&Sample]) -> Option<f64> {
+        let totals: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| Some(s.get(Field::FuelLeft)? + s.get(Field::FuelRight)?))
+            .filter(|t| *t > 0.0)
+            .collect();
+        let (&first, &last) = (totals.first()?, totals.last()?);
+        let added = REFUEL_FRACTION * first.max(1.0 / REFUEL_FRACTION);
+        let mut lowest = first;
+        for &t in &totals {
+            if t > lowest + added {
+                return None;
+            }
+            lowest = lowest.min(t);
+        }
+        Some(first - last)
+    }
+
+    /// The fuel burnt, as [`Fuel`] gathers it, which must be what the whole flight gave.
+    fn fuel_consumed(samples: &[&Sample]) -> Option<f64> {
+        let mut fuel = Fuel::default();
+        samples.iter().for_each(|s| fuel.sample(s));
+        assert_eq!(fuel.consumed(), fuel_consumed_whole(samples));
+        fuel.consumed()
+    }
+
+    /// What the stream gathers of each flight as its samples go by makes the document and
+    /// the track the whole flight's samples make, at every point of the session.
+    #[test]
+    fn the_stream_gathers_what_the_whole_flight_gives() {
+        use crate::analysis::flight::FlightStream;
+        let places = Places::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("data")).unwrap();
+        for name in ["msfs_pattern.blsg.zst", "xplane_pattern.blsg.zst"] {
+            let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+            let (header, samples) = normalise_segment(&std::fs::read(path).unwrap()).unwrap();
+            let mut stream = FlightStream::<FlightStats>::new();
+            let mut checked = 0;
+            for (i, s) in samples.iter().enumerate() {
+                stream.push(s);
+                if i % 499 != 0 && i + 1 != samples.len() {
+                    continue;
+                }
+                let so_far = &samples[..=i];
+                for (f, stats) in stream.flights(&places) {
+                    assert_eq!(document(&header, &f, &stats, &places), statistics(&header, &f, so_far, &places), "{name} at {i}");
+                    assert_eq!(stats.track, track(&f, so_far), "{name} at {i}");
+                    let flight: Vec<&Sample> = so_far.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)).collect();
+                    assert_eq!(stats.fuel.consumed(), fuel_consumed_whole(&flight), "{name} at {i}");
+                    checked += 1;
+                }
+            }
+            assert!(checked > 10, "{name}: {checked}");
+        }
+        // Fuel added on the way: no consumption, as before.
+        let mut refuelled = Vec::new();
+        for (i, total) in [100.0, 99.0, 98.0, 120.0, 119.0].into_iter().enumerate() {
+            let mut s = Sample::empty();
+            s.wall_time_ms = i as i64 * 1_000;
+            s.set(Field::FuelLeft, total / 2.0);
+            s.set(Field::FuelRight, total / 2.0);
+            refuelled.push(s);
+        }
+        let mut fuel = Fuel::default();
+        refuelled.iter().for_each(|s| fuel.sample(s));
+        assert_eq!(fuel.consumed(), None);
+        assert_eq!(fuel_consumed_whole(&refuelled.iter().collect::<Vec<_>>()), None);
+        let mut burnt = Fuel::default();
+        refuelled[..3].iter().for_each(|s| burnt.sample(s));
+        assert_eq!(burnt.consumed(), Some(2.0));
+    }
 
     #[test]
     fn the_pattern_reads_as_the_apps_statistics() {
