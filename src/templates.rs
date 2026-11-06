@@ -106,8 +106,6 @@ pub struct FlightDetailPage {
     pub touchdown_stats: Vec<StatItem>,
     /// Peak-of-flight telemetry (from `max_entries`); empty hides the card.
     pub peak_stats: Vec<StatItem>,
-    /// Relative link to this flight's public 3D share page; empty when unshared.
-    pub share_href: String,
     /// The FlySto export, for its pilot when its telemetry has it; empty hides it.
     pub export_href: String,
 }
@@ -128,14 +126,8 @@ pub struct FlightsPage {
 }
 
 pub struct FlightCard {
-    /// Link to the share page; empty when the flight has no share.
-    pub share_href: String,
-    /// Link to the live flight page; empty unless the flight is in progress and
-    /// streaming a track. Takes precedence over `share_href`, which an
-    /// in-progress flight does not have yet — without this the one card a
-    /// viewer most wants to click is the only one that isn't clickable. Also
-    /// the flight page of an ended flight with no share, not shared yet.
-    pub live_href: String,
+    /// The flight's page: every flight has one, live while it flies.
+    pub href: String,
     pub avatar_url: String,
     pub pilot: String,
     pub dep: String,
@@ -210,8 +202,7 @@ pub struct AircraftTypePage {
 
 pub struct TypeShot {
     pub url: String,
-    /// Where the shot leads: the flight it came from. Empty when that flight
-    /// has neither a share nor a live page.
+    /// Where the shot leads: the page of the flight it came from.
     pub flight_href: String,
     pub dep: String,
     pub arr: String,
@@ -255,17 +246,15 @@ pub struct NotifiedChannel {
 }
 
 #[derive(Template)]
-#[template(path = "share_detail.html")]
-pub struct ShareDetailPage {
+#[template(path = "flight_view.html")]
+pub struct FlightViewPage {
     pub nav: Nav,
-    pub share_id: String,
-    pub is_owner: bool,
-    /// The owner's FlySto export of the shared flight; empty when not theirs or not exportable.
+    /// The FlySto export, for the flight's pilot when its telemetry has it; empty hides it.
     pub export_href: String,
-    /// `MSFS`, `X-Plane`, or empty when the share predates the flights link.
+    /// `MSFS`, `X-Plane`, or empty when unknown (an old share without its flight).
     /// The renderer reads the track's raw pitch and roll through it.
     pub simulator: String,
-    /// Share JSON with `</` and backslashes escaped for safe <script> embedding.
+    /// The flight's document as JSON, with no `<` left to close the script it is in.
     pub json_escaped: String,
 }
 
@@ -326,10 +315,8 @@ mod tests {
     /// askama's escaping is HTML escaping.
     #[test]
     fn a_hostile_simulator_name_cannot_break_out_of_the_share_page() {
-        let html = ShareDetailPage {
+        let html = FlightViewPage {
             nav: nav("community"),
-            share_id: "abc-123".into(),
-            is_owner: false,
             export_href: String::new(),
             simulator: r#"" ; alert(1); //"#.into(),
             json_escaped: "{}".into(),
@@ -345,10 +332,8 @@ mod tests {
 
     #[test]
     fn share_page_uses_the_same_shared_renderer() {
-        let html = ShareDetailPage {
+        let html = FlightViewPage {
             nav: nav("community"),
-            share_id: "abc-123".into(),
-            is_owner: false,
             export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
@@ -377,7 +362,6 @@ mod tests {
             urls_json: r#"["https://cdn.example/s/1.webp"]"#.into(),
             touchdown_stats: vec![StatItem { label: "Vertical Speed".into(), value: "-121.00 fpm".into() }],
             peak_stats: vec![StatItem { label: "Indicated Airspeed".into(), value: "142.00 kts".into() }],
-            share_href: "/content/flights/share/abc123".into(),
             export_href: "/content/flights/7/export/flysto.csv".into(),
         };
         let html = page.render().unwrap();
@@ -390,10 +374,10 @@ mod tests {
         assert!(html.contains(r#"openLightbox(["https://cdn.example/s/1.webp"], 0)"#));
         // Deduced type shows; the empty airline line is omitted.
         assert!(html.contains("C172"));
-        // Stats cards and the 3D share link render.
+        // Stats cards and the export render.
         assert!(html.contains("Vertical Speed") && html.contains("-121.00 fpm"));
         assert!(html.contains("142.00 kts"));
-        assert!(html.contains(r#"href="/content/flights/share/abc123""#));
+        assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
     }
 
     #[test]
@@ -402,8 +386,7 @@ mod tests {
             nav: nav("community"),
             subtitle: "Every pilot".into(),
             flights: vec![FlightCard {
-                share_href: String::new(),
-                live_href: String::new(),
+                href: "/content/flights/9".into(),
                 avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
                 pilot: "Pilot".into(),
                 dep: "EGLL".into(),
@@ -423,62 +406,15 @@ mod tests {
         assert!(html.contains("ONGOING"));
         // Deduced type and airline render on the card.
         assert!(html.contains("British Airways"));
-        // A flight with nowhere to go renders as a plain row, not a dead anchor.
-        assert!(html.contains(r#"<div class="row">"#));
+        // Every flight leads to its page.
+        assert!(html.contains(r#"<a class="row" href="/content/flights/9">"#));
         // The rail is the navigation now, and it knows whose session this is.
         assert!(html.contains(r#"href="/content/flight/user/7""#));
         assert!(html.contains(r#"href="/content/aircraft""#));
     }
 
-    /// A card links to whichever page actually exists for that flight, and an
-    /// in-progress flight must not fall through to the non-clickable branch —
-    /// it is the card a viewer is most likely to want.
     #[test]
-    fn a_live_flight_card_links_to_the_live_page() {
-        fn card(live: &str, share: &str) -> FlightCard {
-            FlightCard {
-                share_href: share.into(),
-                live_href: live.into(),
-                avatar_url: "a.png".into(),
-                pilot: "Pilot".into(),
-                dep: "EGLL".into(),
-                arr: "In Flight".into(),
-                airframe: "A320".into(),
-                resolved_icao: String::new(),
-                resolved_airline: String::new(),
-                simulator: "MSFS".into(),
-                date_str: "June 09, 2026, 12:00 UTC".into(),
-                landing_badge: r#"<div class="badge badge-live">LIVE</div>"#.into(),
-                screenshots: vec![],
-                urls_json: "[]".into(),
-            }
-        }
-        fn render(c: FlightCard) -> String {
-            FlightsPage {
-                nav: nav("community"),
-                subtitle: "s".into(),
-                flights: vec![c],
-            }
-            .render()
-            .unwrap()
-        }
-
-        // In progress: links live, and is a real anchor rather than a dead div.
-        let live = render(card("/content/flights/42", ""));
-        assert!(live.contains(r#"href="/content/flights/42""#));
-        assert!(!live.contains(r#"<div class="row">"#));
-        assert!(live.contains("LIVE"));
-
-        // A flight that is both live and already shared prefers the live page,
-        // since that is the one still changing.
-        let both = render(card("/content/flights/42", "/content/flights/share/abc"));
-        assert!(both.contains(r#"href="/content/flights/42""#));
-        assert!(!both.contains("/content/flights/share/abc"));
-
-        // Finished and shared: unchanged behaviour.
-        let done = render(card("", "/content/flights/share/abc"));
-        assert!(done.contains(r#"href="/content/flights/share/abc""#));
-
+    fn an_empty_list_says_so() {
         let empty = FlightsPage {
             nav: nav("community"),
             subtitle: "s".into(),
@@ -497,8 +433,7 @@ mod tests {
     fn dump_shell_pages() {
         let out = std::env::var("SHELL_DUMP_DIR").expect("SHELL_DUMP_DIR");
         let mk = |dep: &str, arr: &str, ac: &str, icao: &str, air: &str, sim: &str, d: &str, badge: &str, shots: Vec<String>| FlightCard {
-            share_href: "/content/flights/share/abc".into(),
-            live_href: String::new(),
+            href: "/content/flights/9".into(),
             avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
             pilot: "IronClaw737".into(),
             dep: dep.into(), arr: arr.into(), airframe: ac.into(),
@@ -582,10 +517,8 @@ mod tests {
         };
         std::fs::write(format!("{}/shell_type.html", out), ty.render().unwrap()).unwrap();
 
-        let share = ShareDetailPage {
+        let share = FlightViewPage {
             nav: nav("community"),
-            share_id: "abc".into(),
-            is_owner: true,
             export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
@@ -622,24 +555,20 @@ mod tests {
     }
 
     #[test]
-    fn share_page_owner_controls_and_json() {
-        let owner = ShareDetailPage {
+    fn flight_view_owner_export_and_json() {
+        let owner = FlightViewPage {
             nav: nav("community"),
-            share_id: "abc-123".into(),
-            is_owner: true,
             export_href: "/content/flights/7/export/flysto.csv".into(),
             simulator: "MSFS".into(),
-            json_escaped: r#"{"summary":{"x":"<\/script>"}}"#.into(),
+            json_escaped: r#"{"summary":{"x":"</script>"}}"#.into(),
         };
         let html = owner.render().unwrap();
-        assert!(html.contains("/api/v0/flights/share/abc-123"));
         assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
-        assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"<\/script>"}};"#));
+        assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"</script>"}};"#));
+        assert!(!html.contains("Delete share"));
 
-        let visitor = ShareDetailPage {
+        let visitor = FlightViewPage {
             nav: nav("community"),
-            share_id: "abc-123".into(),
-            is_owner: false,
             export_href: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),

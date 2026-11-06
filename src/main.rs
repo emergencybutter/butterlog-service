@@ -24,6 +24,7 @@ mod track;
 mod sessions;
 mod screenshots;
 mod shares;
+mod flight_doc;
 mod export;
 mod anonymous;
 mod normalise;
@@ -91,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Ends flights that stopped reporting and prunes expired track points.
-    track::spawn_reaper(state.db.clone());
+    track::spawn_reaper(state.db.clone(), state.r2.clone());
     sessions::spawn_compactor(
         state.db.clone(),
         state.config.r2_telemetry_bucket.clone().map(|bucket| sessions::R2Segments {
@@ -170,8 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/flights/share",
             post(handlers::upload_flight_share_bearer_handler),
         )
-        .route("/api/v0/flights/covering", get(shares::covering_handler))
-        .route("/api/v0/flights/:id/share", post(shares::share_handler))
+        .route("/api/v0/flights/covering", get(flight_doc::covering_handler))
         .route(
             "/api/v0/multiplayer/ping",
             post(handlers::multiplayer_ping_bearer_handler),
@@ -653,6 +653,26 @@ async fn flight_detail_page(
         }
     }
 
+    let viewer = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+    let is_owner = viewer.is_some() && viewer == owner;
+    let export_href = if is_owner && export::exportable(&state.db, flight_id).await? {
+        format!("/content/flights/{flight_id}/export/flysto.csv")
+    } else {
+        String::new()
+    };
+
+    // Every flight shows all of it: its track, from wherever it now is, in the full view.
+    if let Some(doc) = flight_doc::document(&state.db, &state.r2, flight_id).await? {
+        let page = templates::FlightViewPage {
+            nav: nav_for(&state, &headers, "community", "Flight").await,
+            export_href,
+            simulator: doc["simulator"].as_str().unwrap_or_default().to_string(),
+            json_escaped: script_json(&doc.to_string()),
+        };
+        return Ok(Html(page.render()?).into_response());
+    }
+
+    // No track of it left anywhere: what the service knows of it.
     let row: Option<(String, Option<String>, serde_json::Value, chrono::DateTime<chrono::Utc>, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT f.departure, f.arrival, f.statistics, f.created_at, u.username, u.global_name, f.notes \
          FROM flights f JOIN users u ON f.user_id = u.id WHERE f.id = $1"
@@ -695,26 +715,6 @@ async fn flight_detail_page(
             .unwrap_or_default(),
     );
 
-    // Link to the public 3D share page when this flight has been shared. The
-    // `remote_flight_id` column stores the local flights.id (see discord sync).
-    let share_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1"
-    )
-    .bind(flight_id)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
-    let share_href = share_id
-        .map(|id| format!("/content/flights/share/{}", id))
-        .unwrap_or_default();
-
-    let viewer = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
-    let export_href = if viewer.is_some() && viewer == owner && export::exportable(&state.db, flight_id).await? {
-        format!("/content/flights/{flight_id}/export/flysto.csv")
-    } else {
-        String::new()
-    };
-
     let page = templates::FlightDetailPage {
         nav: nav_for(&state, &headers, "community", "Flight").await,
         dep,
@@ -735,7 +735,6 @@ async fn flight_detail_page(
         screenshots,
         touchdown_stats,
         peak_stats,
-        share_href,
         export_href,
     };
 
@@ -915,24 +914,6 @@ async fn render_flights_page(
 ) -> Result<Response, AppError> {
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
 
-    // Bulk-fetch share IDs for these flights
-    let raw_shares: Vec<(i64, String)> = if !flight_ids.is_empty() {
-        sqlx::query_as(
-            "SELECT remote_flight_id, id FROM flight_shares \
-             WHERE remote_flight_id = ANY($1) ORDER BY created_at DESC"
-        )
-        .bind(&flight_ids)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default()
-    } else {
-        vec![]
-    };
-    let mut share_by_flight: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    for (flight_id, share_id) in raw_shares {
-        share_by_flight.entry(flight_id).or_insert(share_id);
-    }
-
     // Bulk-fetch all screenshots for these flights in one query
     let raw_screenshots: Vec<(i64, String)> = if !flight_ids.is_empty() {
         sqlx::query_as(
@@ -974,16 +955,7 @@ async fn render_flights_page(
                 r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string()
             };
             templates::FlightCard {
-                share_href: share_by_flight
-                    .get(&flight_id)
-                    .map(|sid| format!("/content/flights/share/{}", sid))
-                    .unwrap_or_default(),
-                // Live, or not shared (yet): the flight page, which every flight has.
-                live_href: if is_live || !share_by_flight.contains_key(&flight_id) {
-                    format!("/content/flights/{}", flight_id)
-                } else {
-                    String::new()
-                },
+                href: format!("/content/flights/{}", flight_id),
                 avatar_url,
                 pilot: flight.7.unwrap_or(flight.6),
                 dep: flight.1,
@@ -1447,16 +1419,11 @@ async fn render_aircraft_type_page(
 
     let shots: Vec<templates::TypeShot> = rows
         .into_iter()
-        .map(|(url, flight_id, dep, arr, username, global_name, avatar, discord_id, created_at, share_id)| {
+        .map(|(url, flight_id, dep, arr, username, global_name, avatar, discord_id, created_at, _share_id)| {
             let _ = (avatar, discord_id);
             templates::TypeShot {
                 url,
-                // A share is the page a screenshot belongs on; without one the
-                // flight page still works for whoever can see it.
-                flight_href: match share_id {
-                    Some(sid) => format!("/content/flights/share/{}", sid),
-                    None => format!("/content/flights/{}", flight_id),
-                },
+                flight_href: format!("/content/flights/{}", flight_id),
                 dep,
                 arr: arr.unwrap_or_else(|| "In Flight".to_string()),
                 pilot: global_name.unwrap_or(username),
@@ -1634,6 +1601,11 @@ async fn map_handler(
     Ok(Html(templates::MapPage { nav }.render()?).into_response())
 }
 
+/// JSON to embed in a `<script>`: no `<` is left to close it, `<` reading the same.
+fn script_json(json: &str) -> String {
+    json.replace('<', "\\u003c")
+}
+
 async fn flight_share_detail_handler(
     State(state): State<AppState>,
     axum::extract::Path(share_id): axum::extract::Path<String>,
@@ -1650,21 +1622,17 @@ async fn flight_share_detail_handler(
     .fetch_optional(&state.db)
     .await?;
 
-    let (key, share_owner_id, simulator, flight_id) = match row {
+    let (key, _owner, simulator, flight_id) = match row {
         Some(r) => r,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Share not found</h1>".to_string())).into_response()),
     };
 
-    // Check if the logged-in user owns this share
-    let logged_in_user_id = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
-    let is_owner = logged_in_user_id.is_some() && logged_in_user_id == share_owner_id;
-    // The share is the page Discord and the app link to, so the owner's export is here too.
-    let export_href = match flight_id {
-        Some(id) if is_owner && export::exportable(&state.db, id).await? => {
-            format!("/content/flights/{id}/export/flysto.csv")
-        }
-        _ => String::new(),
-    };
+    // There are no shares any more: a share's link, in older Discord posts and apps, leads
+    // to its flight's page, which shows all of it. One that never found its flight still
+    // shows what it was uploaded with.
+    if let Some(id) = flight_id {
+        return Ok(axum::response::Redirect::permanent(&format!("/content/flights/{id}")).into_response());
+    }
 
     let compressed = match state.r2.download_object(&key).await {
         Ok(d) => d,
@@ -1682,13 +1650,11 @@ async fn flight_share_detail_handler(
         }
     };
 
-    let page = templates::ShareDetailPage {
+    let page = templates::FlightViewPage {
         nav: nav_for(&state, &headers, "community", "Flight").await,
-        share_id,
-        is_owner,
-        export_href,
+        export_href: String::new(),
         simulator: simulator.unwrap_or_default(),
-        json_escaped: json_str.replace('\\', "\\\\").replace("</", "<\\/"),
+        json_escaped: script_json(&json_str),
     };
 
     let mut response = Html(page.render()?).into_response();
@@ -1850,7 +1816,6 @@ mod tests {
             .route("/api/v0/flights/share", post(|| async {}))
             .route("/api/v0/flights/share/:share_id", get(|| async {}).delete(|| async {}))
             .route("/api/v0/flights/covering", get(|| async {}))
-            .route("/api/v0/flights/:id/share", post(|| async {}))
             .route("/api/v0/flights/:id/track", post(|| async {}))
             .route("/api/v0/flights/:id/track/cursor", get(|| async {}))
             .route("/api/v0/flights/:id/end", post(|| async {}))

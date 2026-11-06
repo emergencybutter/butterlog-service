@@ -153,7 +153,7 @@ Where the server thinks the track ends: `{ "lastEpoch", "totalPoints", "status" 
 *   **Request Body (JSON, optional):** `reason` (`landed` | `sim_closed` | `abandoned`, default `landed`), `shareId` (string, optional).
 *   **Response:** `204 No Content`. Calling it twice is not an error.
 
-Sets `status = 'ended'`, so the live page can hand off to the permanent share rather than showing a frozen track. Without this call a flight is ended by a reaper 30 minutes after its last update.
+Sets `status = 'ended'`, so the live page can hand off to the flight's full page rather than showing a frozen track. Without this call a flight is ended by a reaper 30 minutes after its last update.
 
 ---
 
@@ -243,18 +243,9 @@ Removes a screenshot from a flight (database record and stored object).
 
 ---
 
-### Flight Shares
+### Flight Pages and Shares
 
-A share is a self-contained, gzip-compressed JSON document (track, summary, screenshot URLs) rendered by the public share page at `/content/flights/share/:share_id`.
-
-#### Upload a Share
-`POST /flights/share`
-
-*   **Request Body:** gzip-compressed JSON (`Content-Type: application/octet-stream`). The decompressed document may be at most 32MB. When the document contains a `remoteFlightId` (or `remote_flight_id`) field, the flight's Discord notification is updated with the share link.
-*   The share of a flight the service owns (rollout phase 5) is the service's: its document is written again from the flight, its statistics, track and screenshots, each time the flight changes, under the same id. A document without a `remoteFlightId`, from an app whose flight the service made, is given the user's flight the service owns that its track (`transposedData.timestamps`) overlaps most, within a minute or so, if that flight has no share yet.
-*   **Response:**
-    *   `201 Created`: Returns `{ "url": "<public share page url>", "id": "<share uuid>" }`.
-    *   `400 Bad Request`: Empty body, invalid gzip/JSON, or decompressed size over the limit.
+There are no shares any more: every flight's page, `/content/flights/:id`, shows all of it (track, 3D view, maps, graphs, summary, screenshots) to everyone, as its other details always were (an anonymous pilot's only through their link). The track comes from the flight's points while it has them; a week after it ends they are saved to R2 (`flights.track_key`) and pruned, and the page reads the saved copy; a flight pruned before that existed reads the share an app once uploaded of it.
 
 #### Find the Flight the Service Made
 `GET /flights/covering?from=<epoch s>&to=<epoch s>`
@@ -262,17 +253,18 @@ A share is a self-contained, gzip-compressed JSON document (track, summary, scre
 The app has no id for a flight the service made from its telemetry; it finds it from its own log's span. Returns the caller's flight the service owns whose telemetry overlaps the span most.
 
 *   **Response:**
-    *   `200 OK`: `{ "id": 565, "share_url": "<share page url>" | null, "export_url": "<FlySto CSV url>" }`.
+    *   `200 OK`: `{ "id": 565, "url": "<flight page url>", "export_url": "<FlySto CSV url>" }`.
     *   `404 Not Found`: No flight the service made covers the span.
 
-#### Share a Flight the Service Made
-`POST /flights/:id/share`
+#### Upload a Share (apps before 0.3.40)
+`POST /flights/share`
 
-Shares the caller's flight the service owns from the service's own document (no body), and updates its Discord post with the link; if it is already shared, that share.
-
+*   **Request Body:** gzip-compressed JSON (`Content-Type: application/octet-stream`), at most 32MB decompressed, with the flight's `remoteFlightId` (or `remote_flight_id`) when the app has one. Kept so the link the app shows leads to the flight: a document without an id, from an app whose flight the service made, is given the user's flight the service owns that its track (`transposedData.timestamps`) overlaps most, within a minute or so.
 *   **Response:**
-    *   `201 Created` (new) or `200 OK` (existing): `{ "url": "<public share page url>", "id": "<share uuid>" }`.
-    *   `404 Not Found`: Not the caller's, not made by the service, or no track left to share.
+    *   `201 Created`: Returns `{ "url": "<share link>", "id": "<share uuid>" }`.
+    *   `400 Bad Request`: Empty body, invalid gzip/JSON, or decompressed size over the limit.
+
+`/content/flights/share/:share_id` redirects (308) to its flight's page; a share that never found its flight still renders what it was uploaded with.
 
 #### Delete a Share
 `DELETE /flights/share/:share_id`
@@ -291,7 +283,7 @@ Returns the decompressed share JSON. No authentication; served with `Access-Cont
 #### Export for FlySto
 `GET /content/flights/:id/export/flysto.csv`
 
-The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie, or `Authorization: Bearer` from the app), linked from the flight and share pages when the flight was found in telemetry.
+The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie, or `Authorization: Bearer` from the app), linked from the flight page when the flight was found in telemetry.
 
 *   **Response:** `200 OK` with `Content-Type: text/csv` as an attachment; `404 Not Found` for someone else's flight, or one with no telemetry.
 
@@ -511,7 +503,8 @@ These endpoints use the web session (the `token` cookie set by the OAuth callbac
 *   `/content` -- latest flights from every pilot.
 *   `/content/flight/user/:user_id` -- one pilot's flights.
 *   `/content/flights/:id` -- flight detail page. While the flight is in progress and streaming a track, this serves the **live** variant instead: the same detail, polled from `/api/v0/flights/:id/live`, with a LIVE badge and (for the pilot) the sim control strip.
-*   `/content/flights/share/:share_id` -- shared flight page (map, charts, screenshots).
+*   `/content/flights/:id` -- a flight's page (track, 3D view, maps, charts, screenshots); live while it flies.
+*   `/content/flights/share/:share_id` -- redirects to its flight's page.
 *   `/content/settings` -- Discord notification settings (requires login).
 *   `/map` -- live traffic map.
 

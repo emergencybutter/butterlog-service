@@ -123,7 +123,7 @@
         {% else %}
         <div class="rows">
             {% for flight in flights %}
-            {% if !flight.live_href.is_empty() %}<a class="row" href="{{ flight.live_href }}">{% else if !flight.share_href.is_empty() %}<a class="row" href="{{ flight.share_href }}">{% else %}<div class="row">{% endif %}
+            <a class="row" href="{{ flight.href }}">
                 <div class="flight">
                     <img class="flight-avatar" src="{{ flight.avatar_url }}" alt="" loading="lazy">
                     <div class="flight-body">
@@ -154,7 +154,7 @@
                     </div>
                     <time class="flight-date">{{ flight.date_str }}</time>
                 </div>
-            {% if !flight.live_href.is_empty() || !flight.share_href.is_empty() %}</a>{% else %}</div>{% endif %}
+            </a>
             {% endfor %}
         </div>
         {% endif %}

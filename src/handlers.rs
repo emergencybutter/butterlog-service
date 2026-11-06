@@ -214,10 +214,6 @@ pub(crate) fn spawn_discord_sync(state: &crate::AppState, flight_id: i64) {
     let http = state.discord_http.clone();
     let base_url = state.config.public_base_url.clone();
     tokio::spawn(async move {
-        // A flight the service owns has its share written from it again first.
-        if let Err(e) = crate::shares::refresh(&db, &r2, flight_id).await {
-            tracing::error!("Share refresh failed for flight {}: {:?}", flight_id, e);
-        }
         if let Err(e) = crate::discord::sync_flight_discord(&db, &r2, &http, flight_id, &base_url).await {
             tracing::error!("Discord sync failed for flight {}: {:?}", flight_id, e);
         }

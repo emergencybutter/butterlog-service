@@ -474,24 +474,11 @@ pub async fn sync_flight_discord(
         return Ok(());
     }
 
-    // 6. Look up share URL for this flight (if shared)
-    let share_url: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM flight_shares WHERE remote_flight_id = $1 ORDER BY created_at DESC LIMIT 1"
-    )
-    .bind(flight_id)
-    .fetch_optional(db)
-    .await
-    .unwrap_or(None)
-    .map(|sid: String| format!("{}/content/flights/share/{}", base_url, sid));
-
-    // 7. Assemble the primary embed. Every embed in the message must share one
+    // 6-7. Assemble the primary embed. Every embed in the message must share one
     // url so Discord merges the screenshot images into the primary embed's
-    // gallery instead of rendering them as a separate trailing block. Fall back
-    // to the flight's public detail page so the title still links somewhere
-    // meaningful when the flight hasn't been shared.
-    let gallery_url = share_url.unwrap_or_else(|| {
-        format!("{}/content/flights/{}", base_url, flight_id)
-    });
+    // gallery instead of rendering them as a separate trailing block: the
+    // flight's page, which shows all of it.
+    let gallery_url = format!("{}/content/flights/{}", base_url, flight_id);
     let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref())?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
@@ -862,7 +849,7 @@ fn assemble_embeds(
         .icon_url(format!("{}/images/icon.png", base_url));
 
     // The shared url is what lets Discord group the screenshot image embeds into
-    // this embed's gallery; when the flight is shared it doubles as the title link.
+    // this embed's gallery; it doubles as the title link.
     let primary_embed = CreateEmbed::new()
         .title(title)
         .url(gallery_url)

@@ -714,7 +714,7 @@ pub async fn end_flight_handler(
 
 /// Background sweep: end flights that stopped reporting, and drop track points
 /// for flights whose retention window has passed.
-pub fn spawn_reaper(db: PgPool) {
+pub fn spawn_reaper(db: PgPool, r2: crate::r2::R2Client) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -738,23 +738,11 @@ pub fn spawn_reaper(db: PgPool) {
                 _ => {}
             }
 
-            // Retention: the share is the durable copy, so a shared flight keeps
-            // its live track for a week and an unshared one for a month.
-            let pruned = sqlx::query(
-                "DELETE FROM flight_track_points p \
-                  USING flights f \
-                  WHERE p.flight_id = f.id \
-                    AND f.status = 'ended' \
-                    AND f.ended_at < NOW() - CASE WHEN f.share_id IS NULL \
-                                                  THEN INTERVAL '30 days' \
-                                                  ELSE INTERVAL '7 days' END",
-            )
-            .execute(&db)
-            .await;
-
-            match pruned {
-                Ok(r) if r.rows_affected() > 0 => {
-                    tracing::info!(points = r.rows_affected(), "pruned expired track points");
+            // Retention: a week after a flight ends its track is saved to R2, the
+            // durable copy its page then reads, and its points dropped.
+            match crate::flight_doc::prune(&db, &r2, 20).await {
+                Ok(points) if points > 0 => {
+                    tracing::info!(points, "archived and pruned expired track points");
                 }
                 Err(e) => tracing::error!("track retention sweep failed: {:?}", e),
                 _ => {}

@@ -119,13 +119,13 @@
             : ago < 60 ? `updated ${ago}s ago` : `updated ${Math.floor(ago / 60)}m ago`;
     }
 
-    // Once the flight is over, the share is the permanent artifact — point at it
-    // rather than leaving a frozen live page as the thing people bookmark.
+    // Once the flight is over this same address shows the whole of it: offer the
+    // reload rather than leaving a frozen live page.
     function handoff(doc) {
-        if (!doc.shareId) return;
+        if (doc.status !== 'ended') return;
         document.getElementById('live-handoff').innerHTML =
             `<div class="landing-card" style="margin-bottom:1.5rem"><div class="section-title">Flight complete</div>
-             <div>This flight has finished. <a href="/content/flights/share/${encodeURIComponent(doc.shareId)}" style="color:var(--purple)">View the full shared flight →</a></div></div>`;
+             <div>This flight has finished. <a href="/content/flights/${FLIGHT_ID}" style="color:var(--purple)">View the full flight →</a></div></div>`;
     }
 
     async function poll(first) {
