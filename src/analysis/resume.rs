@@ -17,24 +17,29 @@ pub const RESUME_FT: f64 = 1000.0;
 /// most recent logs.
 pub const CANDIDATES: i64 = 3;
 
-fn position(s: &Sample) -> Option<(f64, f64, f64)> {
+/// Where a sample has the aircraft: latitude, longitude and altitude (ft MSL).
+pub type Position = (f64, f64, f64);
+
+pub fn position(s: &Sample) -> Option<Position> {
     Some((s.get(Field::Latitude)?, s.get(Field::Longitude)?, s.get(Field::AltitudeMsl)?))
 }
 
-/// Whether a session whose samples are `after` continues the stream `before`, whose
-/// flights are `flights`.
-pub fn continues(before: &[Sample], flights: &[FlightSummary], after: &[Sample]) -> bool {
+/// Whether a session whose first position is `first` continues a stream whose flights
+/// are `flights` and whose last position is `last`.
+pub fn continues(last: Option<Position>, flights: &[FlightSummary], first: Option<Position>) -> bool {
     if !flights.last().is_some_and(|f| f.arrival == Endpoint::Airborne) {
         return false;
     }
-    let (Some(a), Some(b)) = (before.iter().rev().find_map(position), after.iter().find_map(position)) else {
+    let (Some(a), Some(b)) = (last, first) else {
         return false;
     };
     haversine_km(a.0, a.1, b.0, b.1) / 1.852 <= RESUME_NM && (a.2 - b.2).abs() <= RESUME_FT
 }
 
 /// Appends a session's samples to the stream it continues, after a pause: the time
-/// between the two, the app restarting, is not flying.
+/// between the two, the app restarting, is not flying. The analysis streams sessions
+/// with the same rule (`ingest::Stream`).
+#[cfg(test)]
 pub fn join(stream: &mut Vec<Sample>, mut next: Vec<Sample>) {
     if let (false, Some(first)) = (stream.is_empty(), next.first_mut()) {
         first.flags |= flags::PAUSED;
@@ -51,6 +56,10 @@ mod tests {
 
     fn places() -> Places {
         Places::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("data")).unwrap()
+    }
+
+    fn continues(before: &[Sample], flights: &[FlightSummary], after: &[Sample]) -> bool {
+        super::continues(before.iter().rev().find_map(position), flights, after.iter().find_map(position))
     }
 
     /// The X-Plane pattern, cut in two halfway through its time in the air.
