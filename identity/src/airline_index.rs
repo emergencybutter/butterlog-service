@@ -51,6 +51,14 @@ const STOPWORDS: &[&str] = &[
     "no", "cabin", "avionics", "hi", "def",
     // cabin fits: "VIP" is Tag Aviation UK's designator, "EXECUTIVE" Nightexpress' call sign
     "vip", "executive",
+    // PMDG variants in capitals, "737-700 BBJ BW" and "737-800 PAX SSW TC": the
+    // designators of Blue Air Lines (BBJ), Pan Air (PAX) and Streamline Aviation (SSW)
+    "bbj", "pax", "ssw", "bw", "sc", "tc",
+    // Embraer's "E-Jets" (Princely Jets)
+    "jets",
+    // title words that are call signs: FSReborn's "Oberon Interior" (U.S. Department of
+    // the Interior), Embraer's "E-Jets Family Lineage" (Liebherr), "PMDG House"
+    "interior", "family", "lineage", "house",
 ];
 
 /// A type designator such as "a320" or "b737": a letter and three digits. It names the
@@ -416,9 +424,24 @@ mod tests {
             al("EXT", "Nightexpress", "EXECUTIVE"),
             al("HFM", "Hi Fly Malta", "MOONRAKER"),
             al("MMS", "SAAD (A320) Limited", "MUSAAD AIR"),
+            al("BBJ", "Blue Air Lines", "BLUE KOREA"),
+            al("PAX", "Pan Air", "PANNEX"),
+            al("DOI", "U.S. Department of the Interior", "INTERIOR"),
+            al("LHB", "Liebherr Geschaeftreiseflugzeug", "FAMILY"),
+            al("SSW", "Streamline Aviation", "STREAMLINE"),
+            al("PJT", "Princely Jets", "PRINCELY JETS"),
         ]);
         let idx = AirlineIndex::build(&db);
-        for title in ["A340-300 VIP EIS2", "Transpacific Executive BBJ N739BB", "ToLiSs A321 Hi Def", "ToLiSs A320 Hi Def"] {
+        for title in [
+            "A340-300 VIP EIS2",
+            "Transpacific Executive BBJ N739BB",
+            "ToLiSs A321 Hi Def",
+            "ToLiSs A320 Hi Def",
+            "737-700 BBJ BW",
+            "737-800 PAX SSW TC",
+            "FSReborn Phenom 300E Oberon Interior",
+            "E-Jets Family Lineage 1000",
+        ] {
             assert!(idx.find(title).is_none(), "{title}");
         }
         assert_eq!(top(&idx, "Hi Fly Malta A380"), "HFM");
