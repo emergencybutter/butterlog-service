@@ -120,6 +120,21 @@ mod tests {
         assert_eq!(voyager("Dassault Falcon 8X by Aerobask", "Aircraft/Falcon 8X/liveries/Voyager/"), "VYA");
     }
 
+    /// FlightFactor liveries, as a pilot flew them: an engine code in brackets, the airline,
+    /// then a registration that once spelled another airline.
+    #[test]
+    fn flightfactor_liveries_get_their_airline() {
+        let r = Resolver::embedded();
+        let airline = |title: &str, livery: &str| r.resolve(title, livery).airline_name().to_string();
+        let b767 = "Aircraft/FlightFactor & StepToSky/Boeing 767 Global Package Plus/liveries/";
+        assert_eq!(airline("Boeing 767-300ER XP12", &format!("{b767}[763 GE] Atlas Air (N641GT)/")), "Atlas Air");
+        assert_eq!(airline("Boeing 767-300ER XP12", &format!("{b767}[763 GE] Icelandair TF-ISN (Light Blue)/")), "Icelandair");
+        assert_eq!(
+            airline("Boeing 757-200 XP12", "Aircraft/FlightFactor & StepToSky/Boeing 757-Full/liveries/[752 RR] US Airways (New) - N908AW/"),
+            "US Airways"
+        );
+    }
+
     #[test]
     fn a_light_aircraft_gets_no_airline() {
         let r = Resolver::embedded().resolve("Cessna Skyhawk", "United");

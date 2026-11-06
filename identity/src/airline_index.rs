@@ -39,16 +39,26 @@ const STOPWORDS: &[&str] = &[
     "air", "airline", "airlines", "airway", "airways", "aviation", "aero", "cargo",
     "international", "intl", "express", "transport", "transports", "group", "company",
     "co", "ltd", "inc", "limited", "holdings", "charter", "flight", "flights", "service",
-    "services",
+    // English filler, and Antonov's "An-28"
+    "services", "and", "the", "of", "an",
     // livery filler: MSFS's "(Dynamic)" and "Dynamic Registration" matched Dynamic Airways
     "dynamic", "registration", "livery", "liveries", "default",
     // model families that are also airline words ("Falcon 50" is not Falcon Air)
     "falcon", "citation", "phenom", "challenger", "caravan", "bluebird",
     // colours: "White A220-300" is a plain livery
     "white", "blue", "red", "green", "black", "grey", "gray", "silver", "gold", "orange",
-    // variant notes: "A220-300 - No Cabin", "G3X Avionics"
-    "no", "cabin", "avionics",
+    // variant notes: "A220-300 - No Cabin", "G3X Avionics", ToLiSs' "A320 Hi Def"
+    "no", "cabin", "avionics", "hi", "def",
+    // cabin fits: "VIP" is Tag Aviation UK's designator, "EXECUTIVE" Nightexpress' call sign
+    "vip", "executive",
 ];
+
+/// A type designator such as "a320" or "b737": a letter and three digits. It names the
+/// aircraft, never its operator, though "SAAD (A320) Limited" carries one.
+fn is_type_designator(token: &str) -> bool {
+    let mut chars = token.chars();
+    token.len() == 4 && chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_digit())
+}
 
 struct Posting {
     airline: u32,
@@ -71,6 +81,10 @@ pub struct AirlineIndex {
     /// airline named in full.
     phrases: Vec<[String; 3]>,
     postings: HashMap<String, Vec<Posting>>,
+    /// Each airline's ICAO designator, lowercased. Kept apart from the words because a
+    /// designator counts only when the query writes it in capitals: "US Airways (New)" is
+    /// not Northeastern Aviation (NEW).
+    designators: HashMap<String, Vec<u32>>,
     idf: HashMap<String, f32>,
     /// Minimum contribution a *single* token must reach for `find` to accept a match,
     /// scaled to the table size so a match rests on at least one moderately distinctive
@@ -84,7 +98,8 @@ fn tokenize(s: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string())
         .filter(|t| t.len() >= 2 || t.chars().any(|c| c.is_ascii_digit()))
-        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        // A bare number (737, 800, the 28 of "An-28") names no operator either.
+        .filter(|t| !STOPWORDS.contains(&t.as_str()) && !is_type_designator(t) && !t.chars().all(|c| c.is_ascii_digit()))
         .collect::<Vec<_>>();
     // Same rule as the type index: a studio name identifies neither the
     // aircraft nor its operator.
@@ -106,6 +121,44 @@ fn phrase(s: &str) -> String {
     format!(" {} ", words.join(" "))
 }
 
+/// `query` without its registrations ("TF-ISN", "EI-DEP", "HB-JCA"): a nationality prefix
+/// of one or two letters or digits, a hyphen, and three to five capitals or digits. Their
+/// last part spells an airline designator as often as not: Icelandair's TF-ISN is not
+/// Interisland Airlines (ISN).
+fn without_registrations(query: &str) -> String {
+    let is_registration = |word: &str| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
+        let caps = |s: &str| s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        match word.split_once('-') {
+            Some((nation, mark)) => {
+                (1..=2).contains(&nation.len())
+                    && (3..=5).contains(&mark.len())
+                    && caps(nation)
+                    && caps(mark)
+                    && nation.chars().any(|c| c.is_ascii_uppercase())
+                    && mark.chars().any(|c| c.is_ascii_uppercase())
+            }
+            None => false,
+        }
+    };
+    query
+        .split_whitespace()
+        .filter(|w| !is_registration(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The three-letter words `query` writes in capitals, lowercased: the only ones that can
+/// be an airline's designator.
+fn capital_designators(query: &str) -> HashSet<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() == 3 && w.chars().all(|c| c.is_ascii_uppercase()))
+        .map(str::to_lowercase)
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
 fn add_tokens(into: &mut HashMap<String, f32>, text: &str, weight: f32) {
     for token in tokenize(text) {
         into.entry(token)
@@ -120,10 +173,14 @@ impl AirlineIndex {
         let mut names: Vec<String> = Vec::with_capacity(db.airlines.len());
         let mut phrases: Vec<[String; 3]> = Vec::with_capacity(db.airlines.len());
         let mut per: Vec<HashMap<String, f32>> = Vec::with_capacity(db.airlines.len());
+        let mut designators: HashMap<String, Vec<u32>> = HashMap::new();
 
-        for a in &db.airlines {
+        for (idx, a) in db.airlines.iter().enumerate() {
+            let designator = a.icao.trim().to_lowercase();
+            if !designator.is_empty() && !STOPWORDS.contains(&designator.as_str()) {
+                designators.entry(designator).or_default().push(idx as u32);
+            }
             let mut tokens = HashMap::new();
-            add_tokens(&mut tokens, &a.icao, W_ICAO);
             add_tokens(&mut tokens, &a.callsign, W_CALLSIGN);
             add_tokens(&mut tokens, &a.name, W_NAME);
             icaos.push(a.icao.clone());
@@ -155,7 +212,7 @@ impl AirlineIndex {
         // shared by many airlines (e.g. generic "sky"/"wings"-type name fragments).
         let min_score = 0.6 * (1.0 + n).ln();
 
-        Self { icaos, names, phrases, postings, idf, min_score }
+        Self { icaos, names, phrases, postings, designators, idf, min_score }
     }
 
     /// Score `query` against every airline, returning `(airline_idx, summed_score,
@@ -165,8 +222,20 @@ impl AirlineIndex {
         let mut sums: HashMap<u32, f32> = HashMap::new();
         let mut bests: HashMap<u32, f32> = HashMap::new();
         let mut seen: HashSet<String> = HashSet::new();
+        let query = without_registrations(query);
+        let n = self.icaos.len().max(1) as f32;
 
-        for token in tokenize(query) {
+        for designator in capital_designators(&query) {
+            let Some(airlines) = self.designators.get(&designator) else { continue };
+            let contrib = (1.0 + n / airlines.len() as f32).ln() * W_ICAO;
+            for &airline in airlines {
+                *sums.entry(airline).or_insert(0.0) += contrib;
+                let best = bests.entry(airline).or_insert(0.0);
+                *best = best.max(contrib);
+            }
+        }
+
+        for token in tokenize(&query) {
             if !seen.insert(token.clone()) {
                 continue;
             }
@@ -208,29 +277,37 @@ impl AirlineIndex {
     }
 
     /// Best airline match for `query`, or `None` if no candidate is supported by a
-    /// sufficiently distinctive single word. Among candidates that clear that bar, the
-    /// highest summed score wins (ties broken by ICAO for determinism), counting
-    /// [`min_score`](Self::min_score) more for one whose whole name or call sign is in the
-    /// query: stopwords drop "Aviation" from "Voyager Aviation", which otherwise ties
-    /// with Voyager Airlines on "voyager" alone.
+    /// sufficiently distinctive single word. Among candidates that clear that bar, one
+    /// whose whole name is in the query comes first, then one whose call sign or name
+    /// without stopwords is, then the rest; within each, the highest summed score wins
+    /// (ties broken by ICAO for determinism). Stopwords drop "Aviation" from "Voyager
+    /// Aviation", which otherwise ties with Voyager Airlines on "voyager" alone; and
+    /// "Atlas Air" is Atlas Air, not Atlas Airlines, whose call sign is "ATLAS-AIR".
     pub fn find(&self, query: &str) -> Option<AirlineMatch> {
-        let (q, stripped) = (phrase(query), format!(" {} ", tokenize(query).join(" ")));
+        let plain = without_registrations(query);
+        let (q, stripped) = (phrase(&plain), format!(" {} ", tokenize(&plain).join(" ")));
         let named = |idx: u32| {
             let [name, callsign, name_words] = &self.phrases[idx as usize];
-            [name, callsign].iter().any(|p| p.trim().len() >= 3 && q.contains(p.as_str()))
-                || (!name_words.is_empty() && stripped.contains(name_words.as_str()))
+            let found = |p: &String| p.trim().len() >= 3 && q.contains(p.as_str());
+            if found(name) {
+                2
+            } else if found(callsign) || (!name_words.is_empty() && stripped.contains(name_words.as_str())) {
+                1
+            } else {
+                0
+            }
         };
         self.score(query)
             .into_iter()
             .filter(|&(_idx, _sum, best)| best >= self.min_score)
-            .map(|(idx, sum, best)| (idx, if named(idx) { sum + self.min_score } else { sum }, best))
+            .map(|(idx, sum, _best)| (idx, sum, named(idx)))
             .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                a.2.cmp(&b.2)
+                    .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                     // Smaller ICAO wins ties: invert so it sorts as the max.
                     .then_with(|| self.icaos[b.0 as usize].cmp(&self.icaos[a.0 as usize]))
             })
-            .map(|(idx, score, _best)| AirlineMatch {
+            .map(|(idx, score, _named)| AirlineMatch {
                 icao: self.icaos[idx as usize].clone(),
                 name: self.names[idx as usize].clone(),
                 score,
@@ -305,6 +382,46 @@ mod tests {
         // "VOYAGER AIR".
         assert_eq!(top(&idx, "Voyager | N850VY"), "VYA");
         assert_eq!(top(&idx, "Voyager Airlines 737"), "VOG");
+    }
+
+    /// A registration or a plain word that spells another airline's designator does not
+    /// make it the operator, and an airline named in full beats one whose call sign is.
+    #[test]
+    fn registrations_and_words_are_not_designators() {
+        let mut db = test_db();
+        db.airlines.extend([
+            al("ICE", "Icelandair", "ICEAIR"),
+            al("ISN", "Interisland Airlines", "TRI-BIRD"),
+            al("AWE", "US Airways", "CACTUS"),
+            al("NEW", "Northeastern Aviation", "MEADOW FLIGHT"),
+            al("GTI", "Atlas Air", "GIANT"),
+            al("ATR", "Atlas Airlines", "ATLAS-AIR"),
+        ]);
+        let idx = AirlineIndex::build(&db);
+        assert_eq!(top(&idx, "[763 GE] Icelandair TF-ISN (Light Blue)"), "ICE");
+        assert_eq!(top(&idx, "[752 RR] US Airways (New) - N908AW"), "AWE");
+        assert_eq!(top(&idx, "[763 GE] Atlas Air (N641GT)"), "GTI");
+        assert!(idx.find("TF-ISN").is_none());
+        assert!(idx.find("Boeing 767 New").is_none());
+        // A designator in capitals still names its airline.
+        assert_eq!(top(&idx, "A320 ISN"), "ISN");
+    }
+
+    /// Cabin fits, ToLiSs' "Hi Def" and a type designator name no operator.
+    #[test]
+    fn cabin_and_model_words_are_not_operators() {
+        let mut db = test_db();
+        db.airlines.extend([
+            al("VIP", "Tag Aviation UK", "SOVEREIGN"),
+            al("EXT", "Nightexpress", "EXECUTIVE"),
+            al("HFM", "Hi Fly Malta", "MOONRAKER"),
+            al("MMS", "SAAD (A320) Limited", "MUSAAD AIR"),
+        ]);
+        let idx = AirlineIndex::build(&db);
+        for title in ["A340-300 VIP EIS2", "Transpacific Executive BBJ N739BB", "ToLiSs A321 Hi Def", "ToLiSs A320 Hi Def"] {
+            assert!(idx.find(title).is_none(), "{title}");
+        }
+        assert_eq!(top(&idx, "Hi Fly Malta A380"), "HFM");
     }
 
     #[test]
