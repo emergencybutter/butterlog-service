@@ -133,7 +133,8 @@ pub struct FlightCard {
     /// Link to the live flight page; empty unless the flight is in progress and
     /// streaming a track. Takes precedence over `share_href`, which an
     /// in-progress flight does not have yet — without this the one card a
-    /// viewer most wants to click is the only one that isn't clickable.
+    /// viewer most wants to click is the only one that isn't clickable. Also
+    /// the flight page of an ended flight with no share, not shared yet.
     pub live_href: String,
     pub avatar_url: String,
     pub pilot: String,

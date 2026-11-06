@@ -978,7 +978,8 @@ async fn render_flights_page(
                     .get(&flight_id)
                     .map(|sid| format!("/content/flights/share/{}", sid))
                     .unwrap_or_default(),
-                live_href: if is_live {
+                // Live, or not shared (yet): the flight page, which every flight has.
+                live_href: if is_live || !share_by_flight.contains_key(&flight_id) {
                     format!("/content/flights/{}", flight_id)
                 } else {
                     String::new()

@@ -359,12 +359,14 @@ pub async fn create_flight_bearer_handler(
 
 /// Whether the service makes the user's flights now (rollout phase 5): their switch is on,
 /// and their telemetry, which it makes them from, is arriving. Otherwise the app does.
+/// A session that ended in the last minutes counts: an app restarting in the air offers
+/// the flight again before its next session opens, and that session continues the flight.
 pub(crate) async fn service_makes_flights(db: &PgPool, user_id: i64) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS ( \
            SELECT 1 FROM users u JOIN telemetry_sessions s ON s.user_id = u.id \
             WHERE u.id = $1 AND u.service_flights_since <= NOW() \
-              AND s.status = 'open' AND s.last_chunk_at > NOW() - INTERVAL '5 minutes')",
+              AND s.last_chunk_at > NOW() - INTERVAL '5 minutes')",
     )
     .bind(user_id)
     .fetch_one(db)
@@ -1128,6 +1130,13 @@ mod tests {
         // Telemetry arriving, the switch off.
         assert!(!service_makes_flights(&db, user).await.unwrap());
         sqlx::query("UPDATE users SET service_flights_since = NOW() WHERE id = $1").bind(user).execute(&db).await.unwrap();
+        assert!(service_makes_flights(&db, user).await.unwrap());
+        // The session just ended, the app restarting in the air: still the service's.
+        sqlx::query("UPDATE telemetry_sessions SET status = 'ended', ended_at = NOW() WHERE id = $1")
+            .bind(session)
+            .execute(&db)
+            .await
+            .unwrap();
         assert!(service_makes_flights(&db, user).await.unwrap());
         // The switch on, the telemetry stopped.
         sqlx::query("UPDATE telemetry_sessions SET last_chunk_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
