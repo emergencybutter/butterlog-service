@@ -1258,9 +1258,8 @@ async fn aggregate_aircraft_stats(
 fn group_thousands(n: i64) -> String {
     let s = n.abs().to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
-    let first = s.len() % 3;
     for (i, ch) in s.chars().enumerate() {
-        if i != 0 && (i - first) % 3 == 0 {
+        if i != 0 && (s.len() - i) % 3 == 0 {
             out.push(',');
         }
         out.push(ch);
@@ -1722,6 +1721,14 @@ mod tests {
             "&lt;script&gt;alert(&quot;x&quot;) &amp; 'y'&lt;/script&gt;"
         );
         assert_eq!(esc("plain text"), "plain text");
+    }
+
+    #[test]
+    fn thousands_are_grouped_from_the_right() {
+        for (n, s) in [(0, "0"), (12, "12"), (123, "123"), (1234, "1,234"), (19723, "19,723"),
+                       (123456, "123,456"), (1234567, "1,234,567"), (-19723, "-19,723")] {
+            assert_eq!(group_thousands(n), s);
+        }
     }
 
     #[test]
