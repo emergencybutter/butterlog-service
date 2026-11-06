@@ -336,17 +336,22 @@ window.initFlightStrip = function (H, opts) {
         if (toc) put(toc, 'Top of climb', 'lo');
         if (tod) put(tod, 'Top of descent', 'lo');
         if (landing) put(landing, 'Landing ' + hhmm(parseTs(landing.timestamp)) + (grade ? ' · ' + grade[1] : ''), grade ? 'g-' + grade[0] : '');
-        // On a short flight the climb and descent marks land on top of each
-        // other: keep the first of any two in a row that are too close.
-        const box = $('fv-profile').clientWidth || 600, gap = 110 / box * 100;
+        // Labels run right from their mark, or left near the right edge. Keep
+        // the first of any two in a row whose text would overlap - on a short
+        // flight or a phone the climb and descent marks land on each other.
+        const box = $('fv-profile').clientWidth || 600;
         const kept = [];
         out.sort((a, b) => a.pct - b.pct).forEach(o => {
-            const row = o.cls === 'lo' ? 'lo' : 'hi';
-            if (kept.some(k => (k.cls === 'lo' ? 'lo' : 'hi') === row && Math.abs(k.pct - o.pct) < gap)) return;
+            const x = o.pct / 100 * box, w = o.text.length * 6.6 + 12;
+            o.end = x + w > box;
+            o.l = o.end ? x - w : x;
+            o.r = o.end ? x : x + w;
+            o.row = o.cls === 'lo' ? 'lo' : 'hi';
+            if (kept.some(k => k.row === o.row && o.l < k.r + 6 && k.l < o.r + 6)) return;
             kept.push(o);
         });
         $('fv-events').innerHTML = kept.map(o =>
-            `<span class="${o.cls}${o.pct > 80 ? ' is-end' : ''}" style="left:${o.pct.toFixed(2)}%">${esc(o.text)}</span>`).join('');
+            `<span class="${o.cls}${o.end ? ' is-end' : ''}" style="left:${o.pct.toFixed(2)}%">${esc(o.text)}</span>`).join('');
     }
 
     // ── Lanes ────────────────────────────────────────────────────────────
@@ -366,7 +371,7 @@ window.initFlightStrip = function (H, opts) {
                 <button type="button" class="x" data-remove="${k}" aria-label="Remove ${esc(CHAN[k].label)}">&#10005;</button>
             </div>`).join('');
         $('fv-lanes-empty').hidden = ks.length > 0;
-        $('fv-count').textContent = ks.length ? String(ks.length) : '';
+        document.querySelectorAll('.fv-count').forEach(c => { c.textContent = ks.length ? String(ks.length) : ''; });
         lanes.querySelectorAll('[data-remove]').forEach(b => b.addEventListener('click', e => {
             e.stopPropagation();
             setPicked(picked.filter(k => k !== b.dataset.remove));
@@ -452,35 +457,61 @@ window.initFlightStrip = function (H, opts) {
     });
 
     // ── Tabs, camera, hide ───────────────────────────────────────────────
+    // Wide: the profile is always up, with Instruments or Graphs under it.
+    // Narrow: there is room for one thing, so the altitude profile, the
+    // flight display, the 3D view and the graphs are four tabs over the same
+    // panel, and the profile shrinks to a scrub bar under the others.
     let tab = store.get('tab', 'instruments') === 'graphs' ? 'graphs' : 'instruments';
     let panelOpen = store.get('panel', true) !== false;
-    const tabBtns = Array.from(document.querySelectorAll('.fv-tab'));
+    const MTABS = ['altitude', 'horizon', '3d', 'graphs'];
+    let mtab = MTABS.includes(store.get('mtab', 'altitude')) ? store.get('mtab', 'altitude') : 'altitude';
+    const narrowMq = window.matchMedia('(max-width: 899px)');
+    // What is on screen, whichever layout: read by the cursor handlers.
+    let effTab = tab, effOpen = panelOpen;
+    const tabBtns = Array.from(document.querySelectorAll('.fv-tabs .fv-tab'));
+    const mBtns = Array.from(document.querySelectorAll('.fv-mtabs .fv-tab'));
+    const strip = document.querySelector('.fv-strip');
     function applyTabs() {
-        tabBtns.forEach(b => {
-            const on = b.dataset.tab === tab;
+        const narrow = narrowMq.matches;
+        if (narrow) strip.dataset.mtab = mtab; else delete strip.dataset.mtab;
+        effTab = narrow ? (mtab === 'graphs' ? 'graphs' : 'instruments') : tab;
+        effOpen = narrow ? mtab !== 'altitude' : panelOpen;
+        const mark = (btns, key, cur) => btns.forEach(b => {
+            const on = b.dataset[key] === cur;
             b.setAttribute('aria-selected', on);
             b.tabIndex = on ? 0 : -1;
         });
-        $('panel-instruments').hidden = !panelOpen || tab !== 'instruments';
-        $('panel-graphs').hidden = !panelOpen || tab !== 'graphs';
-        $('fv-cam').hidden = !panelOpen || tab !== 'instruments';
-        chanBtn.hidden = !panelOpen || tab !== 'graphs';
+        mark(tabBtns, 'tab', tab);
+        mark(mBtns, 'mtab', mtab);
+        $('panel-instruments').hidden = !effOpen || effTab !== 'instruments';
+        $('panel-graphs').hidden = !effOpen || effTab !== 'graphs';
+        $('fv-cam').hidden = narrow ? mtab !== '3d' : (!panelOpen || tab !== 'instruments');
+        chanBtn.hidden = !effOpen || effTab !== 'graphs';
         if (chanBtn.hidden) openPicker(false);
         const hide = $('fv-hide');
         hide.textContent = panelOpen ? 'Hide panel' : 'Show panel';
         hide.setAttribute('aria-expanded', panelOpen);
-        if (panelOpen && tab === 'instruments') { H.onPaneShown('replay'); renderReadouts(); }
-        if (panelOpen && tab === 'graphs') { drawLanes(); placeCursors(); renderLaneValues(); }
+        if (effOpen && effTab === 'instruments') { H.onPaneShown('replay'); renderReadouts(); }
+        if (effOpen && effTab === 'graphs') { drawLanes(); placeCursors(); renderLaneValues(); }
+        // The profile just changed size or came back; the observer redraws it.
     }
-    tabBtns.forEach(b => {
-        b.addEventListener('click', () => { tab = b.dataset.tab; panelOpen = true; store.set('tab', tab); store.set('panel', true); applyTabs(); });
-        b.addEventListener('keydown', e => {
+    function arrowKeys(btns) {
+        btns.forEach(b => b.addEventListener('keydown', e => {
             if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
             e.preventDefault(); e.stopPropagation();
-            const i = (tabBtns.indexOf(b) + (e.key === 'ArrowRight' ? 1 : tabBtns.length - 1)) % tabBtns.length;
-            tabBtns[i].focus(); tabBtns[i].click();
-        });
-    });
+            const i = (btns.indexOf(b) + (e.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length;
+            btns[i].focus(); btns[i].click();
+        }));
+    }
+    tabBtns.forEach(b => b.addEventListener('click', () => {
+        tab = b.dataset.tab; panelOpen = true; store.set('tab', tab); store.set('panel', true); applyTabs();
+    }));
+    mBtns.forEach(b => b.addEventListener('click', () => {
+        mtab = b.dataset.mtab; store.set('mtab', mtab); applyTabs();
+    }));
+    arrowKeys(tabBtns);
+    arrowKeys(mBtns);
+    (narrowMq.addEventListener ? narrowMq.addEventListener.bind(narrowMq, 'change') : narrowMq.addListener.bind(narrowMq))(applyTabs);
     $('fv-hide').addEventListener('click', () => { panelOpen = !panelOpen; store.set('panel', panelOpen); applyTabs(); });
 
     const camBtns = Array.from(document.querySelectorAll('[data-cam]'));
@@ -501,7 +532,7 @@ window.initFlightStrip = function (H, opts) {
     let cursorAxis = 0, lastSample = null;
     function renderReadouts() {
         const s = lastSample;
-        if (!s || !panelOpen || tab !== 'instruments') return;
+        if (!s || !effOpen || effTab !== 'instruments') return;
         const at = k => H.hasData(k) ? valueAt(S[k], cursorAxis) : null;
         const rows = [];
         if (num(s.groundSpeed)) rows.push(['Ground speed', Math.round(s.groundSpeed) + ' kt']);
@@ -628,8 +659,8 @@ window.initFlightStrip = function (H, opts) {
                 playBtn.dataset.state = ev.playing ? 'playing' : ev.atEnd ? 'end' : 'paused';
                 playBtn.setAttribute('aria-label', ev.playing ? 'Pause replay' : 'Play replay');
                 setClock(ev.sample.epoch);
-                if (!panelOpen) return;
-                if (tab === 'instruments') renderReadouts();
+                if (!effOpen) return;
+                if (effTab === 'instruments') renderReadouts();
                 else renderLaneValues();
             });
         }

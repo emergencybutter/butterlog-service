@@ -172,20 +172,60 @@
     .fv-details-body { padding: 20px; }
 
     /* ── Narrow: the page scrolls, the panel stacks ───────────────────── */
+    .fv-mtabs { display: none; }
+
     @media (max-width: 899px) {
         .fv { height: auto; min-height: 0; }
-        .fv-map { flex: none; height: 52vh; min-height: 280px; }
+        .fv-map { flex: none; height: 40vh; min-height: 220px; }
         .fv-head { top: 52px; height: auto; min-height: 60px; }
-        .fv-strip { padding: 8px 12px 16px; }
-        .fv-grid { grid-template-columns: 64px minmax(0, 1fr); column-gap: 8px; }
+        /* Route and info line take the first row; the chips and buttons wrap under. */
+        .fv-id { flex: 1 1 220px; }
+        .fv-route { white-space: nowrap; }
+        .fv-strip { padding: 8px 12px 16px; --mh: 280px; }
         .fv-key { display: none; }
-        .fv-panel { height: auto; }
-        #panel-instruments { flex-wrap: wrap; }
-        .fv-pfd { width: 100%; height: auto; }
-        .fv-3d { flex: 1 1 100%; height: 220px; }
-        .fv-readouts { width: 100%; }
-        .fv-lanes { max-height: none; }
         .fv-picker-body { grid-template-columns: 1fr; }
-        .fv-tabsrow { flex-wrap: wrap; }
+
+        /* One panel, four tabs (Altitude, Horizon, 3D view, Graphs). The
+           desktop tab row keeps only the control for the open tab. */
+        .fv-strip > .fv-transport { order: 1; }
+        .fv-mtabs { order: 2; display: flex; gap: 16px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+        .fv-mtabs .fv-tab { flex: none; }
+        .fv-strip > .fv-grid { order: 3; }
+        .fv-tabsrow { order: 4; border-bottom: 0; justify-content: flex-end; }
+        .fv-strip > .fv-panel { order: 5; height: var(--mh); }
+        /* The 3D and graph tabs spend a row on their control; take it out of
+           the panel so every tab fills the same area. */
+        .fv-strip[data-mtab="3d"] > .fv-panel,
+        .fv-strip[data-mtab="graphs"] > .fv-panel { height: calc(var(--mh) - 42px); }
+        .fv-tabsrow { min-height: 34px; }
+        .fv-tabs, #fv-hide { display: none !important; }
+        .fv-strip[data-mtab="altitude"] .fv-tabsrow,
+        .fv-strip[data-mtab="horizon"] .fv-tabsrow { display: none; }
+
+        /* Altitude: the profile is the panel. Elsewhere it stays as a thin
+           scrub bar, so the replay can still be moved from any tab. */
+        .fv-strip > .fv-grid { grid-template-columns: 56px minmax(0, 1fr); column-gap: 8px; }
+        /* Panel plus the scrub bar and gap the other tabs show above theirs. */
+        .fv-strip[data-mtab="altitude"] .fv-profile,
+        .fv-strip[data-mtab="altitude"] .fv-axis { height: calc(var(--mh) + 36px); }
+        .fv-strip:not([data-mtab="altitude"]) > .fv-grid { grid-template-columns: minmax(0, 1fr); }
+        .fv-strip:not([data-mtab="altitude"]) .fv-axis,
+        .fv-strip:not([data-mtab="altitude"]) .fv-events { display: none; }
+        .fv-strip:not([data-mtab="altitude"]) .fv-profile { height: 28px; }
+        .fv-lanes .fv-grid { grid-template-columns: 96px minmax(0, 1fr); column-gap: 8px; }
+
+        /* Horizon: the flight display with the numbers under it. */
+        .fv-strip[data-mtab="horizon"] #panel-instruments { flex-direction: column; align-items: center; gap: 6px; }
+        .fv-strip[data-mtab="horizon"] .fv-pfd { width: auto; height: calc(var(--mh) - 86px); max-width: 100%; }
+        .fv-strip[data-mtab="horizon"] .fv-3d { display: none; }
+        .fv-strip[data-mtab="horizon"] .fv-readouts { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 14px; }
+        .fv-strip[data-mtab="horizon"] .fv-readouts div { padding: 4px 0; }
+        .fv-strip[data-mtab="horizon"] .fv-readouts dt,
+        .fv-strip[data-mtab="horizon"] .fv-readouts dd { font-size: 0.8rem; }
+
+        /* 3D view: the whole panel. */
+        .fv-strip[data-mtab="3d"] .fv-pfd,
+        .fv-strip[data-mtab="3d"] .fv-readouts { display: none; }
+        .fv-strip[data-mtab="3d"] .fv-3d { flex: 1 1 auto; height: 100%; }
     }
 </style>

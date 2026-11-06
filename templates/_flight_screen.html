@@ -47,6 +47,14 @@
                 <span class="fv-key" id="fv-key-terrain" hidden><span class="fv-key-fill" aria-hidden="true"></span>Terrain below</span>
             </div>
 
+            <!-- Narrow screens only: one panel, four tabs. -->
+            <div class="fv-mtabs" role="tablist" aria-label="Flight panel">
+                <button type="button" class="fv-tab" role="tab" data-mtab="altitude">Altitude</button>
+                <button type="button" class="fv-tab" role="tab" data-mtab="horizon">Horizon</button>
+                <button type="button" class="fv-tab" role="tab" data-mtab="3d">3D view</button>
+                <button type="button" class="fv-tab" role="tab" data-mtab="graphs">Graphs <span class="fv-count"></span></button>
+            </div>
+
             <div class="fv-grid">
                 <div class="fv-axis" id="fv-axis" aria-hidden="true"></div>
                 <div class="fv-plot fv-profile" id="fv-profile" role="slider" tabindex="0" aria-label="Flight timeline: altitude over the terrain below" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
