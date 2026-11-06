@@ -1,0 +1,568 @@
+<!-- The flight view's bottom strip and the controls around the map.
+
+     Everything here is a view onto the page's one replay cursor
+     (window.FlightReplay): the altitude profile and the graph lanes scrub it,
+     the instruments and readouts follow it. Include after renderFlightDoc has
+     run and enableReplay has attached the track. -->
+<script>
+(function () {
+    const H = window.flightHandle;
+    if (!H) return;
+    const S = H.state;
+    const $ = id => document.getElementById(id);
+    const store = {
+        get(k, dflt) { try { const v = localStorage.getItem('butterlog-fv-' + k); return v === null ? dflt : JSON.parse(v); } catch (e) { return dflt; } },
+        set(k, v) { try { localStorage.setItem('butterlog-fv-' + k, JSON.stringify(v)); } catch (e) {} },
+    };
+    const num = v => typeof v === 'number' && isFinite(v);
+    const group = n => Math.round(n).toLocaleString('en-US');
+    const signed = (n, digits) => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(digits || 0);
+    const parseTs = s => {
+        if (typeof s === 'number') return s;
+        if (!s) return null;
+        const t = new Date(String(s).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? '' : 'Z')).getTime() / 1000;
+        return isNaN(t) ? null : t;
+    };
+    const hhmm = e => new Date(e * 1000).toISOString().slice(11, 16);
+    const sum = S.summary || {};
+    const sim = SHARE_DATA.simulator || '';
+
+    // ── Header: one line of who, what and when, and the landing ─────────
+    const events = sum.events || [];
+    const evOf = t => events.filter(e => (e.eventType || e.event_type) === t);
+    const landing = evOf('landing').pop();
+    const takeoff = evOf('takeoff')[0];
+    const lvs = landing && (landing.touchdownFpm ?? landing.touchdown_fpm);
+    const lg = landing && (landing.landingG ?? landing.landing_g);
+    let grade = null;
+    if (num(lvs)) {
+        const a = Math.abs(lvs);
+        grade = a < 150 ? ['butter', 'Butter'] : a < 250 ? ['smooth', 'Smooth'] : a < 350 ? ['firm', 'Firm'] : ['hard', 'Hard'];
+        const chip = $('fv-grade');
+        chip.className = 'fv-grade g-' + grade[0];
+        chip.textContent = `${grade[1]} landing · ${Math.round(a)} fpm` + (num(lg) && lg > 0.3 ? ` · ${lg.toFixed(2)} G` : '');
+        chip.hidden = false;
+    }
+    (function meta() {
+        const start = parseTs(sum.startTime || sum.start_time);
+        const dur = sum.durationMinutes || sum.duration_minutes || 0;
+        const date = start ? new Date(start * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '';
+        const parts = [sum.aircraftTitle || sum.airframe_name, (sum.resolvedAirline || sum.resolved_airline || '').trim(), sim,
+                       date, dur ? fmtDur(dur) : ''].filter(Boolean);
+        $('fv-meta').textContent = parts.join(' · ');
+    })();
+
+    // ── Details dialog ───────────────────────────────────────────────────
+    const dlg = $('fv-details');
+    $('fv-details-open').addEventListener('click', () => {
+        if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+        H.onPaneShown('details');
+    });
+    $('fv-details-close').addEventListener('click', () => dlg.close());
+    dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+
+    // ── Map: 2D / 3D terrain, fit ────────────────────────────────────────
+    let mapMode = '2d', built3d = false;
+    const mapBtns = Array.from(document.querySelectorAll('[data-map]'));
+    function setMap(mode) {
+        mapMode = mode;
+        mapBtns.forEach(b => { const on = b.dataset.map === mode; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on); });
+        const sec = $('map3d-section');
+        sec.hidden = mode !== '3d';
+        $('fv-map').classList.toggle('is-3d', mode === '3d');
+        if (mode === '3d' && !built3d) { built3d = true; renderFlight3D(SHARE_DATA); }
+        if (mode === '3d' && window.flightDeck) window.flightDeck.redraw(true);
+        if (mode === '2d' && S.map) S.map.invalidateSize();
+    }
+    mapBtns.forEach(b => b.addEventListener('click', () => setMap(b.dataset.map)));
+    $('fv-fit').addEventListener('click', () => {
+        if (mapMode === '3d') { const r = $('m3d-reset'); if (r) r.click(); } else H.fitMap();
+    });
+
+    // ── Channels this flight carries ─────────────────────────────────────
+    const f0 = v => Math.round(v).toString();
+    const CH = [
+        ['Flight', [
+            ['alts', 'Altitude', v => group(v) + ' ft'],
+            ['ias', 'Indicated airspeed', v => f0(v) + ' kt'],
+            ['true_airspeed', 'True airspeed', v => f0(v) + ' kt'],
+            ['ground_speed', 'Ground speed', v => f0(v) + ' kt'],
+            ['vs', 'Vertical speed', v => signed(Math.round(v / 10) * 10).replace(/\d+/, m => group(+m)) + ' fpm'],
+            ['baro', 'Altimeter setting', v => v.toFixed(2) + ' inHg'],
+        ]],
+        ['Attitude', [
+            ['pitch', 'Pitch', v => signed(v, 1) + '°'],
+            ['roll', 'Roll', v => signed(v, 1) + '°'],
+            ['heading', 'Heading', v => String(Math.round(((v % 360) + 360) % 360)).padStart(3, '0') + '°'],
+            ['track', 'Ground track', v => String(Math.round(((v % 360) + 360) % 360)).padStart(3, '0') + '°'],
+            ['g_load', 'Load factor', v => v.toFixed(2) + ' G'],
+        ]],
+        ['Engine', [
+            ['pct_power', 'Power', v => f0(v) + ' %'],
+            ['rpm', 'RPM', v => group(v)],
+            ['manifold', 'Manifold pressure', v => v.toFixed(1) + ' inHg'],
+            ['fuel_flow', 'Fuel flow', v => v.toFixed(1) + ' gph'],
+            ['oil_temp', 'Oil temperature', v => f0(v) + ' °F'],
+            ['oil_press', 'Oil pressure', v => f0(v) + ' psi'],
+        ]],
+        ['Fuel', [
+            ['fuel_left', 'Left tank', v => v.toFixed(1) + ' gal'],
+            ['fuel_right', 'Right tank', v => v.toFixed(1) + ' gal'],
+        ]],
+        ['Environment', [
+            ['oat', 'Outside air temperature', v => signed(v) + ' °C'],
+            ['wind_speed', 'Wind speed', v => f0(v) + ' kt'],
+            ['wind_dir', 'Wind direction', v => String(Math.round(((v % 360) + 360) % 360)).padStart(3, '0') + '°'],
+            ['magvar', 'Magnetic variation', v => signed(v, 1) + '°'],
+        ]],
+    ].map(([name, items]) => [name, items.filter(([k]) => H.hasData(k))]).filter(([, items]) => items.length);
+    const CHAN = {};
+    CH.forEach(([, items]) => items.forEach(([k, label, fmt]) => { CHAN[k] = { key: k, label, fmt }; }));
+
+    // ── The timeline ─────────────────────────────────────────────────────
+    const ready = typeof FlightReplay !== 'undefined' && FlightReplay.ready();
+    if (!ready) {
+        // Too short to replay (or no track at all): the map is the page.
+        document.querySelector('.fv-strip').hidden = true;
+        return;
+    }
+    const ts = S.timestamps, axis = S.axis, N = ts.length, span = axis[N - 1];
+    const toPct = x => (Math.max(0, Math.min(span, x)) / span * 100);
+    let cursorAxis = 0;
+
+    function valueAt(arr, x) {
+        let lo = 0, hi = N - 1;
+        while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (axis[mid] <= x) lo = mid; else hi = mid - 1; }
+        const j = Math.min(lo + 1, N - 1), a = arr[lo], b = arr[j];
+        if (!num(a)) return num(b) ? b : null;
+        if (!num(b) || axis[j] === axis[lo]) return a;
+        return a + (b - a) * (x - axis[lo]) / (axis[j] - axis[lo]);
+    }
+
+    function sizeCanvas(cv) {
+        const box = cv.parentElement, dpr = window.devicePixelRatio || 1;
+        const w = box.clientWidth, h = box.clientHeight;
+        if (!w || !h) return null;
+        cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+        const ctx = cv.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        return { ctx, w, h };
+    }
+    const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+    function shadeGaps(ctx, w, h) {
+        // Only the long ones: cruise is thinned to a sample every few
+        // minutes, and shading each of those gaps striped the whole strip.
+        ctx.fillStyle = 'rgba(128,128,128,0.07)';
+        (S.gaps || []).filter(g => g.skipped >= 600).forEach(g => {
+            const x1 = g.from / span * w, x2 = g.to / span * w;
+            if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, h);
+        });
+    }
+
+    // Terrain under the track, from the same elevation tiles the 3D views
+    // draw. Sea and lakes come back below zero (the tiles carry bathymetry),
+    // which is the surface the aeroplane would meet, so clamp to zero.
+    const terrain = { x: [], ft: [], ready: false };
+    function terrainAt(x) {
+        if (!terrain.ready || !terrain.x.length) return null;
+        const xs = terrain.x;
+        let lo = 0, hi = xs.length - 1;
+        if (x <= xs[0]) return terrain.ft[0];
+        if (x >= xs[hi]) return terrain.ft[hi];
+        while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (xs[mid] <= x) lo = mid; else hi = mid; }
+        const f = (x - xs[lo]) / ((xs[hi] - xs[lo]) || 1);
+        return terrain.ft[lo] + (terrain.ft[hi] - terrain.ft[lo]) * f;
+    }
+    function loadTerrain() {
+        const step = Math.max(1, Math.floor(N / 400));
+        const pts = [];
+        for (let i = 0; i < N; i += step) if (num(S.lats[i]) && num(S.lons[i])) pts.push(i);
+        if (pts[pts.length - 1] !== N - 1) pts.push(N - 1);
+        const tileOf = (i, z) => {
+            const n = 2 ** z, rad = S.lats[i] * Math.PI / 180;
+            const x = (S.lons[i] + 180) / 360 * n;
+            const y = (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n;
+            return { x, y, key: z + '/' + Math.floor(x) + '/' + Math.floor(y) };
+        };
+        // As fine as a few dozen tiles allow: a long flight drops to coarser
+        // posts, which a strip a few hundred pixels wide cannot tell apart.
+        let z = 11, keys;
+        for (; z > 5; z--) {
+            keys = new Set(pts.map(i => tileOf(i, z).key));
+            if (keys.size <= 40) break;
+        }
+        const tiles = {};
+        const load = key => new Promise(resolve => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onerror = () => resolve();
+            img.onload = () => {
+                try {
+                    const c = document.createElement('canvas');
+                    c.width = img.width; c.height = img.height;
+                    const ctx = c.getContext('2d', { willReadFrequently: true });
+                    ctx.drawImage(img, 0, 0);
+                    tiles[key] = { w: img.width, h: img.height, d: ctx.getImageData(0, 0, img.width, img.height).data };
+                } catch (e) {}
+                resolve();
+            };
+            img.src = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/' + key + '.png';
+        });
+        Promise.all(Array.from(keys).map(load)).then(() => {
+            pts.forEach(i => {
+                const t = tileOf(i, z), tile = tiles[t.key];
+                if (!tile) return;
+                const px = Math.min(tile.w - 1, Math.floor((t.x - Math.floor(t.x)) * tile.w));
+                const py = Math.min(tile.h - 1, Math.floor((t.y - Math.floor(t.y)) * tile.h));
+                const o = (py * tile.w + px) * 4, d = tile.d;
+                const m = d[o] * 256 + d[o + 1] + d[o + 2] / 256 - 32768;
+                terrain.x.push(axis[i]);
+                terrain.ft.push(Math.max(0, m / 0.3048));
+            });
+            terrain.ready = terrain.x.length > 1;
+            if (terrain.ready) { $('fv-key-terrain').hidden = false; drawProfile(); renderReadouts(); }
+        });
+    }
+
+    function niceTop(v) {
+        const steps = [1000, 2000, 2500, 5000, 10000];
+        for (const s of steps) if (v <= s * 2) return Math.ceil(v / (s / 2)) * (s / 2) || 1000;
+        return Math.ceil(v / 10000) * 10000;
+    }
+
+    function drawProfile() {
+        const g = sizeCanvas($('fv-profile-canvas'));
+        if (!g) return;
+        const { ctx, w, h } = g;
+        let maxFt = 0;
+        for (let i = 0; i < N; i++) if (S.alts[i] > maxFt) maxFt = S.alts[i];
+        terrain.ft.forEach(v => { if (v > maxFt) maxFt = v; });
+        const top = niceTop(maxFt * 1.08 || 1000);
+        $('fv-axis').innerHTML = `<span>${group(top)} ft</span><span>${group(top / 2)} ft</span><span>0</span>`;
+        const y = ft => h - 2 - (Math.max(0, ft) / top) * (h - 6);
+        shadeGaps(ctx, w, h);
+        ctx.strokeStyle = 'rgba(128,128,128,0.12)';
+        ctx.lineWidth = 1;
+        [top / 2, top].forEach(v => { ctx.beginPath(); ctx.moveTo(0, Math.round(y(v)) + 0.5); ctx.lineTo(w, Math.round(y(v)) + 0.5); ctx.stroke(); });
+        if (terrain.ready) {
+            ctx.beginPath();
+            ctx.moveTo(0, h);
+            terrain.x.forEach((x, i) => ctx.lineTo(x / span * w, y(terrain.ft[i])));
+            ctx.lineTo(w, h);
+            ctx.closePath();
+            ctx.fillStyle = '#4a5641';
+            ctx.fill();
+        }
+        ctx.beginPath();
+        const step = Math.max(1, Math.floor(N / (w * 2)));
+        for (let i = 0; i < N; i += step) {
+            const px = axis[i] / span * w, py = y(S.alts[i] || 0);
+            if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.lineTo(w, y(S.alts[N - 1] || 0));
+        ctx.strokeStyle = '#33b8a1';
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+    }
+
+    (function eventLabels() {
+        const out = [];
+        const put = (e, text, cls) => {
+            const t = parseTs(e && e.timestamp);
+            if (t === null) return;
+            out.push({ pct: toPct(H.epochToAxis(t)), text, cls });
+        };
+        if (takeoff) put(takeoff, 'Takeoff ' + hhmm(parseTs(takeoff.timestamp)), '');
+        // Recorded when the app sent them; otherwise where the aeroplane first
+        // and last sat near its highest altitude, which is what the app means.
+        let toc = evOf('top_of_climb')[0], tod = evOf('top_of_descent').slice(-1)[0];
+        if (!toc || !tod) {
+            let max = 0;
+            for (let i = 0; i < N; i++) if (S.alts[i] > max) max = S.alts[i];
+            if (max > 3000) {
+                let a = -1, b = -1;
+                for (let i = 0; i < N; i++) if (S.alts[i] >= max * 0.97) { if (a < 0) a = i; b = i; }
+                if (a > 0 && !toc) toc = { timestamp: ts[a] };
+                if (b > a && b < N - 1 && !tod) tod = { timestamp: ts[b] };
+            }
+        }
+        if (toc) put(toc, 'Top of climb', 'lo');
+        if (tod) put(tod, 'Top of descent', 'lo');
+        if (landing) put(landing, 'Landing ' + hhmm(parseTs(landing.timestamp)) + (grade ? ' · ' + grade[1] : ''), grade ? 'g-' + grade[0] : '');
+        // On a short flight the climb and descent marks land on top of each
+        // other: keep the first of any two in a row that are too close.
+        const box = $('fv-profile').clientWidth || 600, gap = 110 / box * 100;
+        const kept = [];
+        out.sort((a, b) => a.pct - b.pct).forEach(o => {
+            const row = o.cls === 'lo' ? 'lo' : 'hi';
+            if (kept.some(k => (k.cls === 'lo' ? 'lo' : 'hi') === row && Math.abs(k.pct - o.pct) < gap)) return;
+            kept.push(o);
+        });
+        $('fv-events').innerHTML = kept.map(o =>
+            `<span class="${o.cls}${o.pct > 80 ? ' is-end' : ''}" style="left:${o.pct.toFixed(2)}%">${esc(o.text)}</span>`).join('');
+    })();
+
+    // ── Lanes ────────────────────────────────────────────────────────────
+    const DEFAULT = ['ias', 'vs', 'g_load'];
+    let picked = (store.get('channels', null) || DEFAULT).filter(k => CHAN[k]);
+    if (!picked.length && !store.get('channels', null)) picked = DEFAULT.filter(k => CHAN[k]);
+    const lanes = $('fv-lanes');
+
+    function buildLanes() {
+        lanes.innerHTML = picked.map(k => `
+            <div class="fv-lane-lbl"><span class="n">${esc(CHAN[k].label)}</span><span class="v" data-v="${k}">—</span></div>
+            <div class="fv-plot fv-lane" data-lane="${k}">
+                <canvas></canvas><span class="rng hi"></span><span class="rng lo"></span>
+                <div class="fv-cursor"></div>
+                <button type="button" class="x" data-remove="${k}" aria-label="Remove ${esc(CHAN[k].label)}">&#10005;</button>
+            </div>`).join('');
+        $('fv-lanes-empty').hidden = picked.length > 0;
+        $('fv-count').textContent = picked.length ? String(picked.length) : '';
+        lanes.querySelectorAll('[data-remove]').forEach(b => b.addEventListener('click', e => {
+            e.stopPropagation();
+            setPicked(picked.filter(k => k !== b.dataset.remove));
+        }));
+        lanes.querySelectorAll('.fv-plot').forEach(wireScrub);
+        drawLanes();
+        placeCursors();
+        renderLaneValues();
+    }
+
+    function drawLanes() {
+        const line = css('--text-2') || '#b9c0ba';
+        lanes.querySelectorAll('[data-lane]').forEach(el => {
+            const k = el.dataset.lane, arr = S[k], ch = CHAN[k];
+            const g = sizeCanvas(el.querySelector('canvas'));
+            if (!g) return;
+            const { ctx, w, h } = g;
+            let lo = Infinity, hi = -Infinity;
+            for (let i = 0; i < N; i++) { const v = arr[i]; if (num(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+            if (!isFinite(lo)) return;
+            if (hi - lo < 1e-6) { hi += 1; lo -= 1; }
+            el.querySelector('.rng.hi').textContent = ch.fmt(hi);
+            el.querySelector('.rng.lo').textContent = ch.fmt(lo);
+            const y = v => h - 4 - (v - lo) / (hi - lo) * (h - 8);
+            shadeGaps(ctx, w, h);
+            ctx.beginPath();
+            const step = Math.max(1, Math.floor(N / (w * 2)));
+            let started = false;
+            for (let i = 0; i < N; i += step) {
+                const v = arr[i];
+                if (!num(v)) { started = false; continue; }
+                const px = axis[i] / span * w;
+                if (!started) { ctx.moveTo(px, y(v)); started = true; } else ctx.lineTo(px, y(v));
+            }
+            ctx.strokeStyle = line;
+            ctx.lineWidth = 1.5;
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+        });
+    }
+
+    function renderLaneValues() {
+        lanes.querySelectorAll('[data-v]').forEach(el => {
+            const v = valueAt(S[el.dataset.v], cursorAxis);
+            el.textContent = v === null ? '—' : CHAN[el.dataset.v].fmt(v);
+        });
+    }
+
+    function setPicked(next) {
+        picked = next;
+        store.set('channels', picked);
+        buildLanes();
+        renderPicker();
+    }
+
+    // ── Channel picker ───────────────────────────────────────────────────
+    const picker = $('fv-picker'), chanBtn = $('fv-channels');
+    $('fv-picker-title').textContent = (sim ? sim + ' channels' : 'Channels');
+    function renderPicker() {
+        $('fv-picker-body').innerHTML = CH.map(([name, items]) => `
+            <div><div class="fv-group-name">${esc(name)}</div>
+            ${items.map(([k, label]) => `<button type="button" class="fv-chan" data-chan="${k}" aria-pressed="${picked.includes(k)}"><span class="box" aria-hidden="true"></span>${esc(label)}</button>`).join('')}
+            </div>`).join('') || '<div class="fv-muted" style="padding:8px">This flight recorded no channels.</div>';
+        picker.querySelectorAll('[data-chan]').forEach(b => b.addEventListener('click', () => {
+            const k = b.dataset.chan;
+            setPicked(picked.includes(k) ? picked.filter(x => x !== k) : picked.concat([k]));
+        }));
+    }
+    function openPicker(open) {
+        picker.hidden = !open;
+        chanBtn.setAttribute('aria-expanded', open);
+        chanBtn.classList.toggle('is-on', open);
+        if (open) { const f = picker.querySelector('.fv-chan'); if (f) f.focus(); }
+    }
+    chanBtn.addEventListener('click', () => openPicker(picker.hidden));
+    $('fv-lanes-pick').addEventListener('click', () => openPicker(true));
+    $('fv-picker-close').addEventListener('click', () => { openPicker(false); chanBtn.focus(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !picker.hidden) { openPicker(false); chanBtn.focus(); } });
+    document.addEventListener('pointerdown', e => {
+        if (!picker.hidden && !picker.contains(e.target) && !chanBtn.contains(e.target) && !$('fv-lanes-pick').contains(e.target)) openPicker(false);
+    });
+
+    // ── Tabs, camera, hide ───────────────────────────────────────────────
+    let tab = store.get('tab', 'instruments') === 'graphs' ? 'graphs' : 'instruments';
+    let panelOpen = store.get('panel', true) !== false;
+    const tabBtns = Array.from(document.querySelectorAll('.fv-tab'));
+    function applyTabs() {
+        tabBtns.forEach(b => {
+            const on = b.dataset.tab === tab;
+            b.setAttribute('aria-selected', on);
+            b.tabIndex = on ? 0 : -1;
+        });
+        $('panel-instruments').hidden = !panelOpen || tab !== 'instruments';
+        $('panel-graphs').hidden = !panelOpen || tab !== 'graphs';
+        $('fv-cam').hidden = !panelOpen || tab !== 'instruments';
+        chanBtn.hidden = !panelOpen || tab !== 'graphs';
+        if (chanBtn.hidden) openPicker(false);
+        const hide = $('fv-hide');
+        hide.textContent = panelOpen ? 'Hide panel' : 'Show panel';
+        hide.setAttribute('aria-expanded', panelOpen);
+        if (panelOpen && tab === 'instruments') H.onPaneShown('replay');
+        if (panelOpen && tab === 'graphs') { drawLanes(); placeCursors(); }
+    }
+    tabBtns.forEach(b => {
+        b.addEventListener('click', () => { tab = b.dataset.tab; panelOpen = true; store.set('tab', tab); store.set('panel', true); applyTabs(); });
+        b.addEventListener('keydown', e => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            e.preventDefault(); e.stopPropagation();
+            const i = (tabBtns.indexOf(b) + (e.key === 'ArrowRight' ? 1 : tabBtns.length - 1)) % tabBtns.length;
+            tabBtns[i].focus(); tabBtns[i].click();
+        });
+    });
+    $('fv-hide').addEventListener('click', () => { panelOpen = !panelOpen; store.set('panel', panelOpen); applyTabs(); });
+
+    const camBtns = Array.from(document.querySelectorAll('[data-cam]'));
+    function setCam(mode) {
+        camBtns.forEach(b => { const on = b.dataset.cam === mode; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on); });
+        $('fv-cam-label').textContent = mode === 'chase' ? '3D · Chase' : '3D · Cockpit';
+        H.setCockpitMode(mode);
+        store.set('cam', mode);
+    }
+    camBtns.forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
+    $('fv-3d-full').addEventListener('click', () => {
+        const el = document.querySelector('.fv-3d');
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (el.requestFullscreen) el.requestFullscreen();
+    });
+
+    // ── Readouts ─────────────────────────────────────────────────────────
+    let lastSample = null;
+    function renderReadouts() {
+        const s = lastSample;
+        if (!s) return;
+        const at = k => H.hasData(k) ? valueAt(S[k], cursorAxis) : null;
+        const rows = [];
+        if (num(s.groundSpeed)) rows.push(['Ground speed', Math.round(s.groundSpeed) + ' kt']);
+        else if (num(s.ias)) rows.push(['Airspeed', Math.round(s.ias) + ' kt']);
+        if (num(s.vspeed)) rows.push(['Vertical speed', CHAN.vs ? CHAN.vs.fmt(s.vspeed) : Math.round(s.vspeed) + ' fpm']);
+        const t = terrainAt(cursorAxis);
+        if (t !== null && num(s.altitude)) rows.push(['Above terrain', group(Math.max(0, s.altitude - t)) + ' ft']);
+        else if (num(s.altitude)) rows.push(['Altitude', group(s.altitude) + ' ft']);
+        const ws = at('wind_speed'), wd = at('wind_dir');
+        if (ws !== null && wd !== null) rows.push(['Wind', CHAN.wind_dir.fmt(wd) + ' / ' + Math.round(ws) + ' kt']);
+        const pw = at('pct_power');
+        if (pw !== null) rows.push(['Power', Math.round(pw) + ' %']);
+        const oat = at('oat');
+        if (oat !== null) rows.push(['Outside air', CHAN.oat.fmt(oat)]);
+        const ff = at('fuel_flow');
+        if (ff !== null) rows.push(['Fuel flow', CHAN.fuel_flow.fmt(ff)]);
+        $('fv-readouts').innerHTML = rows.slice(0, 5).map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('');
+    }
+
+    // ── Transport ────────────────────────────────────────────────────────
+    const SPEEDS = [1, 10, 30, 100, 300];
+    const auto = FlightReplay.autoRate();
+    let speed = SPEEDS.reduce((a, b) => Math.abs(Math.log(b / auto)) < Math.abs(Math.log(a / auto)) ? b : a);
+    function renderSpeeds() {
+        $('fv-speeds').innerHTML = SPEEDS.map(v =>
+            `<button type="button" data-speed="${v}" class="${v === speed ? 'is-on' : ''}" aria-pressed="${v === speed}">${v}×</button>`).join('');
+        $('fv-speeds').querySelectorAll('[data-speed]').forEach(b => b.addEventListener('click', () => {
+            speed = +b.dataset.speed; FlightReplay.setRate(speed); renderSpeeds();
+        }));
+    }
+    renderSpeeds();
+    FlightReplay.setRate(speed);
+    const playBtn = $('fv-play');
+    playBtn.addEventListener('click', () => FlightReplay.toggle());
+
+    const toEpoch = parseTs(takeoff && takeoff.timestamp);
+    function elapsedText(epoch) {
+        const ref = toEpoch !== null ? toEpoch : ts[0];
+        const d = Math.round((epoch - ref) / 60), a = Math.abs(d);
+        const t = a >= 60 ? Math.floor(a / 60) + 'h ' + (a % 60) + 'm' : a + 'm';
+        if (toEpoch === null) return t + ' into the log';
+        return d >= 0 ? t + ' after takeoff' : t + ' before takeoff';
+    }
+
+    function placeCursors() {
+        const left = toPct(cursorAxis).toFixed(3) + '%';
+        document.querySelectorAll('.fv-plot .fv-cursor').forEach(c => { c.style.left = left; });
+    }
+
+    let lastClockSec = -1;
+    FlightReplay.subscribe(ev => {
+        cursorAxis = ev.axis;
+        lastSample = ev.sample;
+        placeCursors();
+        $('fv-profile').setAttribute('aria-valuenow', Math.round(ev.progress * 100));
+        playBtn.dataset.state = ev.playing ? 'playing' : ev.atEnd ? 'end' : 'paused';
+        playBtn.setAttribute('aria-label', ev.playing ? 'Pause replay' : 'Play replay');
+        const sec = Math.floor(ev.sample.epoch);
+        // Text changes at most once a second of flight; layout is the cost.
+        if (sec !== lastClockSec) {
+            lastClockSec = sec;
+            $('fv-clock').textContent = new Date(sec * 1000).toISOString().slice(11, 19) + ' UTC';
+            $('fv-elapsed').textContent = elapsedText(ev.sample.epoch);
+            $('fv-profile').setAttribute('aria-valuetext', $('fv-clock').textContent);
+        }
+        if (!panelOpen) return;
+        if (tab === 'instruments') renderReadouts();
+        else renderLaneValues();
+    });
+
+    // Scrubbing: press anywhere on the profile or a lane and drag.
+    function wireScrub(el) {
+        let down = false;
+        const seekTo = e => {
+            const r = el.getBoundingClientRect();
+            FlightReplay.seek(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)));
+        };
+        el.addEventListener('pointerdown', e => {
+            if (e.target.closest('button')) return;
+            down = true; el.setPointerCapture(e.pointerId); seekTo(e);
+        });
+        el.addEventListener('pointermove', e => { if (down) seekTo(e); });
+        el.addEventListener('pointerup', () => { down = false; });
+        el.addEventListener('pointercancel', () => { down = false; });
+    }
+    wireScrub($('fv-profile'));
+
+    // ── Sizes ────────────────────────────────────────────────────────────
+    let redrawT = null;
+    const ro = new ResizeObserver(() => {
+        if (S.map) S.map.invalidateSize();
+        clearTimeout(redrawT);
+        redrawT = setTimeout(() => { drawProfile(); drawLanes(); }, 80);
+    });
+    ro.observe($('fv-map'));
+    ro.observe($('fv-profile'));
+
+    renderPicker();
+    buildLanes();
+    drawProfile();
+    loadTerrain();
+    applyTabs();
+    setCam(store.get('cam', 'cockpit') === 'chase' ? 'chase' : 'cockpit');
+
+    // A link straight to the replay (`#replay`) is someone saying "watch
+    // this", so start it - once the page's own tiles have arrived, so the
+    // first seconds of the flight aren't spent loading the map.
+    if (location.hash === '#replay') {
+        window.addEventListener('load', () => FlightReplay.play());
+    }
+})();
+</script>

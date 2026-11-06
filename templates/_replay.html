@@ -151,6 +151,7 @@ window.FlightReplay = (function () {
             progress: span > 0 ? cursor / span : 0,
             atEnd: span > 0 && cursor >= span,
             playing: playing,
+            rate: rate,
             sample: sample,
         };
         if (scrub) scrub.value = Math.round(ev.progress * 1000);
@@ -284,6 +285,13 @@ window.FlightReplay = (function () {
             }
         },
         ready() { return S !== null; },
+        /// Playback seconds per real second. `autoRate` is what attach picked:
+        /// about a minute of watching for the whole flight.
+        setRate(r) { if (r > 0) { rate = r; lastMs = 0; emit(); } },
+        rate() { return rate; },
+        autoRate() { return clamp(span / 60, 20, 400); },
+        /// Real seconds from the first sample to the last.
+        realSpan() { return realSpan; },
         play: play,
         pause: pause,
         toggle() { playing ? pause() : play(); },

@@ -214,14 +214,50 @@ pub fn adapt_summary(
         max_altitude: num_at(statistics, &["max_entries", "AltMSL"]),
         max_ground_speed: num_at(statistics, &["max_entries", "GndSpd"]),
         fuel_consumed: num_at(statistics, &["fuel_consumed"]),
-        events: statistics
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
+        events: events_of(statistics),
         screenshot_count,
         notes: notes.unwrap_or("").to_string(),
     }
+}
+
+/// The flight's events: what the app recorded, or, for a flight whose app sent
+/// none, the takeoff and landing its statistics carry anyway.
+///
+/// Current apps send `takeoff_time`, `landing_time` and a snapshot at each,
+/// but no `events` list, so without this the landing card, the map markers
+/// and the timeline labels had nothing to show for them.
+fn events_of(statistics: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(events) = statistics.get("events").and_then(|v| v.as_array()) {
+        if !events.is_empty() {
+            return events.clone();
+        }
+    }
+    let mut out = Vec::new();
+    let at = |snap: &str, key: &str| statistics.get(snap).and_then(|s| s.get(key)).and_then(|v| v.as_f64());
+    let takeoff = str_at(statistics, &["takeoff_time"]);
+    if !takeoff.is_empty() {
+        out.push(serde_json::json!({
+            "eventType": "takeoff",
+            "timestamp": takeoff,
+            "latitude": at("takeoff_snapshot", "Latitude"),
+            "longitude": at("takeoff_snapshot", "Longitude"),
+        }));
+    }
+    let landing = str_at(statistics, &["landing_time"]);
+    if !landing.is_empty() {
+        out.push(serde_json::json!({
+            "eventType": "landing",
+            "timestamp": landing,
+            "latitude": at("landing_snapshot", "Latitude"),
+            "longitude": at("landing_snapshot", "Longitude"),
+            "heading": at("landing_snapshot", "HDG"),
+            "touchdownFpm": at("landing_snapshot", "VSpd"),
+            "landingG": at("landing_snapshot", "NormAc"),
+            "offsetPercent": statistics.get("landing_offset_percent").and_then(|v| v.as_f64()),
+            "thresholdDistFt": statistics.get("landing_threshold_dist_ft").and_then(|v| v.as_f64()),
+        }));
+    }
+    out
 }
 
 fn extract_current(statistics: &serde_json::Value) -> Option<CurrentPosition> {
@@ -604,6 +640,32 @@ mod tests {
         assert_eq!(s.start_icao, "");
         assert_eq!(s.max_altitude, 0.0);
         assert!(s.events.is_empty());
+    }
+
+    #[test]
+    fn a_flight_without_events_gets_its_takeoff_and_landing_from_statistics() {
+        let stats = json!({
+            "takeoff_time": "2026-11-03 18:03:30.763",
+            "takeoff_snapshot": { "Latitude": 49.2, "Longitude": -2.2 },
+            "landing_time": "2026-11-03 21:29:31.749",
+            "landing_snapshot": { "Latitude": 55.9, "Longitude": -3.3, "VSpd": -474.4, "NormAc": 2.13 },
+            "landing_offset_percent": 12.5,
+        });
+        let ev = adapt_summary(&stats, None, 0, true).events;
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0]["eventType"], "takeoff");
+        assert_eq!(ev[0]["latitude"], 49.2);
+        assert_eq!(ev[1]["eventType"], "landing");
+        assert_eq!(ev[1]["timestamp"], "2026-11-03 21:29:31.749");
+        assert_eq!(ev[1]["touchdownFpm"], -474.4);
+        assert_eq!(ev[1]["landingG"], 2.13);
+        assert_eq!(ev[1]["offsetPercent"], 12.5);
+
+        // Recorded events win: they carry the climb and descent too.
+        let recorded = json!({ "events": [{ "eventType": "top_of_climb" }], "takeoff_time": "2026-11-03 18:03:30" });
+        let ev = adapt_summary(&recorded, None, 0, true).events;
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0]["eventType"], "top_of_climb");
     }
 
     #[test]

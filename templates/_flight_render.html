@@ -133,7 +133,7 @@ function renderFlightDoc(d) {
         let badgeHtml = '';
         if (lvs != null) {
             const a = Math.abs(lvs);
-            const [cls, lbl] = a < 150 ? ['butter','BUTTER'] : a < 250 ? ['smooth','SMOOTH'] : a < 350 ? ['firm','FIRM'] : ['hard','HARD'];
+            const [cls, lbl] = a < 150 ? ['butter','Butter'] : a < 250 ? ['smooth','Smooth'] : a < 350 ? ['firm','Firm'] : ['hard','Hard'];
             badgeHtml = `<div class="badge badge-${cls}">${lbl} — ${Math.round(a)} fpm</div>`;
         }
         const notesText = (sum.notes || '').trim();
@@ -347,6 +347,7 @@ function renderFlightDoc(d) {
             layers: statics,
         });
         state.cockpit = { deckgl, statics };
+        if (state.cockpitMode === 'chase') setCockpitMode('chase');
         measureGroundFix();
         wireCockpitToReplay();
         // No replay to follow yet means the flight is still flying: sit at the
@@ -562,7 +563,66 @@ function renderFlightDoc(d) {
 
     function applyCockpitCam(cam) {
         if (!state.cockpit) return;
-        state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(cam) });
+        if (state.cockpitMode === 'chase') {
+            state.cockpit.deckgl.setProps({ initialViewState: chaseViewState(cam), layers: chaseLayers(cam) });
+        } else {
+            state.cockpit.deckgl.setProps({ initialViewState: cockpitViewState(cam) });
+        }
+    }
+
+    /// Behind and above the aeroplane, looking along its heading at it.
+    ///
+    /// A map camera rather than a first-person one: deck's MapView orbits a
+    /// target, and `position` lifts that target off the ground to the
+    /// aircraft, so the orbit is round the aeroplane rather than the ground
+    /// under it. True vertical scale, same terrain as the cockpit.
+    function chaseViewState(cam) {
+        return {
+            longitude: cam.longitude,
+            latitude: cam.latitude,
+            position: [0, 0, Math.max(0, cam.z - 3)],
+            zoom: 15.2,
+            pitch: 72,
+            bearing: cam.bearing,
+            maxPitch: 85,
+        };
+    }
+
+    /// The track and the aeroplane, for the chase view only - in the cockpit
+    /// the track runs through the eye and fills the frame (see buildCockpit).
+    function chaseLayers(cam) {
+        const c = state.cockpit;
+        if (!c.chaseTrack) {
+            const M = 0.3048, n = state.lats.length, step = Math.max(1, Math.floor(n / 1500));
+            const gf = state.groundFix || { dep: 0, arr: 0 };
+            const pts = [];
+            for (let i = 0; i < n; i += step) {
+                const f = n > 1 ? i / (n - 1) : 0;
+                pts.push([state.lons[i], state.lats[i], (state.alts[i] || 0) * M + gf.dep + (gf.arr - gf.dep) * f]);
+            }
+            c.chaseTrack = new deck.PathLayer({ id: 'chase-track', data: [{ path: pts }], getPath: d => d.path,
+                getColor: [255, 176, 0, 200], widthUnits: 'pixels', getWidth: 2, widthMinPixels: 1 });
+        }
+        const pos = [cam.longitude, cam.latitude, Math.max(0, cam.z - 3)];
+        return [
+            ...c.statics,
+            c.chaseTrack,
+            new deck.ScatterplotLayer({ id: 'chase-glow', data: [pos], getPosition: p => p, getRadius: 16, radiusUnits: 'pixels', getFillColor: [255, 176, 0, 70], billboard: true }),
+            new deck.ScatterplotLayer({ id: 'chase-plane', data: [pos], getPosition: p => p, getRadius: 6, radiusUnits: 'pixels', getFillColor: [255, 255, 255], stroked: true, getLineColor: [255, 176, 0], lineWidthMinPixels: 2, billboard: true }),
+        ];
+    }
+
+    function setCockpitMode(mode) {
+        state.cockpitMode = mode === 'chase' ? 'chase' : 'cockpit';
+        const c = state.cockpit;
+        if (!c) return;
+        c.chaseTrack = null; // the ground offset may have been measured since
+        if (state.cockpitMode === 'chase') {
+            c.deckgl.setProps({ views: new deck.MapView({ id: 'chase', farZMultiplier: 50 }) });
+        } else {
+            c.deckgl.setProps({ views: new deck.FirstPersonView({ id: 'fp', fovy: 65, near: 1, far: 400000 }), layers: c.statics });
+        }
+        if (state.cockpitCam) applyCockpitCam(state.cockpitCam);
     }
 
     const shortArc = (a, b) => ((b - a) % 360 + 540) % 360 - 180;
@@ -735,6 +795,10 @@ function renderFlightDoc(d) {
             return;
         }
         if (section) section.style.display = '';
+        // Inside something still closed - the flight view keeps it in the
+        // details dialog - Leaflet would fit the runway into a 0x0 box. The
+        // caller tries again once it is open.
+        if (!host.getClientRects().length) return;
         const td = [lEvt.latitude, lEvt.longitude];
 
         // The approach: samples inside the last three minutes before touchdown,
@@ -802,7 +866,7 @@ function renderFlightDoc(d) {
     }
 
     function drawCharts() {
-        if (state.timestamps.length === 0) return;
+        if (state.timestamps.length === 0 || !document.getElementById('charts-mount')) return;
         const series = buildSeries();
         if (state.charts.length) {
             // Rebuilding the datasets and updating in place is cheap at these
@@ -1003,7 +1067,7 @@ function renderFlightDoc(d) {
         const ll = [pos.latitude, pos.longitude];
         if (!state.planeMarker) {
             state.planeMarker = L.circleMarker(ll, {radius:6,color:'#ffffff',fillColor:'#ffb000',fillOpacity:1,weight:2}).addTo(state.map);
-            state.planeMarker.bindTooltip('');
+            state.planeMarker.bindTooltip('', { permanent: true, direction: 'right', offset: [10, 0], className: 'plane-tip' });
         } else {
             state.planeMarker.setLatLng(ll);
         }
@@ -1124,6 +1188,19 @@ function renderFlightDoc(d) {
         /// Drop a marker at the aircraft's reported position, so a viewer sees
         /// where it is even before the next track sample lands.
         setCurrent: setCurrentPos,
+        /// The shared timeline, for views drawn outside the renderer: the
+        /// flight view's altitude profile and graph lanes ride the same axis
+        /// as the replay cursor.
+        epochToAxis: epochToAxis,
+        axisToEpoch: axisToEpoch,
+        hasData: hasData,
+        /// Cockpit or chase, for the 3D view.
+        setCockpitMode: setCockpitMode,
+        /// Frame the whole track on the 2D map again.
+        fitMap() {
+            state.userMoved = false;
+            if (state.map && state.path) state.map.fitBounds(state.path.getBounds().pad(0.12), { maxZoom: 16 });
+        },
         /// Call when a pane becomes visible. Leaflet and Chart.js both measure
         /// their container at creation, so anything built inside a hidden pane
         /// comes back zero-sized until told to measure again.
@@ -1137,6 +1214,9 @@ function renderFlightDoc(d) {
                 state.cockpitWanted = true;
                 buildCockpit();
                 if (state.cockpit) state.cockpit.deckgl.redraw(true);
+            } else if (name === 'details') {
+                drawTouchdownMap();
+                if (state.touchdownMap) state.touchdownMap.invalidateSize();
             } else if (name === 'graphs') {
                 state.charts.forEach(c => c.resize());
                 // Chart pixels just moved, so the replay cursor has to follow.
