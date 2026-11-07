@@ -1,0 +1,133 @@
+<!-- Head-up display over the cockpit view: the flight display's numbers drawn
+     as green symbology on the 3D scene. Conformal: the horizon line and the
+     pitch ladder sit on the real horizon, so the scale is taken from the
+     cockpit camera's field of view (FOVY below, which must match the
+     FirstPersonView in _flight_render.html). -->
+<style>
+    .hud { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0;
+           font-family: var(--font-mono); filter: drop-shadow(0 0 1.5px rgba(0,0,0,0.9)); }
+    .hud[hidden] { display: none; }
+    .hud line, .hud path, .hud polyline, .hud circle, .hud rect { stroke: #5dff9a; stroke-width: 1.4; fill: none; }
+    .hud text { fill: #5dff9a; font-size: 13px; font-weight: 600; }
+    .hud .hud-big { font-size: 17px; font-weight: 700; }
+    .hud .hud-cap { font-size: 10px; letter-spacing: 0.12em; }
+    .hud .hud-neg { stroke-dasharray: 6 4; }
+</style>
+<script>
+(function () {
+    const FOVY = 65;
+    const NS = 'http://www.w3.org/2000/svg';
+    const R = Math.PI / 180;
+    const num = v => typeof v === 'number' && isFinite(v);
+
+    /// Builds the HUD in `host` (positioned) and returns its handle.
+    window.createHUD = function (host) {
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('class', 'hud');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.hidden = true;
+        host.appendChild(svg);
+
+        let W = 0, Hh = 0, f = 0, last = null, refs = null;
+
+        function build() {
+            W = host.clientWidth; Hh = host.clientHeight;
+            if (!W || !Hh) { refs = null; return; }
+            // Pixels per radian at the centre of the view.
+            f = (Hh / 2) / Math.tan(FOVY / 2 * R);
+            const cx = W / 2, cy = Hh / 2;
+            const ppdH = f * R;   // heading tape, linear near the centre
+            const lw = Math.min(70, W * 0.09);
+
+            let ladder = `<line x1="${-W}" y1="0" x2="${-lw * 1.4}" y2="0"/><line x1="${lw * 1.4}" y1="0" x2="${W}" y2="0"/>`;
+            // 5° rungs only where they come out far enough apart to read.
+            const step = f * R * 5 >= 32 ? 5 : 10;
+            for (let p = -30; p <= 30; p += step) {
+                if (!p) continue;
+                const y = (-f * Math.tan(p * R)).toFixed(1), w = p % 10 ? lw * 0.6 : lw;
+                const cls = p < 0 ? ' class="hud-neg"' : '';
+                const tip = p > 0 ? 6 : -6;
+                ladder += `<polyline${cls} points="${-w - lw * 0.5},${+y + tip} ${-w - lw * 0.5},${y} ${-lw * 0.5},${y}"/>`
+                        + `<polyline${cls} points="${lw * 0.5},${y} ${w + lw * 0.5},${y} ${w + lw * 0.5},${+y + tip}"/>`;
+                if (!(p % 10)) ladder += `<text x="${-w - lw * 0.5 - 6}" y="${+y + 4}" text-anchor="end">${Math.abs(p)}</text>`
+                                      + `<text x="${w + lw * 0.5 + 6}" y="${+y + 4}">${Math.abs(p)}</text>`;
+            }
+
+            let hdg = '';
+            for (let d = -360; d <= 720; d += 5) {
+                const x = (d * ppdH).toFixed(1), major = !(d % 10);
+                hdg += `<line x1="${x}" y1="0" x2="${x}" y2="${major ? 8 : 4}"/>`;
+                if (major) {
+                    const m = ((d % 360) + 360) % 360;
+                    hdg += `<text x="${x}" y="22" text-anchor="middle">${String(m / 10).padStart(2, '0')}</text>`;
+                }
+            }
+            // Heading along the bottom, clear of the camera switch at the top.
+            const tapeW = Math.min(W * 0.5, 360), tapeY = Hh - 30;
+
+            const boxW = 70, boxH = 26, sx = Math.max(12, cx - Math.min(W * 0.36, 300)), ax = Math.min(W - 12, cx + Math.min(W * 0.36, 300));
+            svg.setAttribute('viewBox', `0 0 ${W} ${Hh}`);
+            svg.innerHTML = `
+<defs>
+  <clipPath id="hud-clip-lad"><rect x="${sx + boxW + 6}" y="${Math.max(48, cy - Hh * 0.38)}" width="${Math.max(0, ax - 2 * boxW - sx - 22)}" height="${tapeY - 34 - Math.max(48, cy - Hh * 0.38)}"/></clipPath>
+  <clipPath id="hud-clip-hdg"><rect x="${cx - tapeW / 2}" y="${tapeY - 2}" width="${tapeW}" height="32"/></clipPath>
+</defs>
+<g clip-path="url(#hud-clip-lad)">
+  <g data-r="roll"><g data-r="pitch">${ladder}</g>
+    <g data-r="fpv"><circle cx="0" cy="0" r="6"/><line x1="-18" y1="0" x2="-6" y2="0"/><line x1="6" y1="0" x2="18" y2="0"/><line x1="0" y1="-6" x2="0" y2="-13"/></g>
+  </g>
+</g>
+<path d="M ${cx - 22} ${cy} l 9 0 l 6 8 l 7 -8 l 7 8 l 6 -8 l 9 0"/>
+<g clip-path="url(#hud-clip-hdg)"><g transform="translate(${cx} ${tapeY})"><g data-r="hdg">${hdg}</g></g></g>
+<path d="M ${cx} ${tapeY - 1} l -5 -7 l 10 0 z"/>
+<rect x="${cx - 26}" y="${tapeY - 32}" width="52" height="22"/>
+<text data-r="hdgv" x="${cx}" y="${tapeY - 15}" text-anchor="middle" class="hud-big"></text>
+<text x="${sx}" y="${cy - boxH / 2 - 6}" class="hud-cap">IAS</text>
+<rect x="${sx}" y="${cy - boxH / 2}" width="${boxW}" height="${boxH}"/>
+<text data-r="ias" x="${sx + boxW - 8}" y="${cy + 6}" text-anchor="end" class="hud-big"></text>
+<text data-r="gs" x="${sx}" y="${cy + boxH / 2 + 18}"></text>
+<text x="${ax}" y="${cy - boxH / 2 - 6}" text-anchor="end" class="hud-cap">ALT</text>
+<rect x="${ax - boxW - 10}" y="${cy - boxH / 2}" width="${boxW + 10}" height="${boxH}"/>
+<text data-r="alt" x="${ax - 8}" y="${cy + 6}" text-anchor="end" class="hud-big"></text>
+<text data-r="vs" x="${ax}" y="${cy + boxH / 2 + 18}" text-anchor="end"></text>
+`;
+            refs = {};
+            svg.querySelectorAll('[data-r]').forEach(n => { refs[n.dataset.r] = n; });
+            refs.ppdH = ppdH;
+        }
+
+        function draw() {
+            if (svg.hidden || !last) return;
+            if (!refs || host.clientWidth !== W || host.clientHeight !== Hh) build();
+            if (!refs) return;
+            const r = last, cx = W / 2, cy = Hh / 2;
+            const pitch = num(r.pitch) ? Math.max(-85, Math.min(85, r.pitch)) : 0;
+            const roll = num(r.roll) ? r.roll : 0;
+            refs.roll.setAttribute('transform', `translate(${cx} ${cy}) rotate(${(-roll).toFixed(2)})`);
+            refs.pitch.setAttribute('transform', `translate(0 ${(f * Math.tan(pitch * R)).toFixed(1)})`);
+            // Flight path: the climb angle from vertical and ground speed, in
+            // the same rolled frame as the horizon. Too slow and it means nothing.
+            const gs = num(r.gs) ? r.gs : null;
+            if (gs !== null && gs > 40 && num(r.vs)) {
+                const gamma = Math.atan2(r.vs / 60, gs * 1.68781) / R;
+                refs.fpv.style.display = '';
+                refs.fpv.setAttribute('transform', `translate(0 ${(f * Math.tan((pitch - gamma) * R)).toFixed(1)})`);
+            } else refs.fpv.style.display = 'none';
+            const h = num(r.heading) ? ((r.heading % 360) + 360) % 360 : null;
+            refs.hdg.setAttribute('transform', `translate(${(-(h || 0) * refs.ppdH).toFixed(1)} 0)`);
+            refs.hdgv.textContent = h === null ? '' : String(Math.round(h) % 360).padStart(3, '0');
+            refs.ias.textContent = num(r.ias) ? Math.round(r.ias) : '---';
+            refs.gs.textContent = gs !== null ? 'GS ' + Math.round(gs) : '';
+            refs.alt.textContent = num(r.altitude) ? Math.round(r.altitude) : '-----';
+            refs.vs.textContent = num(r.vs) ? (r.vs > 0 ? '+' : '') + Math.round(r.vs / 10) * 10 : '';
+        }
+
+        new ResizeObserver(() => { refs = null; draw(); }).observe(host);
+
+        return {
+            update(r) { last = r; draw(); },
+            show(on) { svg.hidden = !on; draw(); },
+        };
+    };
+})();
+</script>

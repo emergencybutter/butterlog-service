@@ -1,3 +1,4 @@
+{% include "_hud.html" %}
 <!-- Drives the one-screen flight view (_flight_screen.html).
 
      `initFlightStrip(handle, opts)` wires the map controls, the bottom strip
@@ -519,12 +520,19 @@ window.initFlightStrip = function (H, opts) {
     let layoutT = null;
     window.addEventListener('resize', () => { clearTimeout(layoutT); layoutT = setTimeout(applyTabs, 100); });
 
+    // Cockpit, HUD (the cockpit camera with the flight display's numbers
+    // drawn over it) or chase.
     const camBtns = Array.from(document.querySelectorAll('[data-cam]'));
+    const hud = window.createHUD ? createHUD(document.querySelector('.fv-3d')) : null;
+    let cam = 'cockpit';
     function setCam(m) {
+        cam = m;
         camBtns.forEach(b => { const on = b.dataset.cam === m; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on); });
-        H.setCockpitMode(m);
+        H.setCockpitMode(m === 'chase' ? 'chase' : 'cockpit');
+        if (hud) hud.show(m === 'hud');
         store.set('cam', m);
     }
+    function feedHud(r) { if (hud) hud.update(r); }
     camBtns.forEach(b => b.addEventListener('click', () => setCam(b.dataset.cam)));
     $('fv-3d-full').addEventListener('click', () => {
         const el = document.querySelector('.fv-3d');
@@ -619,6 +627,10 @@ window.initFlightStrip = function (H, opts) {
         const c = doc && doc.current;
         if (c) {
             lastSample = { groundSpeed: c.speed, ias: c.ias, vspeed: c.verticalSpeed, altitude: c.altitude };
+            feedHud({ pitch: c.pitch, roll: c.roll, ias: num(c.ias) ? c.ias : c.speed,
+                      altitude: num(c.indicatedAltitude) ? c.indicatedAltitude : c.altitude,
+                      heading: num(c.magneticHeading) ? c.magneticHeading : c.heading,
+                      vs: c.verticalSpeed, gs: c.speed });
         } else if (N) {
             const i = N - 1;
             lastSample = { groundSpeed: S.ground_speed[i], ias: S.ias[i], vspeed: S.vs[i], altitude: S.alts[i] };
@@ -658,6 +670,11 @@ window.initFlightStrip = function (H, opts) {
                 if (mode !== 'replay') return;
                 cursorAxis = ev.axis;
                 lastSample = ev.sample;
+                const s = ev.sample;
+                // Magnetic once the sim's variation is off, as on the flight display.
+                feedHud({ pitch: s.pitch, roll: s.roll, ias: s.ias, altitude: s.altitude,
+                          heading: num(s.heading) ? s.heading - (s.magvar || 0) : s.track,
+                          vs: s.vspeed, gs: s.groundSpeed });
                 placeCursors();
                 $('fv-profile').setAttribute('aria-valuenow', Math.round(ev.progress * 100));
                 playBtn.dataset.state = ev.playing ? 'playing' : ev.atEnd ? 'end' : 'paused';
@@ -690,7 +707,7 @@ window.initFlightStrip = function (H, opts) {
     renderEvents();
     loadTerrain();
     applyTabs();
-    setCam(store.get('cam', 'cockpit') === 'chase' ? 'chase' : 'cockpit');
+    setCam(['chase', 'hud'].includes(store.get('cam', 'cockpit')) ? store.get('cam', 'cockpit') : 'cockpit');
     sync3dAvailable();
     applyMode();
     if (mode === 'replay' && !toReplay()) {
