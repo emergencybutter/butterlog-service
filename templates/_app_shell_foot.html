@@ -8,6 +8,8 @@
     const scrim = document.getElementById('nav-scrim');
     const openBtn = document.getElementById('nav-open');
     if (!rail || !scrim || !openBtn) return;
+    // A page that hides the top bar can carry its own menu button.
+    const openBtns = [openBtn, ...document.querySelectorAll('[data-nav-open]')];
 
     let lastFocus = null;
 
@@ -15,18 +17,18 @@
         lastFocus = document.activeElement;
         document.body.classList.add('nav-open');
         scrim.hidden = false;
-        openBtn.setAttribute('aria-expanded', 'true');
+        openBtns.forEach(b => b.setAttribute('aria-expanded', 'true'));
         const first = rail.querySelector('.rail-item');
         if (first) first.focus();
     }
     function close() {
         document.body.classList.remove('nav-open');
         scrim.hidden = true;
-        openBtn.setAttribute('aria-expanded', 'false');
+        openBtns.forEach(b => b.setAttribute('aria-expanded', 'false'));
         if (lastFocus && lastFocus.focus) lastFocus.focus();
     }
 
-    openBtn.addEventListener('click', open);
+    openBtns.forEach(b => b.addEventListener('click', open));
     scrim.addEventListener('click', close);
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && document.body.classList.contains('nav-open')) close();

@@ -173,11 +173,16 @@
 
     /* ── Narrow: the page scrolls, the panel stacks ───────────────────── */
     .fv-mtabs { display: none; }
+    .fv-menu { display: none; }
 
     @media (max-width: 899px) {
         .fv { height: auto; min-height: 0; }
         .fv-map { flex: none; height: 40vh; min-height: 220px; }
-        .fv-head { top: 52px; height: auto; min-height: 60px; }
+        /* The top bar only holds the menu button here; the flight header
+           carries that button instead, so the map gets the bar's 52px. */
+        .fv-page .topbar { display: none; }
+        .fv-page .fv-menu { display: inline-flex; flex: none; }
+        .fv-head { top: 0; height: auto; min-height: 60px; }
         /* Route and info line take the first row; the chips and buttons wrap under. */
         .fv-id { flex: 1 1 220px; }
         .fv-route { white-space: nowrap; }
@@ -192,31 +197,27 @@
         .fv-mtabs .fv-tab { flex: none; }
         .fv-strip > .fv-grid { order: 3; }
         .fv-tabsrow { order: 4; border-bottom: 0; justify-content: flex-end; }
-        .fv-strip > .fv-panel { order: 5; height: var(--mh); }
-        /* The 3D and graph tabs spend a row on their control; take it out of
-           the panel so every tab fills the same area. */
+        /* The altitude profile only shows on its own tab; the other tabs get
+           its height (the profile is var(--mh) + 36px), less the row the 3D
+           and graph tabs spend on their control, so every tab fills the same area. */
+        .fv-strip > .fv-panel { order: 5; height: calc(var(--mh) + 36px); }
         .fv-strip[data-mtab="3d"] > .fv-panel,
-        .fv-strip[data-mtab="graphs"] > .fv-panel { height: calc(var(--mh) - 42px); }
+        .fv-strip[data-mtab="graphs"] > .fv-panel { height: calc(var(--mh) - 6px); }
         .fv-tabsrow { min-height: 34px; }
         .fv-tabs, #fv-hide { display: none !important; }
         .fv-strip[data-mtab="altitude"] .fv-tabsrow,
         .fv-strip[data-mtab="horizon"] .fv-tabsrow { display: none; }
 
-        /* Altitude: the profile is the panel. Elsewhere it stays as a thin
-           scrub bar, so the replay can still be moved from any tab. */
+        /* Altitude: the profile is the panel. */
         .fv-strip > .fv-grid { grid-template-columns: 56px minmax(0, 1fr); column-gap: 8px; }
-        /* Panel plus the scrub bar and gap the other tabs show above theirs. */
         .fv-strip[data-mtab="altitude"] .fv-profile,
         .fv-strip[data-mtab="altitude"] .fv-axis { height: calc(var(--mh) + 36px); }
-        .fv-strip:not([data-mtab="altitude"]) > .fv-grid { grid-template-columns: minmax(0, 1fr); }
-        .fv-strip:not([data-mtab="altitude"]) .fv-axis,
-        .fv-strip:not([data-mtab="altitude"]) .fv-events { display: none; }
-        .fv-strip:not([data-mtab="altitude"]) .fv-profile { height: 28px; }
+        .fv-strip:not([data-mtab="altitude"]) > .fv-grid { display: none; }
         .fv-lanes .fv-grid { grid-template-columns: 96px minmax(0, 1fr); column-gap: 8px; }
 
         /* Horizon: the flight display with the numbers under it. */
         .fv-strip[data-mtab="horizon"] #panel-instruments { flex-direction: column; align-items: center; gap: 6px; }
-        .fv-strip[data-mtab="horizon"] .fv-pfd { width: auto; height: calc(var(--mh) - 86px); max-width: 100%; }
+        .fv-strip[data-mtab="horizon"] .fv-pfd { width: auto; height: calc(var(--mh) - 50px); max-width: 100%; }
         .fv-strip[data-mtab="horizon"] .fv-3d { display: none; }
         .fv-strip[data-mtab="horizon"] .fv-readouts { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 14px; }
         .fv-strip[data-mtab="horizon"] .fv-readouts div { padding: 4px 0; }

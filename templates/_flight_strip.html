@@ -371,6 +371,7 @@ window.initFlightStrip = function (H, opts) {
                 <button type="button" class="x" data-remove="${k}" aria-label="Remove ${esc(CHAN[k].label)}">&#10005;</button>
             </div>`).join('');
         $('fv-lanes-empty').hidden = ks.length > 0;
+        lanes.querySelectorAll('.fv-lane').forEach(wireScrub);
         document.querySelectorAll('.fv-count').forEach(c => { c.textContent = ks.length ? String(ks.length) : ''; });
         lanes.querySelectorAll('[data-remove]').forEach(b => b.addEventListener('click', e => {
             e.stopPropagation();
