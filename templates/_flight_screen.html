@@ -47,7 +47,7 @@
                 <span class="fv-key" id="fv-key-terrain" hidden><span class="fv-key-fill" aria-hidden="true"></span>Terrain below</span>
             </div>
 
-            <!-- Narrow screens only: one panel, four tabs. -->
+            <!-- What shares the middle of the strip (or, on a phone, the whole of it). -->
             <div class="fv-mtabs" role="tablist" aria-label="Flight panel">
                 <button type="button" class="fv-tab" role="tab" data-mtab="altitude">Altitude</button>
                 <button type="button" class="fv-tab" role="tab" data-mtab="horizon">Horizon</button>
@@ -65,12 +65,6 @@
             </div>
 
             <div class="fv-tabsrow">
-                <div class="fv-tabs" role="tablist" aria-label="Bottom panel">
-                    <button type="button" class="fv-tab" role="tab" id="tab-instruments" data-tab="instruments" aria-controls="panel-instruments">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 13h6l2-2h2l2 2h6"/></svg>Instruments</button>
-                    <button type="button" class="fv-tab" role="tab" id="tab-graphs" data-tab="graphs" aria-controls="panel-graphs">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 4 8-9M3 21h18"/></svg>Graphs <span class="fv-count" id="fv-count"></span></button>
-                </div>
                 <span class="fv-spacer"></span>
                 <div class="fv-seg" role="group" aria-label="Camera" id="fv-cam">
                     <button type="button" class="is-on" data-cam="cockpit" aria-pressed="true">Cockpit</button>
@@ -78,7 +72,6 @@
                 </div>
                 <button type="button" class="fv-btn fv-btn-sm" id="fv-channels" aria-expanded="false" aria-controls="fv-picker" hidden>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Channels</button>
-                <button type="button" class="fv-btn fv-btn-sm fv-btn-quiet" id="fv-hide" aria-expanded="true">Hide panel</button>
 
                 <div class="fv-float fv-picker" id="fv-picker" role="dialog" aria-label="Choose channels" hidden>
                     <div class="fv-picker-head">
@@ -92,7 +85,7 @@
                 </div>
             </div>
 
-            <div class="fv-panel" id="panel-instruments" role="tabpanel" aria-labelledby="tab-instruments">
+            <div class="fv-panel" id="panel-instruments" role="tabpanel" aria-label="Instruments">
                 <div class="fv-pfd"><div id="pfd-mount" class="pfd is-hidden"></div></div>
                 <div class="fv-3d">
                     <div id="cockpit"><canvas id="cockpit-canvas"></canvas></div>
@@ -104,7 +97,7 @@
                 <dl class="fv-readouts" id="fv-readouts"></dl>
             </div>
 
-            <div class="fv-panel fv-lanes" id="panel-graphs" role="tabpanel" aria-labelledby="tab-graphs" hidden>
+            <div class="fv-panel fv-lanes" id="panel-graphs" role="tabpanel" aria-label="Graphs" hidden>
                 <div class="fv-empty" id="fv-lanes-empty" hidden>
                     <span class="fv-muted">No channels picked. Choose some to compare them on the timeline.</span>
                     <button type="button" class="fv-btn fv-btn-sm" id="fv-lanes-pick">Choose channels</button>

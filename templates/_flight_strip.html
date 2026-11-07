@@ -457,63 +457,68 @@ window.initFlightStrip = function (H, opts) {
         if (!picker.hidden && !picker.contains(e.target) && !chanBtn.contains(e.target) && !$('fv-lanes-pick').contains(e.target)) openPicker(false);
     });
 
-    // ── Tabs, camera, hide ───────────────────────────────────────────────
-    // Wide: the profile is always up, with Instruments or Graphs under it.
-    // Narrow: there is room for one thing, so the altitude profile, the
-    // flight display, the 3D view and the graphs are four tabs over the same
-    // panel, and the profile shrinks to a scrub bar under the others.
-    let tab = store.get('tab', 'instruments') === 'graphs' ? 'graphs' : 'instruments';
-    let panelOpen = store.get('panel', true) !== false;
+    // ── Panels and tabs ──────────────────────────────────────────────────
+    // Wide, three columns: the flight display on the left and the 3D view on
+    // the right, both 4:3, with the altitude profile or the graphs between
+    // them. Wide, two columns: when that middle would be narrower than 4:3,
+    // the 3D view joins its tabs. Narrow: one panel, four tabs.
     const MTABS = ['altitude', 'horizon', '3d', 'graphs'];
     let mtab = MTABS.includes(store.get('mtab', 'altitude')) ? store.get('mtab', 'altitude') : 'altitude';
     const narrowMq = window.matchMedia('(max-width: 899px)');
-    // What is on screen, whichever layout: read by the cursor handlers.
-    let effTab = tab, effOpen = panelOpen;
-    const tabBtns = Array.from(document.querySelectorAll('.fv-tabs .fv-tab'));
+    // What is on screen: read by the cursor handlers.
+    const vis = { pfd: true, d3: true, lanes: false };
     const mBtns = Array.from(document.querySelectorAll('.fv-mtabs .fv-tab'));
     const strip = document.querySelector('.fv-strip');
+    const COL_GAP = 12;
+    function layoutNow() {
+        if (narrowMq.matches) return 'phone';
+        // The side panels are as tall as the window can spare, and 4:3.
+        const bh = Math.round(Math.max(200, Math.min(300, window.innerHeight * 0.32)));
+        strip.style.setProperty('--bh', bh + 'px');
+        const cs = getComputedStyle(strip);
+        const inner = strip.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        const cw = bh * 4 / 3;
+        return inner - 2 * cw - 2 * COL_GAP >= cw ? 'wide3' : 'wide2';
+    }
     function applyTabs() {
-        const narrow = narrowMq.matches;
-        if (narrow) strip.dataset.mtab = mtab; else delete strip.dataset.mtab;
-        effTab = narrow ? (mtab === 'graphs' ? 'graphs' : 'instruments') : tab;
-        effOpen = narrow ? mtab !== 'altitude' : panelOpen;
-        const mark = (btns, key, cur) => btns.forEach(b => {
-            const on = b.dataset[key] === cur;
+        const layout = layoutNow();
+        strip.dataset.layout = layout;
+        const offered = layout === 'phone' ? MTABS
+            : layout === 'wide2' ? ['altitude', '3d', 'graphs'] : ['altitude', 'graphs'];
+        const cur = offered.includes(mtab) ? mtab : 'altitude';
+        strip.dataset.mtab = cur;
+        vis.pfd = layout !== 'phone' || cur === 'horizon';
+        vis.d3 = layout === 'wide3' || cur === '3d';
+        vis.lanes = cur === 'graphs';
+        mBtns.forEach(b => {
+            const on = b.dataset.mtab === cur;
+            b.hidden = !offered.includes(b.dataset.mtab);
             b.setAttribute('aria-selected', on);
             b.tabIndex = on ? 0 : -1;
         });
-        mark(tabBtns, 'tab', tab);
-        mark(mBtns, 'mtab', mtab);
-        $('panel-instruments').hidden = !effOpen || effTab !== 'instruments';
-        $('panel-graphs').hidden = !effOpen || effTab !== 'graphs';
-        $('fv-cam').hidden = narrow ? mtab !== '3d' : (!panelOpen || tab !== 'instruments');
-        chanBtn.hidden = !effOpen || effTab !== 'graphs';
+        $('panel-instruments').hidden = !(vis.pfd || vis.d3);
+        $('panel-graphs').hidden = !vis.lanes;
+        $('fv-cam').hidden = !vis.d3;
+        chanBtn.hidden = !vis.lanes;
         if (chanBtn.hidden) openPicker(false);
-        const hide = $('fv-hide');
-        hide.textContent = panelOpen ? 'Hide panel' : 'Show panel';
-        hide.setAttribute('aria-expanded', panelOpen);
-        if (effOpen && effTab === 'instruments') { H.onPaneShown('replay'); renderReadouts(); }
-        if (effOpen && effTab === 'graphs') { drawLanes(); placeCursors(); renderLaneValues(); }
+        if (vis.pfd || vis.d3) H.onPaneShown('replay');
+        if (vis.pfd) renderReadouts();
+        if (vis.lanes) { drawLanes(); placeCursors(); renderLaneValues(); }
         // The profile just changed size or came back; the observer redraws it.
     }
-    function arrowKeys(btns) {
-        btns.forEach(b => b.addEventListener('keydown', e => {
-            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-            e.preventDefault(); e.stopPropagation();
-            const i = (btns.indexOf(b) + (e.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length;
-            btns[i].focus(); btns[i].click();
-        }));
-    }
-    tabBtns.forEach(b => b.addEventListener('click', () => {
-        tab = b.dataset.tab; panelOpen = true; store.set('tab', tab); store.set('panel', true); applyTabs();
-    }));
     mBtns.forEach(b => b.addEventListener('click', () => {
         mtab = b.dataset.mtab; store.set('mtab', mtab); applyTabs();
     }));
-    arrowKeys(tabBtns);
-    arrowKeys(mBtns);
+    mBtns.forEach(b => b.addEventListener('keydown', e => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault(); e.stopPropagation();
+        const shown = mBtns.filter(x => !x.hidden);
+        const i = (shown.indexOf(b) + (e.key === 'ArrowRight' ? 1 : shown.length - 1)) % shown.length;
+        shown[i].focus(); shown[i].click();
+    }));
     (narrowMq.addEventListener ? narrowMq.addEventListener.bind(narrowMq, 'change') : narrowMq.addListener.bind(narrowMq))(applyTabs);
-    $('fv-hide').addEventListener('click', () => { panelOpen = !panelOpen; store.set('panel', panelOpen); applyTabs(); });
+    let layoutT = null;
+    window.addEventListener('resize', () => { clearTimeout(layoutT); layoutT = setTimeout(applyTabs, 100); });
 
     const camBtns = Array.from(document.querySelectorAll('[data-cam]'));
     function setCam(m) {
@@ -533,7 +538,7 @@ window.initFlightStrip = function (H, opts) {
     let cursorAxis = 0, lastSample = null;
     function renderReadouts() {
         const s = lastSample;
-        if (!s || !effOpen || effTab !== 'instruments') return;
+        if (!s || !vis.pfd) return;
         const at = k => H.hasData(k) ? valueAt(S[k], cursorAxis) : null;
         const rows = [];
         if (num(s.groundSpeed)) rows.push(['Ground speed', Math.round(s.groundSpeed) + ' kt']);
@@ -660,9 +665,8 @@ window.initFlightStrip = function (H, opts) {
                 playBtn.dataset.state = ev.playing ? 'playing' : ev.atEnd ? 'end' : 'paused';
                 playBtn.setAttribute('aria-label', ev.playing ? 'Pause replay' : 'Play replay');
                 setClock(ev.sample.epoch);
-                if (!effOpen) return;
-                if (effTab === 'instruments') renderReadouts();
-                else renderLaneValues();
+                if (vis.pfd) renderReadouts();
+                if (vis.lanes) renderLaneValues();
             });
         }
         sync3dAvailable();

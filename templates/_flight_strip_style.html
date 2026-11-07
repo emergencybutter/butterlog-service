@@ -107,14 +107,13 @@
 
     /* ── Tabs and the panel under them ────────────────────────────────── */
     .fv-tabsrow { position: relative; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
-    .fv-tabs { display: flex; gap: 18px; }
     .fv-tab { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 2px; border: 0; background: transparent;
               color: var(--text-muted); font-family: var(--font-body); font-size: 0.9rem; font-weight: 600; cursor: pointer; }
     .fv-tab svg { width: 16px; height: 16px; }
     .fv-tab:hover { color: var(--text); }
     .fv-tab[aria-selected="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
     .fv-count { font-size: 0.78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-    .fv-tabsrow [hidden] { display: none !important; }
+    .fv-tabsrow [hidden], .fv-mtabs .fv-tab[hidden] { display: none !important; }
 
     .fv-panel { height: 220px; }
     .fv-panel[hidden] { display: none; }
@@ -162,6 +161,37 @@
     .fv-chan[aria-pressed="true"] { color: var(--text); }
     .fv-chan[aria-pressed="true"] .box { background: var(--teal); border-color: var(--teal); }
 
+    /* ── Wide: flight display | altitude or graphs | 3D view ──────────── */
+    /* --bh (the side panels' height) is set by the script from the window
+       height; the side columns are 4:3 at that height. When the middle would
+       be narrower than that, the script picks wide2 and the 3D view becomes
+       one of the middle's tabs. Rows: transport, tabs, body, readouts. */
+    .fv-strip[data-layout^="wide"] {
+        --bh: 280px; --cw: calc(var(--bh) * 4 / 3);
+        display: grid; column-gap: 12px; row-gap: 8px;
+        grid-template-columns: var(--cw) minmax(0, 1fr) var(--cw);
+        grid-template-rows: auto 40px calc(var(--bh) - 100px) 44px;
+    }
+    .fv-strip[data-layout="wide2"] { grid-template-columns: var(--cw) minmax(0, 1fr); }
+    .fv-strip[data-layout^="wide"] > .fv-transport { grid-column: 1 / -1; grid-row: 1; }
+    .fv-strip[data-layout^="wide"] > .fv-mtabs { display: flex; gap: 18px; grid-column: 2; grid-row: 2; border-bottom: 1px solid var(--border); }
+    .fv-strip[data-layout^="wide"] > .fv-tabsrow { grid-column: 2; grid-row: 2; justify-self: end; align-self: center; border-bottom: 0; }
+    .fv-strip[data-layout^="wide"] > .fv-grid { grid-column: 2; grid-row: 3; grid-template-columns: 64px minmax(0, 1fr); column-gap: 8px; }
+    .fv-strip[data-layout^="wide"] .fv-profile,
+    .fv-strip[data-layout^="wide"] .fv-axis { height: calc(var(--bh) - 100px); }
+    .fv-strip[data-layout^="wide"]:not([data-mtab="altitude"]) > .fv-grid { display: none; }
+    .fv-strip[data-layout^="wide"] > #panel-instruments:not([hidden]) { display: contents; }
+    .fv-strip[data-layout^="wide"] .fv-pfd { grid-column: 1; grid-row: 2 / 5; height: auto; aspect-ratio: 4 / 3; }
+    .fv-strip[data-layout="wide3"] .fv-3d { grid-column: 3; grid-row: 2 / 5; }
+    .fv-strip[data-layout="wide2"] .fv-3d { grid-column: 2; grid-row: 3 / 5; }
+    .fv-strip[data-layout="wide2"]:not([data-mtab="3d"]) .fv-3d { display: none; }
+    /* The numbers sit in a row under the profile; the graph lanes carry
+       their own, and the 3D view takes the row in the two-column layout. */
+    .fv-strip[data-layout^="wide"] .fv-readouts { grid-column: 2; grid-row: 4; width: auto; flex-direction: row; align-items: center; gap: 28px; overflow: hidden; }
+    .fv-strip[data-layout^="wide"] .fv-readouts div { flex-direction: column; align-items: flex-start; gap: 1px; padding: 0; border: 0; }
+    .fv-strip[data-layout^="wide"]:not([data-mtab="altitude"]) .fv-readouts { display: none; }
+    .fv-strip[data-layout^="wide"] > #panel-graphs { grid-column: 2; grid-row: 3 / 5; height: auto; min-height: 0; }
+
     /* ── Details dialog: what the Summary tab used to be ──────────────── */
     .fv-details { margin: auto; width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 0; border: 1px solid var(--border-strong);
                   border-radius: var(--radius); background: var(--bg); color: var(--text); box-shadow: var(--shadow); }
@@ -204,7 +234,6 @@
         .fv-strip[data-mtab="3d"] > .fv-panel,
         .fv-strip[data-mtab="graphs"] > .fv-panel { height: calc(var(--mh) - 6px); }
         .fv-tabsrow { min-height: 34px; }
-        .fv-tabs, #fv-hide { display: none !important; }
         .fv-strip[data-mtab="altitude"] .fv-tabsrow,
         .fv-strip[data-mtab="horizon"] .fv-tabsrow { display: none; }
 
