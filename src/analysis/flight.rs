@@ -286,7 +286,12 @@ struct Analyser {
     last_vs: f64,
     takeoff_ms: Option<i64>,
     takeoff_roll_ms: Option<i64>,
-    pending_toc: Option<(i64, f64, f64)>,
+    /// Where a level-off started: time, position and altitude.
+    pending_toc: Option<(i64, f64, f64, f64)>,
+    /// The lowest altitude since the latest top of descent, or since the start.
+    climb_low: Option<f64>,
+    /// A top of climb is recorded since the latest top of descent.
+    toc_done: bool,
     pending_tod: Option<PendingDescent>,
     /// The lowest altitude since the latest top of descent, until the aircraft has
     /// climbed [`DESCENT_REARM_FT`] above it; `None` while a descent would get one.
@@ -323,6 +328,8 @@ impl Analyser {
             takeoff_ms: None,
             takeoff_roll_ms: None,
             pending_toc: None,
+            climb_low: None,
+            toc_done: false,
             pending_tod: None,
             tod_low: None,
             ground_alt: None,
@@ -380,10 +387,7 @@ impl Analyser {
         } else {
             d.level_since = None;
         }
-        let needed = self.ground_alt.map_or(DESCENT_CONFIRM_FT, |g| {
-            ((d.alt - g) / 2.0).clamp(DESCENT_CONFIRM_MIN_FT, DESCENT_CONFIRM_FT)
-        });
-        if d.alt - p.alt_msl >= needed {
+        if d.alt - p.alt_msl >= self.needed(d.alt) {
             self.pending_tod = None;
             return Some(d);
         }
@@ -391,11 +395,33 @@ impl Analyser {
         None
     }
 
+    /// How far a climb or descent topping out at `top` must go to count: [`DESCENT_CONFIRM_FT`],
+    /// or lower down half the height above the field last left.
+    fn needed(&self, top: f64) -> f64 {
+        self.ground_alt.map_or(DESCENT_CONFIRM_FT, |g| {
+            ((top - g) / 2.0).clamp(DESCENT_CONFIRM_MIN_FT, DESCENT_CONFIRM_FT)
+        })
+    }
+
+    /// Records a top of climb at a level-off or turn at `alt`, once the climb has gained as
+    /// much above its lowest point since the latest top of descent as a descent must lose,
+    /// so a balloon or a correction on the approach is none. One per climb: a step climb
+    /// keeps the first.
+    fn top_of_climb(&mut self, t: i64, lat: f64, lon: f64, alt: f64) {
+        let low = self.climb_low.unwrap_or(alt);
+        if !self.toc_done && alt - low >= self.needed(alt) {
+            self.event(EventKind::TopOfClimb, t, lat, lon, None);
+            self.toc_done = true;
+        }
+    }
+
     /// Records a confirmed descent's top, unless it continues one already recorded.
     fn top_of_descent(&mut self, d: PendingDescent, p: &Point) {
         self.phase = Phase::Descent;
         if self.tod_low.is_none() {
             self.event(EventKind::TopOfDescent, d.t, d.lat, d.lon, None);
+            self.toc_done = false;
+            self.climb_low = Some(p.alt_msl);
         }
         self.tod_low = Some(self.tod_low.unwrap_or(p.alt_msl).min(p.alt_msl));
     }
@@ -460,6 +486,7 @@ impl Analyser {
         if let Some(low) = self.tod_low {
             self.tod_low = (p.alt_msl < low + DESCENT_REARM_FT).then_some(low.min(p.alt_msl));
         }
+        self.climb_low = Some(self.climb_low.map_or(p.alt_msl, |l| l.min(p.alt_msl)));
         match self.phase {
             Phase::Parked => {
                 if ground && p.gs > 2.0 {
@@ -492,18 +519,18 @@ impl Analyser {
                     self.touchdown(&p);
                 } else if let Some(d) = self.track_descent(&p) {
                     // Straight from the climb into a descent: both tops are where it turned.
-                    self.event(EventKind::TopOfClimb, d.t, d.lat, d.lon, None);
+                    self.top_of_climb(d.t, d.lat, d.lon, d.alt);
                     self.top_of_descent(d, &p);
                     self.pending_toc = None;
                 } else if p.vs.abs() < 200.0 && p.ias > 60.0 {
                     match self.pending_toc {
-                        Some((t, lat, lon)) if p.t - t >= STABLE_MS => {
+                        Some((t, lat, lon, alt)) if p.t - t >= STABLE_MS => {
                             self.phase = Phase::Cruise;
-                            self.event(EventKind::TopOfClimb, t, lat, lon, None);
+                            self.top_of_climb(t, lat, lon, alt);
                             self.pending_toc = None;
                         }
                         Some(_) => {}
-                        None => self.pending_toc = Some((p.t, p.lat, p.lon)),
+                        None => self.pending_toc = Some((p.t, p.lat, p.lon, p.alt_msl)),
                     }
                 } else {
                     self.pending_toc = None;
@@ -1251,6 +1278,33 @@ mod tests {
     }
 
     #[test]
+    fn a_balloon_or_step_climb_is_no_top_of_climb() {
+        use EventKind::*;
+        let mut a = Analyser::new();
+        a.phase = Phase::Climb;
+        a.update(flying(0.0, 2000.0, 1500.0));
+        a.update(flying(100.0, 8000.0, 0.0));
+        a.update(flying(110.0, 8000.0, 0.0));
+        // A step climb to 10000: the first level-off stays the top of climb.
+        a.update(flying(200.0, 8000.0, 1000.0));
+        a.update(flying(320.0, 10000.0, 0.0));
+        a.update(flying(330.0, 10000.0, 0.0));
+        // Down to 4000, then a 200 ft balloon and level: no top of climb.
+        a.update(flying(400.0, 10000.0, -1500.0));
+        a.update(flying(640.0, 4000.0, -1500.0));
+        a.update(flying(650.0, 4000.0, 600.0));
+        a.update(flying(660.0, 4200.0, 0.0));
+        a.update(flying(670.0, 4200.0, 0.0));
+        assert_eq!(kinds(&a), [TopOfClimb, TopOfDescent]);
+        assert_eq!(a.events[0].wall_time_ms, 100_000);
+        // A go-around up to 6000 is a climb.
+        a.update(flying(700.0, 4200.0, 1500.0));
+        a.update(flying(780.0, 6000.0, 0.0));
+        a.update(flying(790.0, 6000.0, 0.0));
+        assert_eq!(kinds(&a), [TopOfClimb, TopOfDescent, TopOfClimb]);
+    }
+
+    #[test]
     fn step_downs_keep_one_top_of_descent_and_a_go_around_gets_another() {
         let mut a = Analyser::new();
         a.phase = Phase::Cruise;
@@ -1278,8 +1332,10 @@ mod tests {
         let mut a = Analyser::new();
         a.phase = Phase::Climb;
         let mut p = point(0.0);
-        (p.on_ground, p.ias, p.vs) = (false, 100.0, 0.0);
+        (p.on_ground, p.ias, p.vs) = (false, 100.0, 1000.0);
         a.update(p);
+        (p.alt_msl, p.vs) = (3000.0, 0.0);
+        a.update(Point { t: 1_000, ..p });
         // Paused for a minute, then level for 5 s: not yet.
         a.update(Point { t: 60_000, resumed: true, ..p });
         a.update(Point { t: 65_000, ..p });
