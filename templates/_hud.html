@@ -25,8 +25,10 @@
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('class', 'hud');
         svg.setAttribute('aria-hidden', 'true');
-        svg.hidden = true;
+        // SVG elements have no `hidden` property, so the attribute is set by hand.
+        svg.setAttribute('hidden', '');
         host.appendChild(svg);
+        const shown = () => !svg.hasAttribute('hidden');
 
         let W = 0, Hh = 0, f = 0, last = null, refs = null;
 
@@ -97,7 +99,7 @@
         }
 
         function draw() {
-            if (svg.hidden || !last) return;
+            if (!shown() || !last) return;
             if (!refs || host.clientWidth !== W || host.clientHeight !== Hh) build();
             if (!refs) return;
             const r = last, cx = W / 2, cy = Hh / 2;
@@ -126,7 +128,7 @@
 
         return {
             update(r) { last = r; draw(); },
-            show(on) { svg.hidden = !on; draw(); },
+            show(on) { svg.toggleAttribute('hidden', !on); draw(); },
         };
     };
 })();
