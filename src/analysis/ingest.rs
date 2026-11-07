@@ -12,7 +12,7 @@
 //! stored under its first session.
 
 use super::flight::{Endpoint, FlightStream};
-use super::statistics::FlightStats;
+use super::statistics::{FlightStats, Sim};
 use super::resume::{position, Position};
 use super::{FlightSummary, Places};
 use crate::error::AppError;
@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 11;
+pub const ANALYSER_VERSION: i32 = 12;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
@@ -64,9 +64,10 @@ type Analysed = Vec<(FlightSummary, Value, Value, Vec<DecodedPoint>)>;
 
 /// A few of a session's chunks as uploaded (zstd each, in order), decoded: those the tail
 /// adds to a flight. A whole session is decoded a chunk at a time ([`each_sample`]).
-fn decode_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<Vec<Sample>, String> {
+fn decode_chunks(open: &[u8], chunks: &[Vec<u8>]) -> Result<(Sim, Vec<Sample>), String> {
     let payloads = chunks.iter().map(|c| decompress(c).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
-    decode_payloads(open, &payloads)
+    let sim = Sim::of(&SessionOpen::decode(open).map_err(|e| e.to_string())?.0.header);
+    Ok((sim, decode_payloads(open, &payloads)?))
 }
 
 /// Decodes a session's chunk payloads, in order, into samples.
@@ -87,7 +88,7 @@ fn analysed(header: &SessionHeader, flights: Vec<(FlightSummary, FlightStats)>, 
         .map(|(f, stats)| {
             let json = summary_json(&f, places);
             let statistics = super::statistics::document(header, &f, &stats, places);
-            (f, json, statistics, stats.track)
+            (f, json, statistics, super::statistics::stored(Sim::of(header), stats.track))
         })
         .collect()
 }
@@ -866,11 +867,11 @@ async fn tail_session(
     .bind(chunks)
     .fetch_all(db)
     .await?;
-    let samples = match blocking(move || decode_chunks(&open, &data)).await? {
-        Ok(samples) => samples,
+    let (sim, samples) = match blocking(move || decode_chunks(&open, &data)).await? {
+        Ok(decoded) => decoded,
         Err(e) => {
             tracing::warn!(session = %id, "open telemetry session not tailed: {e}");
-            Vec::new()
+            (Sim::Msfs, Vec::new())
         }
     };
     let mut tx = db.begin().await?;
@@ -890,8 +891,11 @@ async fn tail_session(
         .bind(flight_id)
         .fetch_one(&mut *tx)
         .await?;
-    let new = super::statistics::points(
-        samples.iter().filter(|s| last.is_none_or(|l| s.wall_time_ms.div_euclid(1000) > l)),
+    let new = super::statistics::stored(
+        sim,
+        super::statistics::points(
+            samples.iter().filter(|s| last.is_none_or(|l| s.wall_time_ms.div_euclid(1000) > l)),
+        ),
     );
     if let Some(latest) = samples.last().filter(|_| !new.is_empty()) {
         let added = crate::track::insert_points(&mut tx, flight_id, &new).await?;
@@ -902,7 +906,7 @@ async fn tail_session(
               WHERE id = $1 AND status = 'active'",
         )
         .bind(flight_id)
-        .bind(super::statistics::current_snapshot(latest))
+        .bind(super::statistics::current_snapshot(sim, latest))
         .bind(added as i32)
         .execute(&mut *tx)
         .await?;

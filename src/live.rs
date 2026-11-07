@@ -267,11 +267,11 @@ fn extract_current(statistics: &serde_json::Value) -> Option<CurrentPosition> {
             .find_map(|k| snapshot.get(*k).and_then(|v| v.as_f64()))
     };
 
-    // The two sims disagree on attitude sign and on what `HDG` means, and the
-    // app forwards each one raw. MSFS uses the SimConnect convention — `Pitch`
-    // positive nose-down, `Roll` positive left-wing-down, `HDG` true — while
-    // X-Plane's `theta`/`phi`/`mag_psi` are already nose-up, right-wing-down
-    // and magnetic. Normalise here so every consumer sees one convention.
+    // The two sims disagree on signs, and the app forwards each one raw. MSFS's
+    // `Pitch` is positive nose-down, `Roll` positive left-wing-down and `MagVar`
+    // positive east, while X-Plane's `theta` and `phi` are already nose-up and
+    // right-wing-down and its variation is positive west. `HDG` is true on both.
+    // Normalise here so every consumer sees one convention.
     let xplane = statistics
         .get("simulator")
         .and_then(|v| v.as_str())
@@ -281,13 +281,13 @@ fn extract_current(statistics: &serde_json::Value) -> Option<CurrentPosition> {
     let heading = num(&["HDG", "heading"]).unwrap_or(0.0);
     let pitch_raw = num(&["Pitch", "pitch"]).unwrap_or(0.0);
     let roll_raw = num(&["Roll", "roll"]).unwrap_or(0.0);
-    // East variation is positive, so magnetic = true - variation.
-    let magvar = num(&["MagVar", "magnetic_variation"]).unwrap_or(0.0);
-    let (pitch, roll, magnetic) = if xplane {
-        (pitch_raw, roll_raw, heading)
+    let magvar_raw = num(&["MagVar", "magnetic_variation"]).unwrap_or(0.0);
+    let (pitch, roll, magvar_east) = if xplane {
+        (pitch_raw, roll_raw, -magvar_raw)
     } else {
-        (-pitch_raw, -roll_raw, heading - magvar)
+        (-pitch_raw, -roll_raw, magvar_raw)
     };
+    let magnetic = heading - magvar_east;
 
     let altitude = num(&["AltMSL", "gps_altitude_msl", "AltB"]).unwrap_or(0.0);
 
@@ -703,19 +703,20 @@ mod tests {
     }
 
     #[test]
-    fn xplane_attitude_and_heading_are_taken_as_reported() {
+    fn xplane_attitude_is_taken_as_reported_and_its_variation_is_positive_west() {
         let stats = json!({
             "simulator": "X-Plane",
             "current_snapshot": {
                 "Latitude": 1.0, "Longitude": 2.0,
                 "Pitch": 8.0, "Roll": 20.0,
-                "HDG": 10.0, "MagVar": 15.0,
+                "HDG": 350.0, "MagVar": 15.0,
             }
         });
         let pos = extract_current(&stats).unwrap();
         assert_eq!(pos.pitch, 8.0);
         assert_eq!(pos.roll, 20.0);
-        assert_eq!(pos.magnetic_heading, 10.0);
+        // 350 true with 15 west variation is 5 magnetic, not 365.
+        assert_eq!(pos.magnetic_heading, 5.0);
     }
 
     #[test]

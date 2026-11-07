@@ -64,14 +64,17 @@ function sampleTerrainM(lat, lon, z) {
 // current without tearing the page down on every poll.
 function renderFlightDoc(d) {
     const td = d.transposedData || d.transposed_data || {};
-    // The track carries attitude exactly as the sim reported it, and the two
-    // sims disagree: MSFS is positive nose-down and positive left-wing-down,
-    // X-Plane's theta/phi are already nose-up and right-wing-down. Normalise
-    // once here, so the pitch chart and the flight display cannot disagree.
-    // Same rule as `extract_current` in live.rs, including treating an unknown
-    // simulator as MSFS.
-    const attSign = /x-?plane/i.test(d.simulator || '') ? 1 : -1;
+    // The track carries what the sim reported, and the two sims disagree: MSFS is
+    // positive nose-down and left-wing-down with variation positive east, X-Plane
+    // positive nose-up and right-wing-down with variation positive west. Normalise
+    // once here, so the charts and the flight display cannot disagree. Headings are
+    // true on both. Same rule as `extract_current` in live.rs, including treating
+    // an unknown simulator as MSFS.
+    const xplane = /x-?plane/i.test(d.simulator || '');
+    const attSign = xplane ? 1 : -1;
+    const eastSign = xplane ? -1 : 1;
     const att = arr => (arr || []).map(v => v * attSign);
+    const east = arr => (arr || []).map(v => v === null ? null : v * eastSign);
     const state = {
         timestamps: reconstructTs(td.timestamps),
         lats: (td.latitudes || []).slice(),
@@ -89,7 +92,7 @@ function renderFlightDoc(d) {
         ground_speed: (td.ground_speed || []).slice(),
         true_airspeed: (td.true_airspeed || []).slice(),
         baro: (td.baro || []).slice(),
-        magvar: (td.magvar || []).slice(),
+        magvar: east(td.magvar),
         g_load: (td.g_load || []).slice(),
         oat: (td.oat || []).slice(),
         wind_speed: (td.wind_speed || []).slice(),
@@ -380,10 +383,7 @@ function renderFlightDoc(d) {
     /// snapshot is what the camera flies on. A client that sends no snapshot
     /// still sends a track, so the newest sample is the fallback.
     ///
-    /// Heading on the snapshot carries the sim's own convention - true on MSFS,
-    /// magnetic on X-Plane - which is the same convention the track's heading
-    /// array uses, so cockpitCam reads both with one rule. The variation it
-    /// needs to undo comes from the newest sample: the snapshot has none.
+    /// Heading is true on the snapshot, as in the track's heading array.
     ///
     /// The fix is stamped with when it was true, not when it arrived. The
     /// service reports how long ago the flight last reported, and that is often
@@ -491,10 +491,7 @@ function renderFlightDoc(d) {
         };
         const M = 0.3048;
         let bearing = s.track;
-        if (typeof s.heading === 'number') {
-            // X-Plane reports magnetic, MSFS true; put both back to true.
-            bearing = attSign < 0 ? s.heading : s.heading + (s.magvar || 0);
-        }
+        if (typeof s.heading === 'number') bearing = s.heading;
         // Each end's offset is exact at that end and blended in between,
         // where the aeroplane is high enough for a few metres not to show.
         // EYE lifts the camera off the aircraft's origin, which is the fix.
@@ -1115,7 +1112,7 @@ function renderFlightDoc(d) {
                 // snapshot. Without one, fall back to course over ground from
                 // the fixes, and say so rather than passing it off as a heading.
                 const magnetic = s.heading === null ? null
-                    : (((attSign < 0 ? s.heading - (s.magvar || 0) : s.heading) % 360) + 360) % 360;
+                    : (((s.heading - (s.magvar || 0)) % 360) + 360) % 360;
                 if (typeof renderPFDSample === 'function') renderPFDSample({
                     pitch: s.pitch, roll: s.roll,
                     ias: s.ias, altitude: s.altitude, baro: s.baro,
@@ -1148,7 +1145,7 @@ function renderFlightDoc(d) {
                 state.ground_speed = state.ground_speed.concat(t.ground_speed || []);
                 state.true_airspeed = state.true_airspeed.concat(t.true_airspeed || []);
                 state.baro = state.baro.concat(t.baro || []);
-                state.magvar = state.magvar.concat(t.magvar || []);
+                state.magvar = state.magvar.concat(east(t.magvar));
                 state.g_load = state.g_load.concat(t.g_load || []);
                 state.oat = state.oat.concat(t.oat || []);
                 state.wind_speed = state.wind_speed.concat(t.wind_speed || []);

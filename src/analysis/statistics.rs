@@ -4,7 +4,8 @@
 //! (`analysis/compare.rs`); once they agree the service writes it in place of the app.
 //!
 //! Keys and conventions are the app's, so every reader takes it unchanged. That includes
-//! the app's attitude signs: `Pitch` positive nose down, `Roll` positive left wing down.
+//! its rule for signs: a flight holds what its sim reports, as [`Sim`] says, and whoever
+//! shows it applies that sim's signs. Headings are true.
 
 use super::flight::{Endpoint, FlightSink, FlightSummary, Progress};
 use super::Places;
@@ -12,8 +13,21 @@ use crate::normalise::{Field, Sample};
 use butterlog_wire::SessionHeader;
 use serde_json::{json, Map, Value};
 
-/// The app's key for each field it logs, and the conversion from the canonical value.
-const KEYS: &[(&str, Field, fn(f64) -> f64)] = &[
+/// The sim a flight came from, whose signs its stored values are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sim {
+    Msfs,
+    XPlane,
+}
+
+impl Sim {
+    pub fn of(header: &SessionHeader) -> Self {
+        if header.sim.starts_with("xplane") { Sim::XPlane } else { Sim::Msfs }
+    }
+}
+
+/// The app's key for each field it logs, and what takes the canonical value to the sim's.
+const KEYS: &[(&str, Field, fn(Sim) -> f64)] = &[
     ("Latitude", Field::Latitude, same),
     ("Longitude", Field::Longitude, same),
     ("AltB", Field::AltitudeIndicated, same),
@@ -27,14 +41,14 @@ const KEYS: &[(&str, Field, fn(f64) -> f64)] = &[
     ("TAS", Field::Tas, same),
     ("GndSpd", Field::GroundSpeed, same),
     ("VSpd", Field::VerticalSpeed, same),
-    ("Pitch", Field::Pitch, negated),
-    ("Roll", Field::Roll, negated),
+    ("Pitch", Field::Pitch, attitude),
+    ("Roll", Field::Roll, attitude),
     ("LatAc", Field::GLateral, same),
     ("NormAc", Field::GNormal, same),
     ("gforce", Field::GNormal, same),
-    ("HDG", Field::HeadingMagnetic, same),
+    ("HDG", Field::HeadingTrue, same),
     ("TRK", Field::Track, same),
-    ("MagVar", Field::MagneticVariation, same),
+    ("MagVar", Field::MagneticVariation, variation),
     ("WndSpd", Field::WindSpeed, same),
     ("WndDr", Field::WindDirection, same),
     ("volt1", Field::Volts, same),
@@ -64,12 +78,25 @@ const KEYS: &[(&str, Field, fn(f64) -> f64)] = &[
     ("landing_lights", Field::LandingLights, same),
 ];
 
-fn same(v: f64) -> f64 {
-    v
+fn same(_: Sim) -> f64 {
+    1.0
 }
 
-fn negated(v: f64) -> f64 {
-    -v
+/// MSFS's pitch and roll are positive nose down and left wing down, the canonical ones'
+/// opposite; X-Plane's match.
+fn attitude(sim: Sim) -> f64 {
+    match sim {
+        Sim::Msfs => -1.0,
+        Sim::XPlane => 1.0,
+    }
+}
+
+/// X-Plane's variation is positive west, the canonical one's opposite; MSFS's matches.
+fn variation(sim: Sim) -> f64 {
+    match sim {
+        Sim::Msfs => 1.0,
+        Sim::XPlane => -1.0,
+    }
 }
 
 /// The app's timestamps: UTC, "2026-11-01 01:09:47.776".
@@ -79,18 +106,25 @@ fn app_time(ms: i64) -> Value {
 }
 
 /// One sample in the app's keys, the fields it has.
-fn snapshot(s: &Sample) -> Map<String, Value> {
+fn snapshot(sim: Sim, s: &Sample) -> Map<String, Value> {
     KEYS.iter()
-        .filter_map(|(key, field, convert)| Some((key.to_string(), json!(convert(s.get(*field)?)))))
+        .filter_map(|(key, field, sign)| Some((key.to_string(), json!(s.get(*field)? * sign(sim)))))
         .collect()
 }
 
 /// Each field's largest value over the flight, as the app's `max_entries` (a field's
 /// maximum, not its largest magnitude: `VSpd` is the best climb).
-fn maxima(max: &[Option<f64>]) -> Map<String, Value> {
+///
+/// `range` is each field's canonical lowest and highest: where the sim's sign is the
+/// opposite, its largest value is the canonical lowest.
+fn maxima(sim: Sim, range: &[Option<(f64, f64)>]) -> Map<String, Value> {
     KEYS.iter()
-        .zip(max)
-        .filter_map(|((key, _, _), max)| Some((key.to_string(), json!((*max)?))))
+        .zip(range)
+        .filter_map(|((key, _, sign), range)| {
+            let (lowest, highest) = (*range)?;
+            let sign = sign(sim);
+            Some((key.to_string(), json!(if sign < 0.0 { lowest * sign } else { highest })))
+        })
         .collect()
 }
 
@@ -142,20 +176,31 @@ fn closest_airport(s: &Sample, places: &Places) -> Option<Value> {
     Some(json!({ "icao": a.ident, "name": a.name, "distance": km / 1.852 }))
 }
 
-/// A flight's track as the app uploads it to `flight_track_points`: the first sample of
-/// each second, in the app's keys and signs. What [`FlightStats`] gathers as it goes,
-/// which the tests hold it to.
+/// A flight's track: the first sample of each second, canonical until [`stored`]. What
+/// [`FlightStats`] gathers as it goes, which the tests hold it to.
 #[cfg(test)]
 pub fn track(f: &FlightSummary, samples: &[Sample]) -> Vec<crate::track::DecodedPoint> {
     points(samples.iter().filter(|s| (f.first_ms..=f.last_ms).contains(&s.wall_time_ms)))
 }
 
 /// The newest sample in the app's keys, as `current_snapshot`.
-pub fn current_snapshot(s: &Sample) -> Value {
-    Value::Object(snapshot(s))
+pub fn current_snapshot(sim: Sim, s: &Sample) -> Value {
+    Value::Object(snapshot(sim, s))
 }
 
-/// Samples as track points: the first of each second with a position.
+/// Track points as `flight_track_points` holds them, as the app uploads them: in the sim's
+/// signs.
+pub fn stored(sim: Sim, mut points: Vec<crate::track::DecodedPoint>) -> Vec<crate::track::DecodedPoint> {
+    let (attitude, variation) = (attitude(sim) as f32, variation(sim) as f32);
+    for p in &mut points {
+        p.pitch = p.pitch.map(|v| v * attitude);
+        p.roll = p.roll.map(|v| v * attitude);
+        p.magvar = p.magvar.map(|v| v * variation);
+    }
+    points
+}
+
+/// Samples as track points, canonical: the first of each second with a position.
 pub fn points<'a>(samples: impl Iterator<Item = &'a Sample>) -> Vec<crate::track::DecodedPoint> {
     let mut points = Vec::new();
     let mut last_epoch = None;
@@ -174,9 +219,9 @@ pub fn points<'a>(samples: impl Iterator<Item = &'a Sample>) -> Vec<crate::track
             altitude: v(Field::AltitudeIndicated),
             ias: v(Field::Ias),
             vspeed: v(Field::VerticalSpeed),
-            pitch: v(Field::Pitch).map(|x| -x),
-            roll: v(Field::Roll).map(|x| -x),
-            heading: v(Field::HeadingMagnetic),
+            pitch: v(Field::Pitch),
+            roll: v(Field::Roll),
+            heading: v(Field::HeadingTrue),
             track: v(Field::Track),
             ground_speed: v(Field::GroundSpeed),
             true_airspeed: v(Field::Tas),
@@ -262,24 +307,25 @@ fn events(f: &FlightSummary) -> Value {
 /// go by (a [`FlightSink`]), so a flight still flying needs none of them kept.
 #[derive(Debug, Clone, Default)]
 pub struct FlightStats {
-    max: Vec<Option<f64>>,
+    /// Each field's canonical lowest and highest, in `KEYS` order.
+    range: Vec<Option<(f64, f64)>>,
     fuel: Fuel,
     /// The first sample at or after the takeoff roll's start, the landing's, and the last.
     takeoff: Option<Sample>,
     landing: Option<Sample>,
     last: Option<Sample>,
-    /// The flight's track, as [`track`] makes it.
+    /// The flight's track, as [`track`] makes it: canonical, for [`stored`].
     pub track: Vec<crate::track::DecodedPoint>,
 }
 
 impl FlightSink for FlightStats {
     fn sample(&mut self, s: &Sample, progress: Progress) {
-        if self.max.is_empty() {
-            self.max = vec![None; KEYS.len()];
+        if self.range.is_empty() {
+            self.range = vec![None; KEYS.len()];
         }
-        for ((_, field, convert), max) in KEYS.iter().zip(self.max.iter_mut()) {
-            if let Some(v) = s.get(*field).map(convert) {
-                *max = Some(max.map_or(v, |m| m.max(v)));
+        for ((_, field, _), range) in KEYS.iter().zip(self.range.iter_mut()) {
+            if let Some(v) = s.get(*field) {
+                *range = Some(range.map_or((v, v), |(lowest, highest)| (lowest.min(v), highest.max(v))));
             }
         }
         self.fuel.sample(s);
@@ -315,6 +361,7 @@ pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, 
     let a = &header.aircraft;
     let identity = butterlog_identity::Resolver::embedded().resolve(&a.title, &a.livery);
     let (sim, sim_version) = simulator(&header.sim);
+    let signs = Sim::of(header);
 
     let mut doc = json!({
         "airframe_name": a.title,
@@ -329,13 +376,13 @@ pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, 
         "end_time": app_time(f.last_ms),
         "departure": endpoint(&f.departure, places),
         "takeoff_time": f.takeoff_roll_ms.map_or(Value::Null, app_time),
-        "max_entries": maxima(&stats.max),
+        "max_entries": maxima(signs, &stats.range),
         "events": events(f),
     });
     let doc_mut = doc.as_object_mut().expect("an object");
     // The frame the takeoff time is: the feed and the aircraft stats measure distance from it.
     if let Some(at) = stats.takeoff.as_ref().filter(|_| f.takeoff_roll_ms.is_some()) {
-        doc_mut.insert("takeoff_snapshot".into(), Value::Object(snapshot(at)));
+        doc_mut.insert("takeoff_snapshot".into(), Value::Object(snapshot(signs, at)));
     }
     if let Some(burnt) = stats.fuel.consumed() {
         doc_mut.insert("fuel_consumed".into(), json!(burnt));
@@ -343,7 +390,7 @@ pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, 
     // Where it ended: the post of a flight that ends in the air says how far it was from
     // the airport nearest, as the app's last update did.
     if let Some(last) = &stats.last {
-        doc_mut.insert("current_snapshot".into(), Value::Object(snapshot(last)));
+        doc_mut.insert("current_snapshot".into(), Value::Object(snapshot(signs, last)));
         if f.landing.is_none() {
             if let Some(closest) = closest_airport(last, places) {
                 doc_mut.insert("closest_airport".into(), closest);
@@ -351,7 +398,7 @@ pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, 
         }
     }
     if let Some(l) = &f.landing {
-        let mut landing = stats.landing.as_ref().map(snapshot).unwrap_or_default();
+        let mut landing = stats.landing.as_ref().map(|s| snapshot(signs, s)).unwrap_or_default();
         // The touchdown as the frames show it, rather than the sample after.
         landing.insert("VSpd".into(), json!(l.touchdown_fpm));
         landing.insert("NormAc".into(), json!(l.g));
@@ -471,9 +518,9 @@ mod tests {
         let l = f.landing.as_ref().unwrap();
         assert_eq!(landing["VSpd"], json!(l.touchdown_fpm));
         assert_eq!(landing["NormAc"], json!(l.g));
-        // The app's sign: positive nose down.
+        // X-Plane's sign, which is the canonical one: positive nose up.
         let at = samples.iter().find(|s| s.wall_time_ms >= l.wall_time_ms).unwrap();
-        assert_eq!(landing["Pitch"], json!(-at.get(Field::Pitch).unwrap()));
+        assert_eq!(landing["Pitch"], json!(at.get(Field::Pitch).unwrap()));
         assert_eq!(s["landing_score"], json!(l.score()));
 
         // The takeoff frame is the takeoff time's, on the runway at KAST.
@@ -483,6 +530,31 @@ mod tests {
         assert!(takeoff["IAS"].as_f64().unwrap() >= 45.0, "{}", takeoff["IAS"]);
         let burnt = s["fuel_consumed"].as_f64().unwrap();
         assert!(burnt > 0.0, "{burnt}");
+    }
+
+    /// Each sim's values are stored in its own signs: MSFS's attitude flipped, X-Plane's
+    /// variation flipped, the rest as they are.
+    #[test]
+    fn each_sim_is_stored_in_its_own_signs() {
+        let mut s = Sample::empty();
+        s.set(Field::Pitch, 5.0);
+        s.set(Field::Roll, 20.0);
+        s.set(Field::MagneticVariation, 15.0);
+        s.set(Field::HeadingTrue, 350.0);
+        let msfs = snapshot(Sim::Msfs, &s);
+        assert_eq!((msfs["Pitch"].clone(), msfs["Roll"].clone(), msfs["MagVar"].clone()), (json!(-5.0), json!(-20.0), json!(15.0)));
+        let xplane = snapshot(Sim::XPlane, &s);
+        assert_eq!((xplane["Pitch"].clone(), xplane["Roll"].clone(), xplane["MagVar"].clone()), (json!(5.0), json!(20.0), json!(-15.0)));
+        assert_eq!((msfs["HDG"].clone(), xplane["HDG"].clone()), (json!(350.0), json!(350.0)));
+
+        let mut p = points(std::iter::once(&{
+            let mut s = s.clone();
+            s.set(Field::Latitude, 1.0);
+            s.set(Field::Longitude, 2.0);
+            s
+        }));
+        p = stored(Sim::Msfs, p);
+        assert_eq!((p[0].pitch, p[0].roll, p[0].magvar), (Some(-5.0), Some(-20.0), Some(15.0)));
     }
 
     #[test]
