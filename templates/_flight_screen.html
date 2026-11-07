@@ -66,10 +66,6 @@
 
             <div class="fv-tabsrow">
                 <span class="fv-spacer"></span>
-                <div class="fv-seg" role="group" aria-label="Camera" id="fv-cam">
-                    <button type="button" class="is-on" data-cam="cockpit" aria-pressed="true">Cockpit</button>
-                    <button type="button" data-cam="chase" aria-pressed="false">Chase</button>
-                </div>
                 <button type="button" class="fv-btn fv-btn-sm" id="fv-channels" aria-expanded="false" aria-controls="fv-picker" hidden>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Channels</button>
 
@@ -89,7 +85,10 @@
                 <div class="fv-pfd"><div id="pfd-mount" class="pfd is-hidden"></div></div>
                 <div class="fv-3d">
                     <div id="cockpit"><canvas id="cockpit-canvas"></canvas></div>
-                    <span class="fv-float fv-3d-label" id="fv-cam-label">3D · Cockpit</span>
+                    <div class="fv-seg fv-float fv-3d-cam" role="group" aria-label="Camera" id="fv-cam">
+                        <button type="button" class="is-on" data-cam="cockpit" aria-pressed="true">Cockpit</button>
+                        <button type="button" data-cam="chase" aria-pressed="false">Chase</button>
+                    </div>
                     <button type="button" class="fv-float fv-icon fv-3d-full" id="fv-3d-full" aria-label="Show the 3D view full screen" title="Full screen">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
                     </button>

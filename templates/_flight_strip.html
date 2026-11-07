@@ -498,7 +498,6 @@ window.initFlightStrip = function (H, opts) {
         });
         $('panel-instruments').hidden = !(vis.pfd || vis.d3);
         $('panel-graphs').hidden = !vis.lanes;
-        $('fv-cam').hidden = !vis.d3;
         chanBtn.hidden = !vis.lanes;
         if (chanBtn.hidden) openPicker(false);
         if (vis.pfd || vis.d3) H.onPaneShown('replay');
@@ -523,7 +522,6 @@ window.initFlightStrip = function (H, opts) {
     const camBtns = Array.from(document.querySelectorAll('[data-cam]'));
     function setCam(m) {
         camBtns.forEach(b => { const on = b.dataset.cam === m; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on); });
-        $('fv-cam-label').textContent = m === 'chase' ? '3D · Chase' : '3D · Cockpit';
         H.setCockpitMode(m);
         store.set('cam', m);
     }

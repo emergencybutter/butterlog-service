@@ -124,7 +124,8 @@
     .fv-pfd .pfd { margin: 0; padding: 0; border: 0; border-radius: 0; width: 100%; background: transparent; }
     .fv-3d { position: relative; flex: 1 1 auto; min-width: 0; border-radius: var(--radius-sm); overflow: hidden; }
     .fv-3d #cockpit { position: absolute; inset: 0; height: auto; margin: 0; border: 0; border-radius: 0; }
-    .fv-3d-label { position: absolute; left: 10px; top: 10px; padding: 4px 9px; font-size: 0.82rem; font-weight: 600; color: var(--text); }
+    /* The camera switch sits on the view it controls. */
+    .fv-3d-cam { position: absolute; left: 10px; top: 10px; z-index: 1; }
     .fv-3d-full { position: absolute; right: 10px; top: 10px; width: 34px; height: 34px; }
     .fv-3d:fullscreen { border-radius: 0; }
     .fv-readouts { flex: none; width: 200px; margin: 0; display: flex; flex-direction: column; justify-content: center; }
@@ -228,14 +229,12 @@
         .fv-strip > .fv-grid { order: 3; }
         .fv-tabsrow { order: 4; border-bottom: 0; justify-content: flex-end; }
         /* The altitude profile only shows on its own tab; the other tabs get
-           its height (the profile is var(--mh) + 36px), less the row the 3D
-           and graph tabs spend on their control, so every tab fills the same area. */
+           its height (the profile is var(--mh) + 36px), less the row the graph
+           tab spends on its Channels button, so every tab fills the same area. */
         .fv-strip > .fv-panel { order: 5; height: calc(var(--mh) + 36px); }
-        .fv-strip[data-mtab="3d"] > .fv-panel,
         .fv-strip[data-mtab="graphs"] > .fv-panel { height: calc(var(--mh) - 6px); }
         .fv-tabsrow { min-height: 34px; }
-        .fv-strip[data-mtab="altitude"] .fv-tabsrow,
-        .fv-strip[data-mtab="horizon"] .fv-tabsrow { display: none; }
+        .fv-strip:not([data-mtab="graphs"]) .fv-tabsrow { display: none; }
 
         /* Altitude: the profile is the panel. */
         .fv-strip > .fv-grid { grid-template-columns: 56px minmax(0, 1fr); column-gap: 8px; }
