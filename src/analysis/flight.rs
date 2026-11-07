@@ -163,8 +163,19 @@ const ENDPOINT_WINDOW_MS: i64 = 300_000;
 /// Endpoint positions are taken at the app's rate, so a fast stretch doesn't outvote a
 /// slow one.
 const ENDPOINT_SPACING_MS: i64 = 1_000;
-/// How long a climb or descent must level off or start before it counts.
+/// How long a climb must level off before it counts.
 const STABLE_MS: i64 = 10_000;
+/// A descent is a descent once the aircraft has dropped this far below where it started,
+/// so a bump, a dip or a small correction at cruise is no top of descent. Lower down, half
+/// its height above the field it last left, so a circuit still has one, but no less than
+/// [`DESCENT_CONFIRM_MIN_FT`].
+const DESCENT_CONFIRM_FT: f64 = 1_000.0;
+const DESCENT_CONFIRM_MIN_FT: f64 = 300.0;
+/// Vertical speed at which a descent may be starting.
+const DESCENT_START_FPM: f64 = -400.0;
+/// After a top of descent, how far the aircraft must climb back above its lowest point
+/// before another descent gets one: a go-around does, a step-down on the approach doesn't.
+const DESCENT_REARM_FT: f64 = 1_000.0;
 /// Indicated airspeed on the ground at which taxiing becomes the takeoff roll.
 pub const TAKEOFF_IAS_KT: f64 = 45.0;
 /// How long after touchdown the landing's peak G is taken over.
@@ -238,6 +249,17 @@ const KEEP_RECENT_MS: i64 = 65_000;
 /// taken over, and the average that reaches past it.
 const KEEP_AFTER_TOUCHDOWN_MS: i64 = TOUCHDOWN_G_MS + G_AVERAGE_MS;
 
+/// Where a descent that hasn't yet dropped [`DESCENT_CONFIRM_FT`] started.
+#[derive(Clone, Copy)]
+struct PendingDescent {
+    t: i64,
+    lat: f64,
+    lon: f64,
+    alt: f64,
+    /// Since when it has been level, if it is.
+    level_since: Option<i64>,
+}
+
 #[derive(Clone)]
 struct Analyser {
     phase: Phase,
@@ -265,7 +287,12 @@ struct Analyser {
     takeoff_ms: Option<i64>,
     takeoff_roll_ms: Option<i64>,
     pending_toc: Option<(i64, f64, f64)>,
-    pending_tod: Option<(i64, f64, f64)>,
+    pending_tod: Option<PendingDescent>,
+    /// The lowest altitude since the latest top of descent, until the aircraft has
+    /// climbed [`DESCENT_REARM_FT`] above it; `None` while a descent would get one.
+    tod_low: Option<f64>,
+    /// The altitude the aircraft was last on the ground at.
+    ground_alt: Option<f64>,
     landing: Option<Landing>,
     /// The latest touchdown, a touch-and-go's included.
     last_touchdown_ms: Option<i64>,
@@ -297,6 +324,8 @@ impl Analyser {
             takeoff_roll_ms: None,
             pending_toc: None,
             pending_tod: None,
+            tod_low: None,
+            ground_alt: None,
             landing: None,
             last_touchdown_ms: None,
             stopped: false,
@@ -326,6 +355,49 @@ impl Analyser {
         while self.end_coords.front().is_some_and(|f| p.t - f.0 > ENDPOINT_WINDOW_MS) {
             self.end_coords.pop_front();
         }
+    }
+
+    /// Follows a possible descent; returns where it started once it has dropped far enough
+    /// (see [`DESCENT_CONFIRM_FT`]). Climbing back, or levelling off for [`STABLE_MS`], drops it.
+    fn track_descent(&mut self, p: &Point) -> Option<PendingDescent> {
+        let Some(mut d) = self.pending_tod else {
+            if p.vs < DESCENT_START_FPM {
+                self.pending_tod =
+                    Some(PendingDescent { t: p.t, lat: p.lat, lon: p.lon, alt: p.alt_msl, level_since: None });
+            }
+            return None;
+        };
+        if p.alt_msl > d.alt + 100.0 || p.vs > 300.0 {
+            self.pending_tod = None;
+            return None;
+        }
+        if p.vs.abs() < 200.0 {
+            let since = *d.level_since.get_or_insert(p.t);
+            if p.t - since >= STABLE_MS {
+                self.pending_tod = None;
+                return None;
+            }
+        } else {
+            d.level_since = None;
+        }
+        let needed = self.ground_alt.map_or(DESCENT_CONFIRM_FT, |g| {
+            ((d.alt - g) / 2.0).clamp(DESCENT_CONFIRM_MIN_FT, DESCENT_CONFIRM_FT)
+        });
+        if d.alt - p.alt_msl >= needed {
+            self.pending_tod = None;
+            return Some(d);
+        }
+        self.pending_tod = Some(d);
+        None
+    }
+
+    /// Records a confirmed descent's top, unless it continues one already recorded.
+    fn top_of_descent(&mut self, d: PendingDescent, p: &Point) {
+        self.phase = Phase::Descent;
+        if self.tod_low.is_none() {
+            self.event(EventKind::TopOfDescent, d.t, d.lat, d.lon, None);
+        }
+        self.tod_low = Some(self.tod_low.unwrap_or(p.alt_msl).min(p.alt_msl));
     }
 
     fn touchdown(&mut self, p: &Point) {
@@ -382,6 +454,12 @@ impl Analyser {
         }
 
         let ground = p.on_ground;
+        if ground {
+            self.ground_alt = Some(p.alt_msl);
+        }
+        if let Some(low) = self.tod_low {
+            self.tod_low = (p.alt_msl < low + DESCENT_REARM_FT).then_some(low.min(p.alt_msl));
+        }
         match self.phase {
             Phase::Parked => {
                 if ground && p.gs > 2.0 {
@@ -412,6 +490,11 @@ impl Analyser {
             Phase::Climb => {
                 if ground {
                     self.touchdown(&p);
+                } else if let Some(d) = self.track_descent(&p) {
+                    // Straight from the climb into a descent: both tops are where it turned.
+                    self.event(EventKind::TopOfClimb, d.t, d.lat, d.lon, None);
+                    self.top_of_descent(d, &p);
+                    self.pending_toc = None;
                 } else if p.vs.abs() < 200.0 && p.ias > 60.0 {
                     match self.pending_toc {
                         Some((t, lat, lon)) if p.t - t >= STABLE_MS => {
@@ -422,11 +505,6 @@ impl Analyser {
                         Some(_) => {}
                         None => self.pending_toc = Some((p.t, p.lat, p.lon)),
                     }
-                } else if p.vs < -400.0 {
-                    self.phase = Phase::Descent;
-                    self.event(EventKind::TopOfClimb, p.t, p.lat, p.lon, None);
-                    self.event(EventKind::TopOfDescent, p.t, p.lat, p.lon, None);
-                    self.pending_toc = None;
                 } else {
                     self.pending_toc = None;
                 }
@@ -434,20 +512,10 @@ impl Analyser {
             Phase::Cruise => {
                 if ground {
                     self.touchdown(&p);
-                } else if p.vs < -500.0 {
-                    match self.pending_tod {
-                        Some((t, lat, lon)) if p.t - t >= STABLE_MS => {
-                            self.phase = Phase::Descent;
-                            self.event(EventKind::TopOfDescent, t, lat, lon, None);
-                            self.pending_tod = None;
-                        }
-                        Some(_) => {}
-                        None => self.pending_tod = Some((p.t, p.lat, p.lon)),
-                    }
+                } else if let Some(d) = self.track_descent(&p) {
+                    self.top_of_descent(d, &p);
                 } else if p.vs > 500.0 {
                     self.phase = Phase::Climb;
-                    self.pending_tod = None;
-                } else {
                     self.pending_tod = None;
                 }
             }
@@ -1107,7 +1175,7 @@ mod tests {
         assert_eq!(a.phase, Phase::Climb);
 
         // Level for 10 s: top of climb, dated when it levelled.
-        (p.vs, p.ias) = (50.0, 100.0);
+        (p.vs, p.ias, p.alt_msl) = (50.0, 100.0, 5000.0);
         a.update(Point { t: 4_000, ..p });
         a.update(Point { t: 13_999, ..p });
         assert_eq!(a.phase, Phase::Climb);
@@ -1116,20 +1184,93 @@ mod tests {
 
         p.vs = -600.0;
         a.update(Point { t: 15_000, ..p });
-        a.update(Point { t: 25_000, ..p });
+        a.update(Point { t: 25_000, alt_msl: 4100.0, ..p });
+        assert_eq!(a.phase, Phase::Cruise);
+        a.update(Point { t: 26_000, alt_msl: 4000.0, ..p });
         assert_eq!(a.phase, Phase::Descent);
         (p.alt_msl, p.vs) = (2500.0, -300.0);
-        a.update(Point { t: 26_000, ..p });
+        a.update(Point { t: 27_000, ..p });
         assert_eq!(a.phase, Phase::Approach);
         p.on_ground = true;
-        a.update(Point { t: 27_000, ..p });
+        a.update(Point { t: 28_000, ..p });
         assert_eq!(a.phase, Phase::Landing);
         assert_eq!(a.landing.as_ref().unwrap().touchdown_fpm, -300.0);
         p.gs = 10.0;
-        a.update(Point { t: 28_000, ..p });
+        a.update(Point { t: 29_000, ..p });
         assert_eq!(a.phase, Phase::TaxiIn);
         assert_eq!(kinds(&a), [Takeoff, TopOfClimb, TopOfDescent, Landing]);
         assert_eq!(a.events[1].wall_time_ms, 4_000);
+        // Dated where the descent started, not where it was confirmed.
+        assert_eq!(a.events[2].wall_time_ms, 15_000);
+    }
+
+    /// Airborne at `alt` feet and `vs` fpm, `secs` into the flight.
+    fn flying(secs: f64, alt: f64, vs: f64) -> Point {
+        Point { on_ground: false, alt_msl: alt, vs, ias: 120.0, gs: 120.0, ..point(secs) }
+    }
+
+    fn tops_of_descent(a: &Analyser) -> Vec<i64> {
+        a.events.iter().filter(|e| e.kind == EventKind::TopOfDescent).map(|e| e.wall_time_ms).collect()
+    }
+
+    #[test]
+    fn a_dip_at_cruise_is_no_top_of_descent() {
+        let mut a = Analyser::new();
+        a.phase = Phase::Cruise;
+        a.update(flying(0.0, 8000.0, 0.0));
+        // Down 600 ft at 800 fpm for 45 s, then back up: never 1000 ft below.
+        for i in 1..=45 {
+            a.update(flying(i as f64, 8000.0 - 13.0 * i as f64, -800.0));
+        }
+        a.update(flying(46.0, 7500.0, 600.0));
+        a.update(flying(60.0, 8000.0, 0.0));
+        assert!(tops_of_descent(&a).is_empty());
+        // Down 600 ft and levelled there for good: dropped, and the real descent later
+        // is dated from where it left that level.
+        for i in 61..=100 {
+            a.update(flying(i as f64, 7400.0, if i < 64 { -800.0 } else { 0.0 }));
+        }
+        a.update(flying(120.0, 7400.0, -1000.0));
+        a.update(flying(170.0, 6300.0, -1000.0));
+        assert_eq!(tops_of_descent(&a), [120_000]);
+    }
+
+    #[test]
+    fn a_dip_in_the_climb_is_no_top_of_descent() {
+        use EventKind::*;
+        let mut a = Analyser::new();
+        a.phase = Phase::Climb;
+        a.update(flying(0.0, 4000.0, 1500.0));
+        a.update(flying(1.0, 4000.0, -600.0));
+        a.update(flying(2.0, 3950.0, -500.0));
+        a.update(flying(3.0, 4000.0, 1500.0));
+        a.update(flying(60.0, 9000.0, 0.0));
+        a.update(flying(70.0, 9000.0, 0.0));
+        assert_eq!(kinds(&a), [TopOfClimb]);
+        assert_eq!(a.events[0].wall_time_ms, 60_000);
+    }
+
+    #[test]
+    fn step_downs_keep_one_top_of_descent_and_a_go_around_gets_another() {
+        let mut a = Analyser::new();
+        a.phase = Phase::Cruise;
+        a.update(flying(0.0, 9000.0, 0.0));
+        a.update(flying(10.0, 9000.0, -1000.0));
+        a.update(flying(80.0, 7800.0, -1000.0));
+        // Level at 6000 for a while, then down again: the same descent.
+        a.update(flying(200.0, 6000.0, 0.0));
+        a.update(flying(260.0, 6000.0, 0.0));
+        a.update(flying(270.0, 6000.0, -800.0));
+        a.update(flying(370.0, 4500.0, -800.0));
+        assert_eq!(tops_of_descent(&a), [10_000]);
+        // A go-around from 3500 back up to 6000, level, and down again.
+        a.update(flying(400.0, 3500.0, -600.0));
+        a.update(flying(410.0, 3600.0, 1500.0));
+        a.update(flying(500.0, 6000.0, 0.0));
+        a.update(flying(510.0, 6000.0, 0.0));
+        a.update(flying(520.0, 6000.0, -900.0));
+        a.update(flying(600.0, 4800.0, -900.0));
+        assert_eq!(tops_of_descent(&a), [10_000, 520_000]);
     }
 
     #[test]
