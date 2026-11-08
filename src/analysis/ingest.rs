@@ -376,6 +376,10 @@ async fn analyse_session(db: &PgPool, segments: &impl SegmentStore, id: Uuid, us
 /// the first time; with none, the flight is created, with its track. Either way its
 /// Discord post is due a sync. A flight not `over` yet, still flying in an open session,
 /// is the service's own active flight, its track added to as it goes. Returns the flight.
+///
+/// A flight patched by hand, its statistics marked `patched`, is left as it is: it holds
+/// what the session doesn't (575, whose telemetry a full disk stopped, took the rest of
+/// its track and its landing from the app's local log).
 async fn take_over(
     tx: &mut sqlx::PgConnection,
     user_id: i64,
@@ -391,6 +395,16 @@ async fn take_over(
         (true, true) => ("ended", Some(timestamp(f.last_ms)), Some("landed")),
         (true, false) => ("ended", Some(timestamp(f.last_ms)), Some("sim_closed")),
     };
+    if let Some(id) = linked {
+        let patched: bool = sqlx::query_scalar("SELECT statistics ? 'patched' FROM flights WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(false);
+        if patched {
+            return Ok(id);
+        }
+    }
     let (id, service_made): (i64, bool) = match linked {
         // How the app's flight ended is the app's; the service's own ends with its
         // analysis, which a later session continuing it can extend to a landing.
@@ -1563,6 +1577,31 @@ mod tests {
         let again = flights_of(user).await.unwrap();
         assert_eq!(again.len(), 1);
         assert_eq!((again[0].0, again[0].7, again[0].9), (id, true, points));
+
+        // Patched by hand: analysed again, left as it is, its added points kept.
+        sqlx::query(
+            "UPDATE flights SET statistics = statistics || '{\"patched\": {}, \"arrival\": {\"icao\": \"KPDX\"}}',                     discord_sync_due = FALSE WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO flight_track_points (flight_id, sample_epoch, latitude, longitude) VALUES ($1, 4000000000, 45.6, -122.6)")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        analyse_session(&db, &segments, session, user).await.unwrap();
+        let patched = flights_of(user).await.unwrap();
+        assert_eq!(patched.len(), 1);
+        assert_eq!(patched[0].3["arrival"]["icao"], json!("KPDX"));
+        assert!(!patched[0].7, "no post due");
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flight_track_points WHERE flight_id = $1 AND sample_epoch = 4000000000")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1);
 
         // The app's flight: the service's document, the app's kept, the app's track.
         let (user, session, app) = fly(true).await;
