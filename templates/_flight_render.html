@@ -188,37 +188,60 @@ function renderFlightDoc(d) {
     /// What an instructor would say about each landing's approach: its figures, what to
     /// work on (cautions first) and what went well. The text is the service's; a later
     /// rewording can replace it, the numbers stay.
-    const LEG_NAME = { downwind: 'Downwind', base: 'Base', final: 'Final', touchdown: 'Touchdown' };
+    const LEG_NAME = { downwind: 'Downwind', base: 'Base', final: 'Final', touchdown: 'Touchdown',
+                       roll: 'Roll', rotation: 'Rotation', climb: 'Climb' };
+    /// A debrief's title, subtitle and key figures: a takeoff's or an approach's.
+    function debriefHead(db, all) {
+        const n = v => typeof v === 'number';
+        const at = all.length > 2 && db.at ? String(db.at).slice(11, 16) : '';
+        const windOf = leg => n(leg.headwindKt) && n(leg.crosswindKt)
+            ? `${Math.abs(leg.headwindKt)} ${leg.headwindKt >= 0 ? 'head' : 'tail'} · ${Math.abs(leg.crosswindKt)} ${leg.crosswindKt >= 0 ? 'R' : 'L'}` : null;
+        if (db.phase === 'takeoff') {
+            const roll = (db.legs || {}).roll || {}, rot = (db.legs || {}).rotation || {}, climb = (db.legs || {}).climb || {};
+            const sub = [roll.rolling ? 'Rolling takeoff' : 'From a standstill',
+                n(roll.usedFt) && db.runwayMatches ? `${Math.round(roll.usedFt).toLocaleString('en-US')} ft of runway` : '',
+                n(climb.levelledOffFt) ? `levelled at ${Math.round(climb.levelledOffFt)} ft` : '',
+                at ? `takeoff ${at}` : ''].filter(Boolean).join(' · ');
+            return { title: 'Takeoff debrief', sub, none: 'Nothing to work on in this takeoff.', figs: [
+                ['Rotated at', n(rot.rotateKt) ? `${Math.round(rot.rotateKt)} kt` : null],
+                ['Lifted off at', n(rot.liftoffKt) ? `${Math.round(rot.liftoffKt)} kt` : null],
+                ['Pitch rate', n(rot.pitchRateDps) ? `${rot.pitchRateDps.toFixed(1)}°/s` : null],
+                ['Climb', n(climb.climbFpm) ? `${Math.round(climb.climbFpm)} fpm` : null],
+                ['Straight within', n(roll.weaveFt) ? `${Math.round(roll.weaveFt)} ft` : null],
+                ['Wind on the roll (kt)', windOf(roll)],
+            ] };
+        }
+        const fin = (db.legs || {}).final || {};
+        const td = (db.legs || {}).touchdown || {};
+        const kind = db.approach === 'circuit' ? `${db.circuit === 'right' ? 'Right' : 'Left'} circuit`
+            : db.approach === 'base entry' ? `Joined on ${db.circuit === 'right' ? 'right' : 'left'} base` : 'Straight-in';
+        const sub = [kind, n(fin.lengthNm) ? `${fin.lengthNm.toFixed(1)} NM final` : '',
+            n(fin.startHeightFt) ? `from ${Math.round(fin.startHeightFt)} ft` : '',
+            at ? `landing ${at}` : ''].filter(Boolean).join(' · ');
+        return { title: 'Approach debrief', sub, none: 'Nothing to work on in this approach.', figs: [
+            ['Stabilised from', n(fin.stabilisedFromFt) ? `${Math.round(fin.stabilisedFromFt)} ft` : 'Not stable'],
+            ['Path angle', n(fin.pathAngleDeg) ? `${fin.pathAngleDeg.toFixed(1)}°` : null],
+            ['Final speed', n(fin.finalSpeedKt) ? `${Math.round(fin.finalSpeedKt)} kt` : null],
+            ['Max sink', n(fin.maxSinkFpm) ? `${Math.abs(Math.round(fin.maxSinkFpm))} fpm` : null],
+            ['Wind on final (kt)', windOf(fin)],
+            ['Touchdown crab', n(td.crabDeg) ? `${Math.abs(td.crabDeg).toFixed(0)}°` : null],
+        ] };
+    }
     function debriefHtml() {
         const all = state.debriefs || [];
         return all.map(db => {
-            const fin = (db.legs || {}).final || {};
-            const td = (db.legs || {}).touchdown || {};
-            const n = v => typeof v === 'number';
-            const kind = db.approach === 'circuit' ? `${db.circuit === 'right' ? 'Right' : 'Left'} circuit`
-                : db.approach === 'base entry' ? `Joined on ${db.circuit === 'right' ? 'right' : 'left'} base` : 'Straight-in';
-            const sub = [kind, n(fin.lengthNm) ? `${fin.lengthNm.toFixed(1)} NM final` : '',
-                n(fin.startHeightFt) ? `from ${Math.round(fin.startHeightFt)} ft` : '',
-                all.length > 1 && db.landing ? `landing ${String(db.landing).slice(11, 16)}` : ''].filter(Boolean).join(' · ');
-            const wind = n(fin.headwindKt) && n(fin.crosswindKt)
-                ? `${Math.abs(fin.headwindKt)} ${fin.headwindKt >= 0 ? 'head' : 'tail'} · ${Math.abs(fin.crosswindKt)} ${fin.crosswindKt >= 0 ? 'R' : 'L'}` : null;
-            const figs = [
-                ['Stabilised from', n(fin.stabilisedFromFt) ? `${Math.round(fin.stabilisedFromFt)} ft` : 'Not stable'],
-                ['Path angle', n(fin.pathAngleDeg) ? `${fin.pathAngleDeg.toFixed(1)}°` : null],
-                ['Final speed', n(fin.finalSpeedKt) ? `${Math.round(fin.finalSpeedKt)} kt` : null],
-                ['Max sink', n(fin.maxSinkFpm) ? `${Math.abs(Math.round(fin.maxSinkFpm))} fpm` : null],
-                ['Wind on final (kt)', wind],
-                ['Touchdown crab', n(td.crabDeg) ? `${Math.abs(td.crabDeg).toFixed(0)}°` : null],
-            ].filter(f => f[1] != null);
+            const head = debriefHead(db, all);
+            const sub = head.sub;
+            const figs = head.figs.filter(f => f[1] != null);
             const item = f => `<li class="db-f db-${esc(f.severity)}"><span class="db-leg">${esc(LEG_NAME[f.leg] || f.leg)}</span><span>${esc(f.text)}</span></li>`;
             const work = (db.findings || []).filter(f => f.severity !== 'good');
             const good = (db.findings || []).filter(f => f.severity === 'good');
             return `<div class="landing-card debrief">
-                <div class="section-title">Approach debrief</div>
+                <div class="section-title">${esc(head.title)}</div>
                 <div class="db-sub">${esc(sub)}</div>
                 <div class="landing-grid db-figs">${figs.map(f => `<div><div class="li-label">${esc(f[0])}</div><div class="li-val">${esc(f[1])}</div></div>`).join('')}</div>
                 <div class="db-h">To work on</div>
-                ${work.length ? `<ul class="db-list">${work.map(item).join('')}</ul>` : '<div class="db-none">Nothing to work on in this approach.</div>'}
+                ${work.length ? `<ul class="db-list">${work.map(item).join('')}</ul>` : `<div class="db-none">${esc(head.none)}</div>`}
                 ${good.length ? `<div class="db-h">Done well</div><ul class="db-list">${good.map(item).join('')}</ul>` : ''}
             </div>`;
         }).join('');

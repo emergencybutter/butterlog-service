@@ -7,6 +7,7 @@ pub mod debrief;
 pub mod flight;
 pub mod ingest;
 pub mod pattern;
+pub mod takeoff;
 pub mod places;
 pub mod resume;
 pub mod statistics;
@@ -39,13 +40,11 @@ mod parity {
         flights.into_iter().next().unwrap()
     }
 
-    /// The circuit legs into the fixture's landing, from its samples one a second as the
-    /// track is stored, and each leg's start.
-    fn circuit(fixture: &str) -> Vec<(pattern::LegKind, String, Option<pattern::Side>)> {
+    /// The fixture's samples one a second, as the track is stored.
+    fn track_points(fixture: &str) -> Vec<pattern::Pt> {
         use crate::normalise::Field;
         let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
         let (_, samples) = normalise_segment(&std::fs::read(path).unwrap()).unwrap();
-        let f = summary(fixture);
         let mut pts: Vec<pattern::Pt> = Vec::new();
         for s in &samples {
             let t = s.wall_time_ms / 1000;
@@ -62,12 +61,20 @@ mod parity {
                 ias: s.get(Field::Ias),
                 vs: s.get(Field::VerticalSpeed),
                 roll: s.get(Field::Roll),
+                pitch: s.get(Field::Pitch),
                 hdg: s.get(Field::HeadingTrue),
                 trk: s.get(Field::Track),
                 wind_kt: s.get(Field::WindSpeed),
                 wind_from: s.get(Field::WindDirection),
             });
         }
+        pts
+    }
+
+    /// The circuit legs into the fixture's landing, and each leg's start.
+    fn circuit(fixture: &str) -> Vec<(pattern::LegKind, String, Option<pattern::Side>)> {
+        let pts = track_points(fixture);
+        let f = summary(fixture);
         let landing = f.landing.as_ref().unwrap();
         let touchdown = pts.partition_point(|p| p.t < landing.wall_time_ms / 1000);
         let Endpoint::Airport(arrival) = &f.arrival else { panic!("no arrival") };
@@ -98,6 +105,29 @@ mod parity {
             at(&circuit("msfs_pattern.blsg.zst")),
             [(Downwind, "01:59:18".into(), Some(Left)), (Base, "02:00:29".into(), Some(Left)), (Final, "02:01:25".into(), None)]
         );
+    }
+
+    /// Both fixtures take off from KAST in a light aircraft: the takeoff is found on the
+    /// runway, with its rotation, and climbs away.
+    #[test]
+    fn the_takeoffs_are_debriefed() {
+        for fixture in ["xplane_pattern.blsg.zst", "msfs_pattern.blsg.zst"] {
+            let pts = track_points(fixture);
+            let f = summary(fixture);
+            let at = chrono::DateTime::from_timestamp_millis(f.takeoff_ms.unwrap()).unwrap();
+            let ev = serde_json::json!({ "eventType": "takeoff", "timestamp": at.format("%Y-%m-%d %H:%M:%S%.3f").to_string() });
+            let d = takeoff::takeoffs(&[ev], &pts, places().runways("KAST"));
+            assert_eq!(d.len(), 1, "{fixture}");
+            let d = &d[0];
+            eprintln!("{fixture}: {d:#}");
+            assert_eq!(d["runwayKnown"], true, "{fixture}: {d:#}");
+            assert_eq!(d["aircraftClass"], "light", "{fixture}: {d:#}");
+            // KAST's published 32 is drawn about 8° off the sims' runway: no runway figures.
+            assert_eq!(d["runwayMatches"], false, "{fixture}: {d:#}");
+            assert!(d["findings"].as_array().unwrap().iter().all(|f| f["code"] != "runway_left"), "{fixture}: {d:#}");
+            assert!(d["legs"]["rotation"]["rotateKt"].as_f64().is_some(), "{fixture}: {d:#}");
+            assert!(d["legs"]["climb"]["climbFpm"].as_f64().is_some_and(|v| v > 200.0), "{fixture}: {d:#}");
+        }
     }
 
     fn ms(hms: &str) -> i64 {

@@ -91,14 +91,14 @@ impl Norms {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Stats {
-    mean: f64,
-    sd: f64,
-    min: f64,
-    max: f64,
+pub(crate) struct Stats {
+    pub(crate) mean: f64,
+    pub(crate) sd: f64,
+    pub(crate) min: f64,
+    pub(crate) max: f64,
 }
 
-fn stats(values: impl Iterator<Item = f64>) -> Option<Stats> {
+pub(crate) fn stats(values: impl Iterator<Item = f64>) -> Option<Stats> {
     let v: Vec<f64> = values.filter(|x| x.is_finite()).collect();
     if v.is_empty() {
         return None;
@@ -110,20 +110,20 @@ fn stats(values: impl Iterator<Item = f64>) -> Option<Stats> {
     Some(Stats { mean, sd, min, max })
 }
 
-fn r0(x: f64) -> f64 {
+pub(crate) fn r0(x: f64) -> f64 {
     x.round()
 }
 
-fn r1(x: f64) -> f64 {
+pub(crate) fn r1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
-fn stats_json(s: Option<Stats>) -> Value {
+pub(crate) fn stats_json(s: Option<Stats>) -> Value {
     s.map_or(Value::Null, |s| json!({ "mean": r1(s.mean), "sd": r1(s.sd), "min": r1(s.min), "max": r1(s.max) }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Severity {
+pub(crate) enum Severity {
     Caution,
     Improve,
     Good,
@@ -139,16 +139,25 @@ impl Severity {
     }
 }
 
-struct Finding {
-    leg: &'static str,
-    code: &'static str,
-    severity: Severity,
-    text: String,
-    values: Value,
+pub(crate) struct Finding {
+    pub(crate) leg: &'static str,
+    pub(crate) code: &'static str,
+    pub(crate) severity: Severity,
+    pub(crate) text: String,
+    pub(crate) values: Value,
+}
+
+/// Findings as the page reads them, cautions first.
+pub(crate) fn findings_json(mut findings: Vec<Finding>) -> Vec<Value> {
+    findings.sort_by_key(|f| f.severity);
+    findings
+        .into_iter()
+        .map(|f| json!({ "leg": f.leg, "code": f.code, "severity": f.severity.name(), "text": f.text, "values": f.values }))
+        .collect()
 }
 
 /// The wind's components on a course: headwind and crosswind from the right, knots.
-fn components(pts: &[Pt], range: std::ops::RangeInclusive<usize>, course: f64) -> Option<(f64, f64)> {
+pub(crate) fn components(pts: &[Pt], range: std::ops::RangeInclusive<usize>, course: f64) -> Option<(f64, f64)> {
     let (mut head, mut cross, mut n) = (0.0, 0.0, 0.0);
     for p in &pts[range] {
         if let (Some(kt), Some(from)) = (p.wind_kt, p.wind_from) {
@@ -163,14 +172,14 @@ fn components(pts: &[Pt], range: std::ops::RangeInclusive<usize>, course: f64) -
 
 /// The mean of `value` over [`SMOOTH_S`] either side of point `i`: a gust or one noisy
 /// sample is not a sink rate or a speed an instructor would call.
-fn smooth(pts: &[Pt], i: usize, value: impl Fn(&Pt) -> Option<f64>) -> Option<f64> {
+pub(crate) fn smooth(pts: &[Pt], i: usize, value: impl Fn(&Pt) -> Option<f64>) -> Option<f64> {
     let t = pts[i].t;
     let from = pts[..i].iter().rposition(|p| p.t < t - SMOOTH_S).map_or(0, |j| j + 1);
     let to = pts[i..].iter().position(|p| p.t > t + SMOOTH_S).map_or(pts.len(), |j| i + j);
     stats(pts[from..to].iter().filter_map(value)).map(|s| s.mean)
 }
 
-fn max_bank(pts: &[Pt], range: std::ops::RangeInclusive<usize>) -> Option<f64> {
+pub(crate) fn max_bank(pts: &[Pt], range: std::ops::RangeInclusive<usize>) -> Option<f64> {
     pts[range].iter().filter_map(|p| p.roll.map(f64::abs)).reduce(f64::max)
 }
 
@@ -480,7 +489,6 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
         add("touchdown", "offset", Severity::Improve, format!("Touched down {:.0}% of the way from the centreline to the runway edge.", o.abs()), json!({ "offsetPercent": r1(o) }));
     }
 
-    findings.sort_by_key(|f| f.severity);
     let kind = match (down, base) {
         (Some(_), _) => "circuit",
         (None, Some(_)) => "base entry",
@@ -488,19 +496,15 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
     };
     let side = base.and_then(|b| b.side).map(|s| if s == Side::Left { "left" } else { "right" });
     Some(json!({
+        "phase": "approach",
+        "at": landing.get("timestamp").cloned().unwrap_or(Value::Null),
         "landing": landing.get("timestamp").cloned().unwrap_or(Value::Null),
         "approach": kind,
         "circuit": side,
         "runwayCourse": r0(rwy.course),
         "aircraftClass": if norms.transport { "transport" } else { "light" },
         "legs": out_legs,
-        "findings": findings.into_iter().map(|f| json!({
-            "leg": f.leg,
-            "code": f.code,
-            "severity": f.severity.name(),
-            "text": f.text,
-            "values": f.values,
-        })).collect::<Vec<_>>(),
+        "findings": findings_json(findings),
     }))
 }
 
@@ -542,6 +546,7 @@ mod tests {
                     ias: Some(kt),
                     vs: Some(vs),
                     roll: Some(0.0),
+                    pitch: Some(0.0),
                     hdg: Some(course),
                     trk: Some(course),
                     wind_kt: Some(0.0),

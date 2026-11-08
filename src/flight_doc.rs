@@ -74,19 +74,28 @@ pub async fn track(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Option<
     Ok(None)
 }
 
-/// The circuit flown into each landing (`analysis/pattern.rs`), worked out from the track
-/// as the page is made: its legs among the summary's events, and each landing's debrief
-/// (`analysis/debrief.rs`), returned.
-fn add_circuits(summary: &mut crate::live::LiveSummary, statistics: &Value, track: &Value) -> Vec<Value> {
-    let arrival = statistics.pointer("/arrival/icao").and_then(Value::as_str).unwrap_or_default();
-    let runways = crate::analysis::ingest::places().map_or(&[][..], |p| p.runways(arrival));
-    let circuits = crate::analysis::pattern::circuits(&summary.events, track, runways);
+/// What the page adds from the track as it is made: the circuit flown into each landing
+/// (`analysis/pattern.rs`), its legs among the summary's events, and the debriefs, each
+/// takeoff's (`analysis/takeoff.rs`) and each landing's (`analysis/debrief.rs`), in the
+/// order flown.
+fn add_debriefs(summary: &mut crate::live::LiveSummary, statistics: &Value, track: &Value) -> Vec<Value> {
+    let places = crate::analysis::ingest::places();
+    let runways = |at: &str| {
+        let icao = statistics.pointer(&format!("/{at}/icao")).and_then(Value::as_str).unwrap_or_default();
+        places.map_or(&[][..], |p| p.runways(icao))
+    };
+    let simulator = statistics.get("simulator").and_then(Value::as_str).unwrap_or_default();
+    let pts = crate::analysis::pattern::points(track, simulator);
+    let mut debriefs = crate::analysis::takeoff::takeoffs(&summary.events, &pts, runways("departure"));
+    let circuits = crate::analysis::pattern::circuits(&summary.events, &pts, runways("arrival"));
     if !circuits.events.is_empty() {
         summary.events.extend(circuits.events);
         let at = |e: &Value| e.get("timestamp").and_then(Value::as_str).unwrap_or_default().to_string();
         summary.events.sort_by_key(at);
     }
-    circuits.debriefs
+    debriefs.extend(circuits.debriefs);
+    debriefs.sort_by_key(|d| d.get("at").and_then(Value::as_str).unwrap_or_default().to_string());
+    debriefs
 }
 
 /// The flight's page document; `None` when no track of it is left anywhere.
@@ -100,7 +109,7 @@ pub async fn document(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Opti
     let Some(track) = track(db, r2, flight_id).await? else { return Ok(None) };
     let screenshots = crate::live::load_screenshots(db, flight_id).await?;
     let mut summary = crate::live::adapt_summary(&statistics, notes.as_deref(), screenshots.len(), status == "ended");
-    let debriefs = add_circuits(&mut summary, &statistics, &track);
+    let debriefs = add_debriefs(&mut summary, &statistics, &track);
     Ok(Some(json!({
         "transposedData": track,
         "summary": summary,

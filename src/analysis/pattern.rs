@@ -66,6 +66,8 @@ pub struct Pt {
     pub vs: Option<f64>,
     /// Bank, degrees, in the sim's own sign: only its size is read.
     pub roll: Option<f64>,
+    /// Degrees, nose up positive, whatever the sim ([`points`] turns MSFS's round).
+    pub pitch: Option<f64>,
     /// Heading and ground track as the sim reported them, in the same reference, so their
     /// difference is the crab whatever that reference is.
     pub hdg: Option<f64>,
@@ -149,7 +151,7 @@ pub(crate) fn angle(d: f64) -> f64 {
     if d > 180.0 { d - 360.0 } else { d }
 }
 
-fn bearing(a: &Pt, b: &Pt) -> Option<f64> {
+pub(crate) fn bearing(a: &Pt, b: &Pt) -> Option<f64> {
     let (la1, la2) = (a.lat.to_radians(), b.lat.to_radians());
     let dl = (b.lon - a.lon).to_radians();
     let y = dl.sin() * la2.cos();
@@ -319,8 +321,71 @@ fn final_figures(pts: &[Pt], leg: &Leg, touchdown: usize, rwy: &Approach) -> (f6
     ((-along / FT_PER_NM).max(0.0), height)
 }
 
-fn timestamp(t: i64) -> String {
+pub(crate) fn timestamp(t: i64) -> String {
     chrono::DateTime::from_timestamp(t, 0).map(|d| d.format("%Y-%m-%d %H:%M:%S%.3f").to_string()).unwrap_or_default()
+}
+
+/// An event's time, Unix seconds.
+pub(crate) fn event_time(e: &Value) -> Option<i64> {
+    e.get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::NaiveDateTime::parse_from_str(s.split('.').next().unwrap_or(s), "%Y-%m-%d %H:%M:%S").ok())
+        .map(|d| d.and_utc().timestamp())
+}
+
+/// The page's columnar track as points, pitch nose up positive. The track keeps each sim's
+/// own signs (MSFS's pitch is positive nose down, and an unknown sim is taken for MSFS, as
+/// the renderer does), except that the app uploaded X-Plane's in MSFS's signs before 0.3.41:
+/// so the climb decides, where the nose is up.
+pub fn points(track: &Value, simulator: &str) -> Vec<Pt> {
+    let mut pts = points_as_sent(track, simulator);
+    let climbing: Vec<f64> = pts
+        .iter()
+        .filter(|p| p.vs.is_some_and(|v| v > 500.0) && p.ias.is_some_and(|v| v > 60.0))
+        .filter_map(|p| p.pitch)
+        .collect();
+    if climbing.len() >= 10 && climbing.iter().sum::<f64>() < 0.0 {
+        pts.iter_mut().for_each(|p| p.pitch = p.pitch.map(|x| -x));
+    }
+    pts
+}
+
+fn points_as_sent(track: &Value, simulator: &str) -> Vec<Pt> {
+    let col = |k: &str| track.get(k).and_then(Value::as_array);
+    let Some(ts) = col("timestamps") else { return Vec::new() };
+    let num = |k: &str, i: usize| col(k).and_then(|c| c.get(i)).and_then(Value::as_f64);
+    let xplane = simulator.to_ascii_lowercase().replace('-', "").contains("xplane");
+    let nose_up = if xplane { 1.0 } else { -1.0 };
+    // The first timestamp is absolute and the rest are deltas, as the renderer reads them.
+    let mut at = 0i64;
+    let times: Vec<i64> = ts
+        .iter()
+        .map(|v| {
+            at += v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).unwrap_or(0);
+            at
+        })
+        .collect();
+    // Older tracks are in milliseconds.
+    let ms = times.first().is_some_and(|&t| t > 100_000_000_000);
+    (0..ts.len())
+        .filter_map(|i| {
+            Some(Pt {
+                t: if ms { times[i] / 1000 } else { times[i] },
+                lat: num("latitudes", i)?,
+                lon: num("longitudes", i)?,
+                alt: num("altitudes", i),
+                gs: num("ground_speed", i),
+                ias: num("ias", i),
+                vs: num("vspeed", i),
+                roll: num("roll", i),
+                pitch: num("pitch", i).map(|p| p * nose_up),
+                hdg: num("heading", i),
+                trk: num("track", i),
+                wind_kt: num("wind_speed", i),
+                wind_from: num("wind_dir", i),
+            })
+        })
+        .collect()
 }
 
 /// What the circuits into a flight's landings add to its page.
@@ -333,41 +398,9 @@ pub struct Circuits {
     pub debriefs: Vec<Value>,
 }
 
-/// The circuit flown into each landing among `events` (the page's). `runways` are the
-/// arrival's. The track is the page's columnar one.
-pub fn circuits(events: &[Value], track: &Value, runways: &[Runway]) -> Circuits {
-    let col = |k: &str| track.get(k).and_then(Value::as_array);
-    let Some(ts) = col("timestamps") else { return Circuits::default() };
-    let num = |k: &str, i: usize| col(k).and_then(|c| c.get(i)).and_then(Value::as_f64);
-    // The first timestamp is absolute and the rest are deltas, as the renderer reads them.
-    let mut at = 0i64;
-    let times: Vec<i64> = ts
-        .iter()
-        .map(|v| {
-            at += v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).unwrap_or(0);
-            at
-        })
-        .collect();
-    // Older tracks are in milliseconds.
-    let ms = times.first().is_some_and(|&t| t > 100_000_000_000);
-    let pts: Vec<Pt> = (0..ts.len())
-        .filter_map(|i| {
-            Some(Pt {
-                t: if ms { times[i] / 1000 } else { times[i] },
-                lat: num("latitudes", i)?,
-                lon: num("longitudes", i)?,
-                alt: num("altitudes", i),
-                gs: num("ground_speed", i),
-                ias: num("ias", i),
-                vs: num("vspeed", i),
-                roll: num("roll", i),
-                hdg: num("heading", i),
-                trk: num("track", i),
-                wind_kt: num("wind_speed", i),
-                wind_from: num("wind_dir", i),
-            })
-        })
-        .collect();
+/// The circuit flown into each landing among `events` (the page's), along the track's
+/// `pts` ([`points`]). `runways` are the arrival's.
+pub fn circuits(events: &[Value], pts: &[Pt], runways: &[Runway]) -> Circuits {
     if pts.len() < 2 {
         return Circuits::default();
     }
@@ -376,14 +409,7 @@ pub fn circuits(events: &[Value], track: &Value, runways: &[Runway]) -> Circuits
         if e.get("eventType").and_then(Value::as_str) != Some("landing") {
             continue;
         }
-        let Some(t) = e
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s.split('.').next().unwrap_or(s), "%Y-%m-%d %H:%M:%S").ok())
-            .map(|d| d.and_utc().timestamp())
-        else {
-            continue;
-        };
+        let Some(t) = event_time(e) else { continue };
         let touchdown = pts.partition_point(|p| p.t < t).min(pts.len() - 1);
         if (pts[touchdown].t - t).abs() > 30 || touchdown < 2 {
             continue;
@@ -401,8 +427,8 @@ pub fn circuits(events: &[Value], track: &Value, runways: &[Runway]) -> Circuits
             .and_then(|h| runway_landed_on(lat, lon, h, runways))
             .or_else(|| flown.map(|course| Approach { course, lat, lon, length_ft: None, width_ft: None }));
         let Some(rwy) = rwy else { continue };
-        let legs = legs(&pts, touchdown, &rwy);
-        if let Some(debrief) = super::debrief::debrief(&pts, touchdown, &rwy, &legs, e) {
+        let legs = legs(pts, touchdown, &rwy);
+        if let Some(debrief) = super::debrief::debrief(pts, touchdown, &rwy, &legs, e) {
             out.debriefs.push(debrief);
         }
         for leg in legs {
@@ -418,7 +444,7 @@ pub fn circuits(events: &[Value], track: &Value, runways: &[Runway]) -> Circuits
                 ev["circuit"] = json!(if side == Side::Left { "left" } else { "right" });
             }
             if leg.kind == LegKind::Final {
-                let (nm, height) = final_figures(&pts, &leg, touchdown, &rwy);
+                let (nm, height) = final_figures(pts, &leg, touchdown, &rwy);
                 ev["finalNm"] = json!((nm * 10.0).round() / 10.0);
                 ev["heightFt"] = json!(height.map(f64::round));
             }
@@ -431,6 +457,29 @@ pub fn circuits(events: &[Value], track: &Value, runways: &[Runway]) -> Circuits
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A climb at 8° nose up, the track's pitch given as `stored`, by `sim`.
+    fn climb_track(stored: f64) -> Value {
+        let n = 20;
+        json!({
+            "timestamps": std::iter::once(1_700_000_000).chain(std::iter::repeat_n(1, n - 1)).collect::<Vec<_>>(),
+            "latitudes": vec![45.0; n],
+            "longitudes": vec![0.0; n],
+            "ias": vec![120.0; n],
+            "vspeed": vec![1500.0; n],
+            "pitch": vec![stored; n],
+        })
+    }
+
+    #[test]
+    fn pitch_comes_out_nose_up_whatever_the_sign_it_was_stored_in() {
+        // X-Plane's own sign, and MSFS's.
+        assert_eq!(points(&climb_track(8.0), "X-Plane")[0].pitch, Some(8.0));
+        assert_eq!(points(&climb_track(-8.0), "MSFS")[0].pitch, Some(8.0));
+        // An X-Plane flight the app uploaded in MSFS's signs, before 0.3.41.
+        assert_eq!(points(&climb_track(-8.0), "X-Plane")[0].pitch, Some(8.0));
+        assert_eq!(points(&climb_track(-8.0), "X-Plane")[5].t, 1_700_000_005);
+    }
 
     /// A track flown from `start` (NM east and north of the threshold at 45,0, runway course
     /// 360) along `legs` of (course, seconds), at `kt`, a point a second, level at 1000 ft
@@ -576,7 +625,7 @@ mod tests {
         });
         let last = pts.last().unwrap();
         let landing = json!({ "eventType": "landing", "timestamp": timestamp(last.t), "latitude": last.lat, "longitude": last.lon });
-        let evs = circuits(&[landing], &track, &[]).events;
+        let evs = circuits(&[landing], &points(&track, "X-Plane"), &[]).events;
         let types: Vec<&str> = evs.iter().map(|e| e["eventType"].as_str().unwrap()).collect();
         assert_eq!(types, ["downwind", "base", "final"]);
         assert_eq!(evs[0]["circuit"], json!("left"));
