@@ -141,16 +141,13 @@ function renderFlightDoc(d) {
             const [cls, lbl] = a < 150 ? ['butter','Butter'] : a < 250 ? ['smooth','Smooth'] : a < 350 ? ['firm','Firm'] : ['hard','Hard'];
             badgeHtml = `<div class="badge badge-${cls}">${lbl} — ${Math.round(a)} fpm</div>`;
         }
-        const notesText = (sum.notes || '').trim();
-        const notesHtml = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${esc(notesText)}</div></div>` : '';
         return `
         <div style="margin-bottom:1.25rem">
             <div class="aircraft">${esc(ac)}</div>
             ${deducedHtml}
             <div class="meta">${fmtDate(sum.startTime||sum.start_time)} · ${fmtDur(dur)}</div>
             ${badgeHtml}
-        </div>
-        ${notesHtml}`;
+        </div>`;
     }
 
     /// The flight's headline figures. On the Summary tab rather than the
@@ -231,7 +228,10 @@ function renderFlightDoc(d) {
         document.getElementById('header-mount').innerHTML = headerHtml();
         const dm = document.getElementById('debrief-mount');
         if (dm) dm.innerHTML = debriefHtml();
-        // The Details button says when the debrief has something to work on.
+        const nm = document.getElementById('notes-mount');
+        const notesText = ((state.summary || {}).notes || '').trim();
+        if (nm) nm.innerHTML = notesText ? `<div class="landing-card"><div class="section-title">Notes</div><div style="white-space:pre-wrap;line-height:1.5;color:var(--text)">${esc(notesText)}</div></div>` : '';
+        // The Debrief button says when the debrief has something to work on.
         const open = document.getElementById('fv-details-open');
         if (open) {
             const work = (state.debriefs || []).reduce((k, db) => k + (db.findings || []).filter(f => f.severity !== 'good').length, 0);
@@ -1103,7 +1103,7 @@ function renderFlightDoc(d) {
     }
 
     /// The pilot's notes and screenshots on the map, where they are seen without
-    /// opening Details. Collapses to a one-line tab, remembered per browser; the
+    /// opening the Debrief. Collapses to a one-line tab, remembered per browser; the
     /// notes clamp to two lines until clicked.
     let memoKey = null;
     function drawMemo() {

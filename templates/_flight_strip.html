@@ -2,7 +2,7 @@
 <!-- Drives the one-screen flight view (_flight_screen.html).
 
      `initFlightStrip(handle, opts)` wires the map controls, the bottom strip
-     and the Details dialog to a rendered flight. Two modes:
+     and the Debrief dialog to a rendered flight. Two modes:
 
      - Replay: every view follows the page's one replay cursor
        (window.FlightReplay). The altitude profile and the graph lanes scrub
@@ -71,7 +71,7 @@ window.initFlightStrip = function (H, opts) {
         $('fv-meta').textContent = parts.join(' · ');
     }
 
-    // ── Details dialog ───────────────────────────────────────────────────
+    // ── Debrief dialog ───────────────────────────────────────────────────
     const dlg = $('fv-details');
     $('fv-details-open').addEventListener('click', () => {
         if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');

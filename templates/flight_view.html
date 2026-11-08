@@ -18,7 +18,7 @@
 
     <!-- One screen for a flight: the map fills it, the bottom strip is the
          timeline, with the instruments or the graphs under it. The numbers
-         that used to be the Summary tab open in the Details dialog. -->
+         that used to be the Summary tab open in the Debrief dialog. -->
     <div class="view-head fv-head">
         <div class="view-head-inner">
             <button class="hamburger fv-menu" data-nav-open type="button" aria-label="Open menu" aria-expanded="false" aria-controls="rail">
@@ -36,7 +36,7 @@
                 {% if !export_href.is_empty() %}
                 <a class="fv-btn fv-btn-quiet" href="{{ export_href }}" download title="Export for FlySto (CSV)">Export CSV</a>
                 {% endif %}
-                <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Details</button>
+                <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Debrief</button>
             </div>
         </div>
     </div>

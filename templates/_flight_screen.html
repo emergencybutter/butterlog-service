@@ -1,5 +1,5 @@
 <!-- The one-screen flight view: map, bottom strip (timeline, instruments,
-     graphs) and the Details dialog. Shared by the finished-flight page and
+     graphs) and the Debrief dialog. Shared by the finished-flight page and
      the live page; _flight_strip.html drives it. -->
     <div class="fv" id="fv">
         <section class="fv-map" id="fv-map" aria-label="Map">
@@ -21,7 +21,7 @@
                 </div>
             </div>
             <!-- The pilot's notes and screenshots, on the map rather than only in
-                 Details: drawn by _flight_render.html's drawMemo(). -->
+                 Debrief: drawn by _flight_render.html's drawMemo(). -->
             <div class="fv-float fv-memo" id="fv-memo" hidden></div>
             <div class="fv-float fv-mapctl">
                 <div class="fv-seg" role="group" aria-label="Map view">
@@ -112,15 +112,18 @@
 
     <dialog class="fv-details" id="fv-details" aria-labelledby="fv-details-title">
         <div class="fv-details-head">
-            <span class="fv-details-title" id="fv-details-title">Flight details</span>
+            <span class="fv-details-title" id="fv-details-title">Debrief</span>
             <button type="button" class="fv-icon" id="fv-details-close" aria-label="Close">&#10005;</button>
         </div>
         <div class="fv-details-body">
+            <!-- The flight and its landing badge, then the approach debrief, then
+                 the pilot's notes and screenshots, then the figures. -->
             <div id="header-mount"></div>
+            <div id="debrief-mount"></div>
+            <div id="notes-mount"></div>
             <div id="gallery-mount"></div>
             <div id="stats-mount"></div>
             <div id="landing-mount"></div>
-            <div id="debrief-mount"></div>
             <div id="touchdown-section" style="display:none">
                 <div class="section-title" style="margin-bottom:0.75rem">Touchdown</div>
                 <div id="map-touchdown"></div>
