@@ -266,6 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/users/:webhook_token/multiplayer/ping",
             post(handlers::multiplayer_ping_handler),
         )
+        .fallback(trailing_slash)
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state);
 
@@ -312,6 +313,23 @@ fn redact_path(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// A page asked for with a trailing slash (`/content/`, a link someone typed or
+/// pasted) goes to the page without it; anything else unknown is a 404.
+async fn trailing_slash(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    // Never `//host`: a browser reads that as another site.
+    let local = !path.starts_with("//") && !path.contains('\\');
+    if (method == axum::http::Method::GET || method == axum::http::Method::HEAD) && local && path.len() > 1 && path.ends_with('/') {
+        let trimmed = path.trim_end_matches('/');
+        let to = match uri.query() {
+            Some(q) => format!("{}?{q}", if trimmed.is_empty() { "/" } else { trimmed }),
+            None => if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() },
+        };
+        return Redirect::permanent(&to).into_response();
+    }
+    axum::http::StatusCode::NOT_FOUND.into_response()
 }
 
 async fn log_requests(
@@ -1667,6 +1685,21 @@ async fn flight_share_detail_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_trailing_slash_goes_to_the_page_without_it() {
+        use axum::http::{header::LOCATION, Method, StatusCode, Uri};
+        let go = |m: Method, u: &'static str| async move { trailing_slash(m, Uri::from_static(u)).await };
+        let r = go(Method::GET, "/content/").await;
+        assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(r.headers()[LOCATION], "/content");
+        let r = go(Method::GET, "/content/flights/575/?x=1").await;
+        assert_eq!(r.headers()[LOCATION], "/content/flights/575?x=1");
+        // Another site, a POST, and a path without the slash are not found.
+        assert_eq!(go(Method::GET, "//evil.example/").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(go(Method::POST, "/content/").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(go(Method::GET, "/nothing").await.status(), StatusCode::NOT_FOUND);
+    }
 
     #[test]
     fn extract_live_position_reads_capitalized_snapshot_keys() {
