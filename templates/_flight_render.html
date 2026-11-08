@@ -106,6 +106,8 @@ function renderFlightDoc(d) {
         oil_temp: (td.oil_temp || []).slice(),
         oil_press: (td.oil_press || []).slice(),
         summary: d.summary || {},
+        // Each landing's approach debrief (analysis/debrief.rs).
+        debriefs: d.debriefs || [],
         screenshots: d.screenshots || [],
         map: null, path: null, planeMarker: null, touchdownMap: null, cockpit: null, charts: [], chartKeys: [], cursors: [], userMoved: false,
         // Cockpit view: whether the pane has asked for it, the newest live fix
@@ -186,8 +188,57 @@ function renderFlightDoc(d) {
         </div></div>`;
     }
 
+    /// What an instructor would say about each landing's approach: its figures, what to
+    /// work on (cautions first) and what went well. The text is the service's; a later
+    /// rewording can replace it, the numbers stay.
+    const LEG_NAME = { downwind: 'Downwind', base: 'Base', final: 'Final', touchdown: 'Touchdown' };
+    function debriefHtml() {
+        const all = state.debriefs || [];
+        return all.map(db => {
+            const fin = (db.legs || {}).final || {};
+            const td = (db.legs || {}).touchdown || {};
+            const n = v => typeof v === 'number';
+            const kind = db.approach === 'circuit' ? `${db.circuit === 'right' ? 'Right' : 'Left'} circuit`
+                : db.approach === 'base entry' ? `Joined on ${db.circuit === 'right' ? 'right' : 'left'} base` : 'Straight-in';
+            const sub = [kind, n(fin.lengthNm) ? `${fin.lengthNm.toFixed(1)} NM final` : '',
+                n(fin.startHeightFt) ? `from ${Math.round(fin.startHeightFt)} ft` : '',
+                all.length > 1 && db.landing ? `landing ${String(db.landing).slice(11, 16)}` : ''].filter(Boolean).join(' · ');
+            const wind = n(fin.headwindKt) && n(fin.crosswindKt)
+                ? `${Math.abs(fin.headwindKt)} ${fin.headwindKt >= 0 ? 'head' : 'tail'} · ${Math.abs(fin.crosswindKt)} ${fin.crosswindKt >= 0 ? 'R' : 'L'}` : null;
+            const figs = [
+                ['Stabilised from', n(fin.stabilisedFromFt) ? `${Math.round(fin.stabilisedFromFt)} ft` : 'Not stable'],
+                ['Path angle', n(fin.pathAngleDeg) ? `${fin.pathAngleDeg.toFixed(1)}°` : null],
+                ['Final speed', n(fin.finalSpeedKt) ? `${Math.round(fin.finalSpeedKt)} kt` : null],
+                ['Max sink', n(fin.maxSinkFpm) ? `${Math.abs(Math.round(fin.maxSinkFpm))} fpm` : null],
+                ['Wind on final (kt)', wind],
+                ['Touchdown crab', n(td.crabDeg) ? `${Math.abs(td.crabDeg).toFixed(0)}°` : null],
+            ].filter(f => f[1] != null);
+            const item = f => `<li class="db-f db-${esc(f.severity)}"><span class="db-leg">${esc(LEG_NAME[f.leg] || f.leg)}</span><span>${esc(f.text)}</span></li>`;
+            const work = (db.findings || []).filter(f => f.severity !== 'good');
+            const good = (db.findings || []).filter(f => f.severity === 'good');
+            return `<div class="landing-card debrief">
+                <div class="section-title">Approach debrief</div>
+                <div class="db-sub">${esc(sub)}</div>
+                <div class="landing-grid db-figs">${figs.map(f => `<div><div class="li-label">${esc(f[0])}</div><div class="li-val">${esc(f[1])}</div></div>`).join('')}</div>
+                <div class="db-h">To work on</div>
+                ${work.length ? `<ul class="db-list">${work.map(item).join('')}</ul>` : '<div class="db-none">Nothing to work on in this approach.</div>'}
+                ${good.length ? `<div class="db-h">Done well</div><ul class="db-list">${good.map(item).join('')}</ul>` : ''}
+            </div>`;
+        }).join('');
+    }
+
     function drawHeader() {
         document.getElementById('header-mount').innerHTML = headerHtml();
+        const dm = document.getElementById('debrief-mount');
+        if (dm) dm.innerHTML = debriefHtml();
+        // The Details button says when the debrief has something to work on.
+        const open = document.getElementById('fv-details-open');
+        if (open) {
+            const work = (state.debriefs || []).reduce((k, db) => k + (db.findings || []).filter(f => f.severity !== 'good').length, 0);
+            let badge = open.querySelector('.db-count');
+            if (work && !badge) { badge = document.createElement('span'); badge.className = 'db-count'; open.appendChild(badge); }
+            if (badge) { badge.textContent = work || ''; badge.hidden = !work; badge.title = `${work} to work on in the approach debrief`; }
+        }
         const sm = document.getElementById('stats-mount');
         if (sm) sm.innerHTML = statsHtml();
         const lm = document.getElementById('landing-mount');
@@ -203,6 +254,17 @@ function renderFlightDoc(d) {
         }
     }
 
+    // The circuit legs flown into a landing (analysis/pattern.rs), at each leg's start.
+    const LEGS = { downwind: 'Downwind', base: 'Base', final: 'Final' };
+    function legTip(e) {
+        const type = e.eventType || e.event_type;
+        const bits = [LEGS[type]];
+        if (e.circuit) bits.push(e.circuit === 'left' ? 'left circuit' : 'right circuit');
+        if (typeof e.finalNm === 'number') bits.push(e.finalNm.toFixed(1) + ' NM');
+        if (typeof e.heightFt === 'number') bits.push(Math.round(e.heightFt) + ' ft above the field');
+        return bits.join(' · ');
+    }
+
     function eventMarkersOnMap() {
         if (!state.map) return;
         (state.summary.events || []).forEach(e => {
@@ -212,8 +274,9 @@ function renderFlightDoc(d) {
             state.map._blSeen = state.map._blSeen || {};
             if (state.map._blSeen[key]) return;
             state.map._blSeen[key] = true;
-            const color = type==='takeoff'?'#a6e3a1':type==='landing'?'#f38ba8':'#89b4fa';
-            const label = type==='takeoff'?'Takeoff':type==='landing'?'Landing':type==='top_of_climb'?'TOC':'TOD';
+            const leg = LEGS[type];
+            const color = type==='takeoff'?'#a6e3a1':type==='landing'?'#f38ba8':leg?'#f9e2af':'#89b4fa';
+            const label = type==='takeoff'?'Takeoff':type==='landing'?'Landing':type==='top_of_climb'?'TOC':type==='top_of_descent'?'TOD':leg?legTip(e):type;
             L.circleMarker([e.latitude,e.longitude],{radius:7,color,fillColor:color,fillOpacity:0.9,weight:2}).bindTooltip(label).addTo(state.map);
         });
     }
@@ -875,8 +938,8 @@ function renderFlightDoc(d) {
             });
             return;
         }
-        const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':'#cba6f7';
-        const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':t;
+        const evColor = t => (t==='takeoff'||t==='top_of_climb')?'#a6e3a1':t==='landing'?'#f38ba8':t==='top_of_descent'?'#f9b387':(t==='autopilot_on'||t==='autopilot_off')?'#89b4fa':LEGS[t]?'#f9e2af':'#cba6f7';
+        const evLabel = t => t==='takeoff'?'LIFT OFF':t==='landing'?'TOUCHDOWN':t==='top_of_climb'?'TOC':t==='top_of_descent'?'TOD':t==='autopilot_on'?'AP ON':t==='autopilot_off'?'AP OFF':LEGS[t]?LEGS[t].toUpperCase():t;
         const eventMarks = [], shotMarks = [];
         function remapMarks() {
             eventMarks.length = 0; shotMarks.length = 0;
@@ -1275,8 +1338,9 @@ function renderFlight3D(d) {
     for (let i = 0; i < pts.length; i += dstep) drops.push({ path: [pts[i], [pts[i][0], pts[i][1], 0]] });
 
     const events = (d.summary && d.summary.events) || [];
-    const evLabel = t => t === 'takeoff' ? 'Takeoff' : t === 'landing' ? 'Landing' : t === 'top_of_climb' ? 'TOC' : t === 'top_of_descent' ? 'TOD' : t;
-    const evColor = t => t === 'takeoff' ? [90, 209, 126] : t === 'landing' ? [255, 122, 138] : [54, 227, 198];
+    const legName = { downwind: 'Downwind', base: 'Base', final: 'Final' };
+    const evLabel = t => t === 'takeoff' ? 'Takeoff' : t === 'landing' ? 'Landing' : t === 'top_of_climb' ? 'TOC' : t === 'top_of_descent' ? 'TOD' : legName[t] || t;
+    const evColor = t => t === 'takeoff' ? [90, 209, 126] : t === 'landing' ? [255, 122, 138] : legName[t] ? [249, 226, 175] : [54, 227, 198];
     const evPts = events.filter(e => e.latitude && e.longitude).map(e => {
         const type = e.eventType || e.event_type;
         return { position: [e.longitude, e.latitude, (e.altitude || 0) * Z], color: evColor(type), label: evLabel(type) };

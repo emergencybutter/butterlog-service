@@ -3,8 +3,10 @@
 //! on sessions as they end.
 
 pub mod compare;
+pub mod debrief;
 pub mod flight;
 pub mod ingest;
+pub mod pattern;
 pub mod places;
 pub mod resume;
 pub mod statistics;
@@ -35,6 +37,67 @@ mod parity {
         let flights = analyse(&samples, places());
         assert_eq!(flights.len(), 1, "one flight");
         flights.into_iter().next().unwrap()
+    }
+
+    /// The circuit legs into the fixture's landing, from its samples one a second as the
+    /// track is stored, and each leg's start.
+    fn circuit(fixture: &str) -> Vec<(pattern::LegKind, String, Option<pattern::Side>)> {
+        use crate::normalise::Field;
+        let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
+        let (_, samples) = normalise_segment(&std::fs::read(path).unwrap()).unwrap();
+        let f = summary(fixture);
+        let mut pts: Vec<pattern::Pt> = Vec::new();
+        for s in &samples {
+            let t = s.wall_time_ms / 1000;
+            let (Some(lat), Some(lon)) = (s.get(Field::Latitude), s.get(Field::Longitude)) else { continue };
+            if pts.last().is_some_and(|p| p.t == t) || (lat.abs() < 0.01 && lon.abs() < 0.01) {
+                continue;
+            }
+            pts.push(pattern::Pt {
+                t,
+                lat,
+                lon,
+                alt: s.get(Field::AltitudeIndicated),
+                gs: s.get(Field::GroundSpeed),
+                ias: s.get(Field::Ias),
+                vs: s.get(Field::VerticalSpeed),
+                roll: s.get(Field::Roll),
+                hdg: s.get(Field::HeadingTrue),
+                trk: s.get(Field::Track),
+                wind_kt: s.get(Field::WindSpeed),
+                wind_from: s.get(Field::WindDirection),
+            });
+        }
+        let landing = f.landing.as_ref().unwrap();
+        let touchdown = pts.partition_point(|p| p.t < landing.wall_time_ms / 1000);
+        let Endpoint::Airport(arrival) = &f.arrival else { panic!("no arrival") };
+        let rwy = pattern::runway_landed_on(landing.latitude, landing.longitude, landing.heading, places().runways(arrival))
+            .expect("the runway");
+        pattern::legs(&pts, touchdown, &rwy)
+            .into_iter()
+            .map(|l| {
+                let at = chrono::DateTime::from_timestamp(pts[l.start].t, 0).unwrap().format("%H:%M:%S").to_string();
+                (l.kind, at, l.side)
+            })
+            .collect()
+    }
+
+    /// Both fixtures fly a left circuit. The X-Plane one turns base as it starts down, its
+    /// top of descent 01:12:42.
+    #[test]
+    fn the_circuits_have_their_legs() {
+        use pattern::{LegKind::*, Side::Left};
+        let at = |legs: &[(pattern::LegKind, String, Option<pattern::Side>)]| {
+            legs.iter().map(|l| (l.0, l.1.clone(), l.2)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            at(&circuit("xplane_pattern.blsg.zst")),
+            [(Downwind, "01:10:49".into(), Some(Left)), (Base, "01:12:48".into(), Some(Left)), (Final, "01:13:13".into(), None)]
+        );
+        assert_eq!(
+            at(&circuit("msfs_pattern.blsg.zst")),
+            [(Downwind, "01:59:18".into(), Some(Left)), (Base, "02:00:29".into(), Some(Left)), (Final, "02:01:25".into(), None)]
+        );
     }
 
     fn ms(hms: &str) -> i64 {

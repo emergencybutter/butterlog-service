@@ -74,6 +74,21 @@ pub async fn track(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Option<
     Ok(None)
 }
 
+/// The circuit flown into each landing (`analysis/pattern.rs`), worked out from the track
+/// as the page is made: its legs among the summary's events, and each landing's debrief
+/// (`analysis/debrief.rs`), returned.
+fn add_circuits(summary: &mut crate::live::LiveSummary, statistics: &Value, track: &Value) -> Vec<Value> {
+    let arrival = statistics.pointer("/arrival/icao").and_then(Value::as_str).unwrap_or_default();
+    let runways = crate::analysis::ingest::places().map_or(&[][..], |p| p.runways(arrival));
+    let circuits = crate::analysis::pattern::circuits(&summary.events, track, runways);
+    if !circuits.events.is_empty() {
+        summary.events.extend(circuits.events);
+        let at = |e: &Value| e.get("timestamp").and_then(Value::as_str).unwrap_or_default().to_string();
+        summary.events.sort_by_key(at);
+    }
+    circuits.debriefs
+}
+
 /// The flight's page document; `None` when no track of it is left anywhere.
 pub async fn document(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Option<Value>, AppError> {
     let row: Option<(Value, Option<String>, String)> =
@@ -84,10 +99,12 @@ pub async fn document(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Opti
     let Some((statistics, notes, status)) = row else { return Ok(None) };
     let Some(track) = track(db, r2, flight_id).await? else { return Ok(None) };
     let screenshots = crate::live::load_screenshots(db, flight_id).await?;
-    let summary = crate::live::adapt_summary(&statistics, notes.as_deref(), screenshots.len(), status == "ended");
+    let mut summary = crate::live::adapt_summary(&statistics, notes.as_deref(), screenshots.len(), status == "ended");
+    let debriefs = add_circuits(&mut summary, &statistics, &track);
     Ok(Some(json!({
         "transposedData": track,
         "summary": summary,
+        "debriefs": debriefs,
         "screenshots": screenshots,
         "remoteFlightId": flight_id,
         // The renderer reads the track's raw pitch and roll through it.

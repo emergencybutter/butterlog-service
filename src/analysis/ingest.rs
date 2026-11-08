@@ -42,7 +42,7 @@ const SAME_ANALYSIS_MS: i64 = 5_000;
 
 /// Airports and runways, loaded on first use from `BUTTERLOG_DATA_DIR` (default `data`,
 /// beside the binary in the image). `None` if they don't load.
-fn places() -> Option<&'static Places> {
+pub(crate) fn places() -> Option<&'static Places> {
     static PLACES: OnceLock<Option<Places>> = OnceLock::new();
     PLACES
         .get_or_init(|| {

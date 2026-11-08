@@ -810,7 +810,7 @@ fn sim_runways(samples: &[Sample]) -> Vec<Runway> {
 /// The touchdown in the runway's frame, flat-earth at runway scale: lateral offset from
 /// the centreline, left of the runway heading positive as the app had it, and distance
 /// along it past the (displaced) threshold, both in feet.
-fn project_onto_runway(lat: f64, lon: f64, thr_lat: f64, thr_lon: f64, hdg: f64, displaced: f64) -> (f64, f64) {
+pub(crate) fn project_onto_runway(lat: f64, lon: f64, thr_lat: f64, thr_lon: f64, hdg: f64, displaced: f64) -> (f64, f64) {
     const EARTH_RADIUS_FT: f64 = 20_925_646.3;
     let y = (lat - thr_lat).to_radians() * EARTH_RADIUS_FT;
     let x = (lon - thr_lon).to_radians() * EARTH_RADIUS_FT * thr_lat.to_radians().cos();
