@@ -20,6 +20,9 @@
                     <div class="m3d-panel m3d-legend">Altitude<div class="bar"></div><div class="ends"><span>ground</span><span id="m3d-maxalt"></span></div><div id="m3d-exag" style="margin-top:0.3rem;color:var(--dim)"></div></div>
                 </div>
             </div>
+            <!-- The pilot's notes and screenshots, on the map rather than only in
+                 Details: drawn by _flight_render.html's drawMemo(). -->
+            <div class="fv-float fv-memo" id="fv-memo" hidden></div>
             <div class="fv-float fv-mapctl">
                 <div class="fv-seg" role="group" aria-label="Map view">
                     <button type="button" class="is-on" data-map="2d" aria-pressed="true">2D</button>
@@ -114,10 +117,10 @@
         </div>
         <div class="fv-details-body">
             <div id="header-mount"></div>
+            <div id="gallery-mount"></div>
             <div id="stats-mount"></div>
             <div id="landing-mount"></div>
             <div id="debrief-mount"></div>
-            <div id="gallery-mount"></div>
             <div id="touchdown-section" style="display:none">
                 <div class="section-title" style="margin-bottom:0.75rem">Touchdown</div>
                 <div id="map-touchdown"></div>

@@ -1094,11 +1094,49 @@ function renderFlightDoc(d) {
     }
 
     function drawGallery() {
+        drawMemo();
         if (state.screenshots.length === 0) return;
         const urls = state.screenshots.map(s=>s.url);
         window._lbUrls = urls;
         const thumbs = urls.map((u,i)=>`<img src="${u}" loading="lazy" onclick="openLb(${i})" alt="">`).join('');
         document.getElementById('gallery-mount').innerHTML=`<div class="gallery-section"><div class="section-title">Screenshots</div><div class="gallery">${thumbs}</div></div>`;
+    }
+
+    /// The pilot's notes and screenshots on the map, where they are seen without
+    /// opening Details. Collapses to a one-line tab, remembered per browser; the
+    /// notes clamp to two lines until clicked.
+    let memoKey = null;
+    function drawMemo() {
+        const el = document.getElementById('fv-memo');
+        if (!el) return;
+        const notes = ((state.summary || {}).notes || '').trim();
+        const urls = state.screenshots.map(s => s.url);
+        const key = notes + '\n' + urls.join('\n');
+        if (key === memoKey) return;
+        memoKey = key;
+        window._lbUrls = urls;
+        el.hidden = !notes && !urls.length;
+        if (el.hidden) { el.innerHTML = ''; return; }
+        const what = [notes ? 'Notes' : '', urls.length ? `${urls.length} screenshot${urls.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
+        el.innerHTML = `
+            <button type="button" class="fv-memo-tab" aria-expanded="true">${esc(what)}<span class="fv-memo-chev" aria-hidden="true"></span></button>
+            <div class="fv-memo-body">
+                ${notes ? `<div class="fv-memo-notes" title="Show all">${esc(notes)}</div>` : ''}
+                ${urls.length ? `<div class="fv-memo-shots">${urls.map((u, i) => `<img src="${u}" loading="lazy" alt="Screenshot ${i + 1}" onclick="openLb(${i})">`).join('')}</div>` : ''}
+            </div>`;
+        let shut = false;
+        try { shut = localStorage.getItem('butterlog-fv-memo') === 'shut'; } catch (_) {}
+        const tab = el.querySelector('.fv-memo-tab');
+        const set = s => {
+            el.classList.toggle('is-shut', s);
+            tab.setAttribute('aria-expanded', String(!s));
+            try { localStorage.setItem('butterlog-fv-memo', s ? 'shut' : 'open'); } catch (_) {}
+        };
+        el.classList.toggle('is-shut', shut);
+        tab.setAttribute('aria-expanded', String(!shut));
+        tab.onclick = () => set(!el.classList.contains('is-shut'));
+        const n = el.querySelector('.fv-memo-notes');
+        if (n) n.onclick = () => n.classList.toggle('is-open');
     }
 
     rebuildAxis();
@@ -1225,7 +1263,7 @@ function renderFlightDoc(d) {
                 // The chase view draws the track; let it pick up the new end.
                 if (state.cockpit) state.cockpit.chaseTrack = null;
             }
-            if (doc.summary) state.summary = doc.summary;
+            if (doc.summary) { state.summary = doc.summary; drawMemo(); }
             if (doc.screenshots) {
                 const grew = doc.screenshots.length !== state.screenshots.length;
                 state.screenshots = doc.screenshots;

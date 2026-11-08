@@ -351,8 +351,24 @@ window.initFlightStrip = function (H, opts) {
             if (kept.some(k => k.row === o.row && o.l < k.r + 6 && k.l < o.r + 6)) return;
             kept.push(o);
         });
+        // Each screenshot is a camera mark along the bottom, which opens it. Marks
+        // closer than a mark's width share one, which opens the first and counts them.
+        const groups = [];
+        (S.screenshots || []).forEach((sc, i) => {
+            const t = parseTs(sc.timestamp);
+            if (t === null || t < ts[0] - 60 || t > ts[N - 1] + 60) return;
+            const pct = Math.max(0, Math.min(100, toPct(H.epochToAxis(t))));
+            const last = groups[groups.length - 1];
+            if (last && (pct - last.pct) / 100 * box < 22) { last.n++; last.t1 = t; return; }
+            groups.push({ pct, i, n: 1, t0: t, t1: t });
+        });
+        const shots = groups.map(g => {
+            const span = hhmm(g.t0) === hhmm(g.t1) ? hhmm(g.t0) : `${hhmm(g.t0)}–${hhmm(g.t1)}`;
+            const when = g.n > 1 ? `${g.n} screenshots ${span}` : `Screenshot ${span}`;
+            return `<button type="button" class="fv-shot" style="left:${g.pct.toFixed(2)}%" data-shot="${g.i}" aria-label="${when}" title="${when}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>${g.n > 1 ? `<span class="n">${g.n}</span>` : ''}</button>`;
+        }).join('');
         $('fv-events').innerHTML = kept.map(o =>
-            `<span class="${o.cls}${o.end ? ' is-end' : ''}" style="left:${o.pct.toFixed(2)}%">${esc(o.text)}</span>`).join('');
+            `<span class="${o.cls}${o.end ? ' is-end' : ''}" style="left:${o.pct.toFixed(2)}%">${esc(o.text)}</span>`).join('') + shots;
     }
 
     // ── Lanes ────────────────────────────────────────────────────────────
@@ -608,6 +624,12 @@ window.initFlightStrip = function (H, opts) {
         el.addEventListener('pointercancel', () => { down = false; });
     }
     wireScrub($('fv-profile'));
+    $('fv-events').addEventListener('click', e => {
+        const b = e.target.closest('.fv-shot');
+        if (!b || typeof openLb !== 'function') return;
+        window._lbUrls = (S.screenshots || []).map(s => s.url);
+        openLb(+b.dataset.shot);
+    });
 
     // ── Live: pinned to now ──────────────────────────────────────────────
     function applyMode() {
