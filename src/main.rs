@@ -105,6 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             move |flight_id| handlers::spawn_discord_sync(&state, flight_id)
         },
     );
+    // Ended flights go to FlySto by themselves for the pilots who connected it.
+    flysto::spawn_auto(state.clone());
     anonymous::spawn_sweeper(
         state.db.clone(),
         anonymous::R2Objects {

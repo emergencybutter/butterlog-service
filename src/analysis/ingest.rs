@@ -804,8 +804,9 @@ async fn analyse_open_session(
                     .fetch_optional(&mut *tx)
                     .await?
                     .flatten();
-            for (f, _, statistics, track) in over.iter().skip(made as usize) {
-                link(&mut tx, user_id, since, f, statistics, track, true).await?;
+            for (idx, (f, summary, statistics, track)) in over.iter().enumerate().skip(made as usize) {
+                let (flight_id, app_doc) = link(&mut tx, user_id, since, f, statistics, track, true).await?;
+                record(&mut tx, id, idx, f, summary, statistics, flight_id, app_doc.as_ref()).await?;
                 count += 1;
             }
             if let Some((f, _, statistics, track)) = &flying {
@@ -1121,6 +1122,50 @@ pub async fn analyse_compacted(db: &PgPool, segments: &impl SegmentStore, limit:
     Ok(stale.len())
 }
 
+/// Records an analysed flight of a session, `idx` its place in the session's stream: its
+/// span, which its export reads its samples by (`flight_samples`), the flight it is, and
+/// how it compares with the app's document. A flight an open session's analysis found over
+/// is recorded as soon as it is, so it can be exported (and sent to FlySto) before the
+/// session ends; the analysis at the end records them all again.
+#[allow(clippy::too_many_arguments)]
+async fn record(
+    tx: &mut sqlx::PgConnection,
+    session: Uuid,
+    idx: usize,
+    f: &FlightSummary,
+    summary: &Value,
+    statistics: &Value,
+    flight_id: Option<i64>,
+    app_doc: Option<&Value>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO telemetry_flights \
+           (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
+            departure, arrival, summary, flight_id, parity, statistics) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+         ON CONFLICT (session_id, idx) DO UPDATE SET \
+           analyser_version = EXCLUDED.analyser_version, first_at = EXCLUDED.first_at, \
+           last_at = EXCLUDED.last_at, takeoff_at = EXCLUDED.takeoff_at, \
+           departure = EXCLUDED.departure, arrival = EXCLUDED.arrival, summary = EXCLUDED.summary, \
+           flight_id = EXCLUDED.flight_id, parity = EXCLUDED.parity, statistics = EXCLUDED.statistics",
+    )
+    .bind(session)
+    .bind(idx as i32)
+    .bind(ANALYSER_VERSION)
+    .bind(timestamp(f.first_ms))
+    .bind(timestamp(f.last_ms))
+    .bind(f.takeoff_ms.map(timestamp))
+    .bind(f.departure.to_string())
+    .bind(f.arrival.to_string())
+    .bind(summary)
+    .bind(flight_id)
+    .bind(app_doc.map(|a| parity(f, a)))
+    .bind(statistics)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
 /// Replaces the flights of a stream of sessions, `ids` first to last, with this analysis,
 /// stored under the first; or records why it failed. `session` is the one analysed, which
 /// `continues` the stream before it.
@@ -1155,26 +1200,7 @@ async fn store(
         Ok(flights) => {
             for (idx, (f, summary, statistics, track)) in flights.iter().enumerate() {
                 let (flight_id, app_doc) = link(&mut tx, user_id, since, f, statistics, track, true).await?;
-                sqlx::query(
-                    "INSERT INTO telemetry_flights \
-                       (session_id, idx, analyser_version, first_at, last_at, takeoff_at, \
-                        departure, arrival, summary, flight_id, parity, statistics) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-                )
-                .bind(id)
-                .bind(idx as i32)
-                .bind(ANALYSER_VERSION)
-                .bind(timestamp(f.first_ms))
-                .bind(timestamp(f.last_ms))
-                .bind(f.takeoff_ms.map(timestamp))
-                .bind(f.departure.to_string())
-                .bind(f.arrival.to_string())
-                .bind(summary)
-                .bind(flight_id)
-                .bind(app_doc.as_ref().map(|a| parity(f, a)))
-                .bind(statistics)
-                .execute(&mut *tx)
-                .await?;
+                record(&mut tx, id, idx, f, summary, statistics, flight_id, app_doc.as_ref()).await?;
             }
             None
         }
@@ -1850,6 +1876,11 @@ mod tests {
         assert_eq!(placed().await.unwrap(), vec![("a-air".into(), Some(flight_id)), ("b-parked".into(), None)]);
         let landing = statistics["events"].as_array().unwrap().iter().find(|e| e["eventType"] == "landing").cloned();
         assert!(landing.unwrap()["touchdownFpm"].is_number());
+        // Over, it can be exported (and go to FlySto) before the session ends: its span is
+        // recorded, and its samples read by it.
+        assert!(crate::export::exportable(&db, flight_id).await.unwrap());
+        let (_, samples) = flight_samples(&db, &TestSegments, flight_id).await.unwrap().unwrap();
+        assert!(samples.len() > 100, "{} samples", samples.len());
         // The passes after the first added their chunks to the analysis kept from the one
         // before, which finds what one built from the whole session does.
         let kept = open_analyses().lock().unwrap().remove(&id).expect("kept between passes");

@@ -296,6 +296,8 @@ Sends the flight's CSV (as the export above), zipped, to the pilot's FlySto acco
 
 The upload answers, and `GET /content/flights/:id/upload/flysto` (the owner's) says, where the flight is on FlySto: `{ "state": "none" | "processing" | "done" | "empty", "url": "<its FlySto log>" }`. Each upload's FlySto `fileId` is kept in `flysto_uploads`; while it is `processing`, the GET asks FlySto (`GET /public-api/log-files/{fileId}`: `{"processed": ..., "logs": [...]}`, about ten seconds after an upload) and keeps the logs it made, the first linked as `https://www.flysto.net/logs/<id>`. `empty`: FlySto found no flight in the file. A file deleted on FlySto (its 404) is forgotten, back to `none`. The flight page links a `done` flight's log in place of the upload.
 
+For a pilot who connected FlySto, flights go by themselves: each minute the service uploads those ended since the pilot connected (`users.flysto_since`), within two days, once their telemetry span is recorded. That is as soon as the flight is over, since an open session's analysis records the flights it finds over, not only the analysis at the session's end. A refused upload is tried again 10, 20, 30… minutes later, 5 times at most (`flysto_auto_attempts`). The same pass asks FlySto where the files it is processing went; once processed, the flight's Discord post is synced, with a **FlySto** field linking its log.
+
 #### FlySto connection
 `PUT /api/v0/me/flysto` with `{ "token": "<FlySto API token>" }` keeps the signed-in pilot's token, made at `https://www.flysto.net/account/api`, once FlySto accepts it (`GET /public-api/logs?type=all&limit=1`). `DELETE /api/v0/me/flysto` forgets it. The token is never returned.
 

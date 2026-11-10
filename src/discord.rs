@@ -479,7 +479,10 @@ pub async fn sync_flight_discord(
     // gallery instead of rendering them as a separate trailing block: the
     // flight's page, which shows all of it.
     let gallery_url = format!("{}/content/flights/{}", base_url, flight_id);
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref())?;
+    // Where it is on FlySto, once processed there (`flysto.rs`).
+    let flysto = crate::flysto::pointer(db, flight_id).await?;
+    let flysto_url = Some(flysto.url()).filter(|u| !u.is_empty());
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref(), flysto_url)?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
     // changed or a brand-new message must be sent; otherwise reuse the already-attached files
@@ -641,6 +644,7 @@ fn assemble_embeds(
     base_url: &str,
     gallery_url: &str,
     notes: Option<&str>,
+    flysto_url: Option<&str>,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
     let departure_name = statistics.get("departure").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -838,6 +842,15 @@ fn assemble_embeds(
         });
     }
 
+    // The flight on the pilot's FlySto, once there.
+    if let Some(url) = flysto_url {
+        fields.push(LocalField {
+            name: "FlySto".to_string(),
+            value: format!("[Open this flight on FlySto]({url})"),
+            inline: false,
+        });
+    }
+
     // Footer text is plain (no markdown/<t:> support), so the Zulu time is
     // printed literally; the embed's native timestamp below renders alongside it
     // in each viewer's local timezone.
@@ -876,7 +889,7 @@ fn assemble_embeds(
 /// without the parts that are the same for both (author, links, footer, notes).
 pub fn post_lines(statistics: &Value) -> Vec<(String, String)> {
     let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
-    let Ok((embeds, _)) = assemble_embeds(statistics, &user, "", "", None) else {
+    let Ok((embeds, _)) = assemble_embeds(statistics, &user, "", "", None, None) else {
         return Vec::new();
     };
     let embed = serde_json::to_value(&embeds[0]).unwrap_or(Value::Null);
@@ -1115,6 +1128,23 @@ mod tests {
         assert_eq!(get("Flight Info · line 1"), Some("Flying Cessna Skyhawk (C172)"));
         assert_eq!(get("Landing Stats · Vertical Speed"), Some("-382.56 fpm"));
         assert_eq!(get("Max Stats · Indicated Airspeed"), Some("81.24 kts"));
+    }
+
+    #[test]
+    fn a_flight_on_flysto_links_it_in_its_post() {
+        let statistics = serde_json::json!({
+            "departure": { "icao": "KAST", "name": "Astoria" },
+            "arrival": { "icao": "KAST", "name": "Astoria" },
+            "landing_time": "2026-11-01 02:02:00.000",
+        });
+        let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
+        let post = |flysto| {
+            let (embeds, _) = assemble_embeds(&statistics, &user, "", "", None, flysto).unwrap();
+            serde_json::to_string(&embeds[0]).unwrap()
+        };
+        let linked = post(Some("https://www.flysto.net/logs/y6wg6irz"));
+        assert!(linked.contains("[Open this flight on FlySto](https://www.flysto.net/logs/y6wg6irz)"), "{linked}");
+        assert!(!post(None).contains("FlySto"));
     }
 
     #[test]

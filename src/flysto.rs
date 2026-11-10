@@ -3,7 +3,8 @@
 //! (www.flysto.net/public-api/swagger) with the pilot's own API token
 //! (`users.flysto_token`), which they make at www.flysto.net/account/api and paste in
 //! Settings. The token is checked against FlySto before it is kept, and never sent back
-//! to the browser.
+//! to the browser. Flights that end after the pilot connected go by themselves
+//! ([`spawn_auto`]), and the Discord post links each once FlySto has processed it.
 
 use axum::{
     extract::{Path, State},
@@ -92,7 +93,8 @@ pub async fn put_token(
         }
         _ => return Err(AppError::Upstream(refusal(r).await)),
     }
-    sqlx::query("UPDATE users SET flysto_token = $1 WHERE id = $2")
+    // Flights ended from now go by themselves; a replaced token keeps the date.
+    sqlx::query("UPDATE users SET flysto_token = $1, flysto_since = COALESCE(flysto_since, NOW()) WHERE id = $2")
         .bind(token)
         .bind(user_id)
         .execute(&state.db)
@@ -103,7 +105,7 @@ pub async fn put_token(
 /// `DELETE /api/v0/me/flysto`: forgets the pilot's FlySto API token.
 pub async fn delete_token(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, AppError> {
     let user_id = signed_in(&state, &headers).await?;
-    sqlx::query("UPDATE users SET flysto_token = NULL WHERE id = $1")
+    sqlx::query("UPDATE users SET flysto_token = NULL, flysto_since = NULL WHERE id = $1")
         .bind(user_id)
         .execute(&state.db)
         .await?;
@@ -125,7 +127,13 @@ pub async fn upload_handler(
     let Some(token) = token else {
         return Err(AppError::Conflict("Connect FlySto in Settings first".to_string()));
     };
-    let csv = crate::export::owned_csv(&state, flight_id, Some(user_id)).await?;
+    upload(&state, flight_id, user_id, &token).await.map(Json)
+}
+
+/// Sends the pilot's flight to their FlySto, keeps where it went, and says where it is
+/// now, with whether FlySto already had it (`duplicate`).
+async fn upload(state: &AppState, flight_id: i64, user_id: i64, token: &str) -> Result<Value, AppError> {
+    let csv = crate::export::owned_csv(state, flight_id, Some(user_id)).await?;
     let upload_id = format!("butterlog-{flight_id}");
     let name = format!("{upload_id}.csv");
     let body = tokio::task::spawn_blocking(move || zip_one(&name, csv.as_bytes()))
@@ -136,7 +144,7 @@ pub async fn upload_handler(
         .post(format!("{API}/log-upload"))
         // Names the upload in FlySto's own logs only.
         .query(&[("id", &upload_id)])
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .header(reqwest::header::CONTENT_TYPE, "application/zip")
         .timeout(std::time::Duration::from_secs(120))
         .body(body)
@@ -164,9 +172,9 @@ pub async fn upload_handler(
         .bind(&file_id)
         .execute(&state.db)
         .await?;
-        let mut answer = where_it_is(&state, flight_id, &token).await?;
+        let mut answer = where_it_is(state, flight_id, token).await?;
         answer["duplicate"] = json!(duplicate);
-        return Ok(Json(answer));
+        return Ok(answer);
     }
     match status {
         401 | 403 => Err(AppError::Upstream(
@@ -270,6 +278,13 @@ async fn where_it_is(state: &AppState, flight_id: i64, token: &str) -> Result<Va
         .bind(&logs)
         .execute(&state.db)
         .await?;
+    // Its Discord post links it from now: synced with the next minute's (`sessions.rs`).
+    if processed && !logs.is_empty() {
+        sqlx::query("UPDATE flights SET discord_sync_due = TRUE WHERE id = $1")
+            .bind(flight_id)
+            .execute(&state.db)
+            .await?;
+    }
     Ok(Pointer::of(processed, &logs).json())
 }
 
@@ -297,6 +312,89 @@ pub async fn status_handler(
         // Without a token, only what is already known.
         None => Ok(Json(pointer(&state.db, flight_id).await?.json())),
     }
+}
+
+/// How often ended flights go to FlySto, and FlySto is asked about those processing.
+const AUTO_EVERY_SECS: u64 = 60;
+
+/// Sends each ended flight of the pilots who connected FlySto, ended since they did, once
+/// its telemetry is analysed (the export is made from it); then, every minute, asks FlySto
+/// where those it is still processing went, which the Discord post then links.
+pub fn spawn_auto(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(AUTO_EVERY_SECS));
+        loop {
+            ticker.tick().await;
+            match upload_ended(&state, 5).await {
+                Ok(n) if n > 0 => tracing::info!(count = n, "sent ended flights to FlySto"),
+                Err(e) => tracing::error!("automatic FlySto uploads failed: {e}"),
+                _ => {}
+            }
+            if let Err(e) = follow_processing(&state).await {
+                tracing::error!("FlySto processing not followed: {e}");
+            }
+        }
+    });
+}
+
+/// Sends up to `limit` ended flights waiting to go to FlySto. One FlySto refused is tried
+/// again 10 minutes later, then 20, and so on, 5 times at most. Returns how many went.
+async fn upload_ended(state: &AppState, limit: i64) -> Result<usize, AppError> {
+    let due: Vec<(i64, i64, String)> = sqlx::query_as(
+        "SELECT f.id, f.user_id, u.flysto_token FROM flights f JOIN users u ON u.id = f.user_id \
+          WHERE u.flysto_token IS NOT NULL AND f.status = 'ended' \
+            AND f.ended_at >= u.flysto_since AND f.ended_at > NOW() - INTERVAL '2 days' \
+            AND EXISTS (SELECT 1 FROM telemetry_flights t WHERE t.flight_id = f.id) \
+            AND NOT EXISTS (SELECT 1 FROM flysto_uploads x WHERE x.flight_id = f.id) \
+            AND NOT EXISTS (SELECT 1 FROM flysto_auto_attempts a WHERE a.flight_id = f.id \
+                  AND (a.attempts >= 5 OR a.tried_at > NOW() - a.attempts * INTERVAL '10 minutes')) \
+          ORDER BY f.ended_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+    let mut sent = 0;
+    for (flight_id, user_id, token) in due {
+        match upload(state, flight_id, user_id, &token).await {
+            Ok(_) => {
+                sent += 1;
+                sqlx::query("DELETE FROM flysto_auto_attempts WHERE flight_id = $1")
+                    .bind(flight_id)
+                    .execute(&state.db)
+                    .await?;
+            }
+            Err(e) => {
+                tracing::warn!(flight_id, user_id, "automatic FlySto upload failed: {e}");
+                sqlx::query(
+                    "INSERT INTO flysto_auto_attempts (flight_id, attempts, last_error) VALUES ($1, 1, $2) \
+                     ON CONFLICT (flight_id) DO UPDATE SET \
+                       attempts = flysto_auto_attempts.attempts + 1, last_error = $2, tried_at = NOW()",
+                )
+                .bind(flight_id)
+                .bind(e.to_string())
+                .execute(&state.db)
+                .await?;
+            }
+        }
+    }
+    Ok(sent)
+}
+
+/// Asks FlySto where the files it is still processing went, those uploaded in the last
+/// day: the button's page may be closed, and the Discord post waits for the link.
+async fn follow_processing(state: &AppState) -> Result<(), AppError> {
+    let processing: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT x.flight_id, u.flysto_token FROM flysto_uploads x JOIN users u ON u.id = x.user_id \
+          WHERE NOT x.processed AND u.flysto_token IS NOT NULL AND x.uploaded_at > NOW() - INTERVAL '1 day'",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    for (flight_id, token) in processing {
+        if let Err(e) = where_it_is(state, flight_id, &token).await {
+            tracing::warn!(flight_id, "FlySto processing not known: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// FlySto's state of an uploaded file, `{"processed": ..., "logs": [...]}` as text:
