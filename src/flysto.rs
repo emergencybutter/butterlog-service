@@ -47,6 +47,44 @@ async fn signed_in(state: &AppState, headers: &HeaderMap) -> Result<i64, AppErro
         .map_err(|_| AppError::Auth("Sign in first".to_string()))
 }
 
+/// Whether the pilot's ended flights go to FlySto by themselves, once connected.
+pub async fn auto(db: &sqlx::PgPool, user_id: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT flysto_auto FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .map(|a| a.unwrap_or(true))
+}
+
+#[derive(Deserialize)]
+pub struct AutoBody {
+    auto: bool,
+}
+
+/// `PUT /api/v0/me/flysto/auto`: whether ended flights go to FlySto by themselves. Off,
+/// the flight page's button still sends the ones the pilot chooses. Turned back on, only
+/// the flights ended from then go: the ones ended while it was off stay for the button.
+pub async fn put_auto(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AutoBody>,
+) -> Result<Json<Value>, AppError> {
+    let user_id = signed_in(&state, &headers).await?;
+    set_auto(&state.db, user_id, body.auto).await?;
+    Ok(Json(json!({ "auto": body.auto })))
+}
+
+async fn set_auto(db: &sqlx::PgPool, user_id: i64, on: bool) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE users SET flysto_since = CASE WHEN $2 AND NOT flysto_auto THEN NOW() ELSE flysto_since END,                           flysto_auto = $2 WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(on)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Whether the pilot has connected FlySto, for the pages to offer the upload.
 pub async fn connected(db: &sqlx::PgPool, user_id: i64) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT flysto_token IS NOT NULL FROM users WHERE id = $1")
@@ -105,7 +143,8 @@ pub async fn put_token(
 /// `DELETE /api/v0/me/flysto`: forgets the pilot's FlySto API token.
 pub async fn delete_token(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, AppError> {
     let user_id = signed_in(&state, &headers).await?;
-    sqlx::query("UPDATE users SET flysto_token = NULL, flysto_since = NULL WHERE id = $1")
+    // Connected again, flights go by themselves until switched off.
+    sqlx::query("UPDATE users SET flysto_token = NULL, flysto_since = NULL, flysto_auto = TRUE WHERE id = $1")
         .bind(user_id)
         .execute(&state.db)
         .await?;
@@ -340,19 +379,7 @@ pub fn spawn_auto(state: AppState) {
 /// Sends up to `limit` ended flights waiting to go to FlySto. One FlySto refused is tried
 /// again 10 minutes later, then 20, and so on, 5 times at most. Returns how many went.
 async fn upload_ended(state: &AppState, limit: i64) -> Result<usize, AppError> {
-    let due: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT f.id, f.user_id, u.flysto_token FROM flights f JOIN users u ON u.id = f.user_id \
-          WHERE u.flysto_token IS NOT NULL AND f.status = 'ended' \
-            AND f.ended_at >= u.flysto_since AND f.ended_at > NOW() - INTERVAL '2 days' \
-            AND EXISTS (SELECT 1 FROM telemetry_flights t WHERE t.flight_id = f.id) \
-            AND NOT EXISTS (SELECT 1 FROM flysto_uploads x WHERE x.flight_id = f.id) \
-            AND NOT EXISTS (SELECT 1 FROM flysto_auto_attempts a WHERE a.flight_id = f.id \
-                  AND (a.attempts >= 5 OR a.tried_at > NOW() - a.attempts * INTERVAL '10 minutes')) \
-          ORDER BY f.ended_at LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await?;
+    let due = due(&state.db, limit).await?;
     let mut sent = 0;
     for (flight_id, user_id, token) in due {
         match upload(state, flight_id, user_id, &token).await {
@@ -378,6 +405,24 @@ async fn upload_ended(state: &AppState, limit: i64) -> Result<usize, AppError> {
         }
     }
     Ok(sent)
+}
+
+/// The ended flights waiting to go to FlySto by themselves, oldest first: `(flight, pilot,
+/// token)`.
+async fn due(db: &sqlx::PgPool, limit: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT f.id, f.user_id, u.flysto_token FROM flights f JOIN users u ON u.id = f.user_id \
+          WHERE u.flysto_token IS NOT NULL AND u.flysto_auto AND f.status = 'ended' \
+            AND f.ended_at >= u.flysto_since AND f.ended_at > NOW() - INTERVAL '2 days' \
+            AND EXISTS (SELECT 1 FROM telemetry_flights t WHERE t.flight_id = f.id) \
+            AND NOT EXISTS (SELECT 1 FROM flysto_uploads x WHERE x.flight_id = f.id) \
+            AND NOT EXISTS (SELECT 1 FROM flysto_auto_attempts a WHERE a.flight_id = f.id \
+                  AND (a.attempts >= 5 OR a.tried_at > NOW() - a.attempts * INTERVAL '10 minutes')) \
+          ORDER BY f.ended_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await
 }
 
 /// Asks FlySto where the files it is still processing went, those uploaded in the last
@@ -422,6 +467,78 @@ fn file_id(body: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    /// Against a real Postgres, given by `TEST_DATABASE_URL` (skipped without it).
+    #[tokio::test]
+    async fn switched_off_flights_wait_for_the_button_and_stay_there_once_back_on() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let db = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (discord_id, username, flysto_token, flysto_since) \
+             VALUES ($1, 'p', 'TOKEN', NOW() - INTERVAL '1 hour') RETURNING id",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let ended = |ago: &'static str| {
+            let db = db.clone();
+            async move {
+                let id: i64 = sqlx::query_scalar(&format!(
+                    "INSERT INTO flights (user_id, departure, statistics, status, ended_at) \
+                     VALUES ($1, 'KPAE', '{{}}', 'ended', NOW() - INTERVAL '{ago}') RETURNING id"
+                ))
+                .bind(user)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+                // The telemetry it was made from: what the export needs.
+                let session = uuid::Uuid::new_v4();
+                sqlx::query("INSERT INTO telemetry_schemas (hash, channels) VALUES ('\\x00', '\\x00') ON CONFLICT DO NOTHING")
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO telemetry_sessions (id, user_id, schema_hash, open_blob, protocol_version, sim, sim_version, capture, client_version, aircraft) \
+                     VALUES ($1, $2, '\\x00', '\\x00', 1, 'msfs2024', '', 'simconnect', 'test', '{}')",
+                )
+                .bind(session)
+                .bind(user)
+                .execute(&db)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO telemetry_flights (session_id, idx, analyser_version, flight_id, first_at, last_at, departure, arrival, summary) \
+                     VALUES ($1, 0, 1, $2, NOW() - INTERVAL '1 hour', NOW(), 'KPAE', 'KSEA', '{}')",
+                )
+                .bind(session)
+                .bind(id)
+                .execute(&db)
+                .await
+                .unwrap();
+                id
+            }
+        };
+        let mine = |due: Vec<(i64, i64, String)>| due.into_iter().filter(|d| d.1 == user).map(|d| d.0).collect::<Vec<_>>();
+
+        let first = ended("10 minutes").await;
+        assert_eq!(mine(due(&db, 1000).await.unwrap()), [first]);
+        assert!(auto(&db, user).await.unwrap(), "on once connected");
+
+        set_auto(&db, user, false).await.unwrap();
+        assert!(!auto(&db, user).await.unwrap());
+        assert!(mine(due(&db, 1000).await.unwrap()).is_empty());
+
+        // Back on: what ended while it was off isn't sent by itself, what ends next is.
+        set_auto(&db, user, true).await.unwrap();
+        assert!(mine(due(&db, 1000).await.unwrap()).is_empty());
+        let next = ended("0 seconds").await;
+        assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
+        // On again while on: the date stays.
+        set_auto(&db, user, true).await.unwrap();
+        assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
+    }
 
     #[test]
     fn a_processed_file_points_at_its_log() {

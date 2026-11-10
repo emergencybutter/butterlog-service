@@ -354,7 +354,17 @@
                 {% if flysto_connected %}<span class="badge notified-badge">Connected</span>{% endif %}
             </div>
             {% if flysto_connected %}
-            <p class="section-desc">Your flights can be sent to your FlySto account with <strong>Upload to FlySto</strong> on their page. Paste a new token to replace the one kept, or disconnect.</p>
+            <p class="section-desc">Send any flight to your FlySto account with <strong>Upload to FlySto</strong> on its page. Paste a new token to replace the one kept, or disconnect.</p>
+            <div class="channel-row">
+                <div class="channel-info">
+                    <span class="channel-name">Upload flights by themselves</span>
+                    <span class="channel-id">Each flight you finish goes to FlySto, and its Discord post links it. Off, upload the ones you choose.</span>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="flysto-auto" {% if flysto_auto %}checked{% endif %}>
+                    <span class="slider"></span>
+                </label>
+            </div>
             {% else %}
             <p class="section-desc">Send your flights to FlySto with one click from their page. Create an API token on <a href="https://www.flysto.net/account/api" target="_blank" rel="noopener">your FlySto account's API page</a> and paste it here. ButterLog keeps it only to upload the flights you ask it to.</p>
             {% endif %}
@@ -403,6 +413,22 @@
                 flystoForm.addEventListener('submit', e => {
                     e.preventDefault();
                     flysto('PUT', { token: document.getElementById('flysto-token').value });
+                });
+                const flystoAuto = document.getElementById('flysto-auto');
+                if (flystoAuto) flystoAuto.addEventListener('change', async () => {
+                    const on = flystoAuto.checked;
+                    try {
+                        const r = await fetch('/api/v0/me/flysto/auto', {
+                            method: 'PUT', credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ auto: on }),
+                        });
+                        if (!r.ok) throw new Error();
+                        showToast(on ? 'Flights go to FlySto by themselves' : 'Upload flights to FlySto from their page', 'success');
+                    } catch (err) {
+                        flystoAuto.checked = !on;
+                        showToast("Couldn't change it", 'error');
+                    }
                 });
                 const flystoOff = document.getElementById('flysto-disconnect');
                 if (flystoOff) flystoOff.addEventListener('click', () => flysto('DELETE'));

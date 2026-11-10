@@ -25,6 +25,8 @@ pub struct Me {
     pub flights_url: String,
     pub settings_url: String,
     pub flysto_connected: bool,
+    /// Whether ended flights go to FlySto by themselves.
+    pub flysto_auto: bool,
     /// The flight being flown, if any.
     pub live: Option<FlightRef>,
     /// The last flight finished, if any.
@@ -59,9 +61,9 @@ fn flight(base: &str, (id, departure, arrival, aircraft, ended_at): Row) -> Flig
 }
 
 pub async fn me(db: &PgPool, base: &str, user_id: i64) -> Result<Me, AppError> {
-    let (username, global_name, discord_id, avatar, flysto): (String, Option<String>, String, Option<String>, bool) =
+    let (username, global_name, discord_id, avatar, flysto, flysto_auto): (String, Option<String>, String, Option<String>, bool, bool) =
         sqlx::query_as(
-            "SELECT username, global_name, discord_id, avatar, flysto_token IS NOT NULL FROM users WHERE id = $1",
+            "SELECT username, global_name, discord_id, avatar, flysto_token IS NOT NULL, flysto_auto FROM users WHERE id = $1",
         )
         .bind(user_id)
         .fetch_one(db)
@@ -90,6 +92,7 @@ pub async fn me(db: &PgPool, base: &str, user_id: i64) -> Result<Me, AppError> {
         flights_url: format!("{base}/content"),
         settings_url: format!("{base}/content/settings"),
         flysto_connected: flysto,
+        flysto_auto,
         live,
         last_ended,
     })

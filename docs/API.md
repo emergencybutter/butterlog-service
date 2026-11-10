@@ -301,6 +301,8 @@ For a pilot who connected FlySto, flights go by themselves: each minute the serv
 #### FlySto connection
 `PUT /api/v0/me/flysto` with `{ "token": "<FlySto API token>" }` keeps the signed-in pilot's token, made at `https://www.flysto.net/account/api`, once FlySto accepts it (`GET /public-api/logs?type=all&limit=1`). `DELETE /api/v0/me/flysto` forgets it. The token is never returned.
 
+`PUT /api/v0/me/flysto/auto` with `{ "auto": false }` stops the uploads by themselves (`users.flysto_auto`, on by default and again after reconnecting); the flight page's **Upload to FlySto** still sends the flights the pilot chooses. `{ "auto": true }` turns them back on for the flights ended from then: those ended while off aren't sent by themselves. `GET /api/v0/me` says which in `flystoAuto`.
+
 *   **Response:** `200 OK` `{ "connected": true | false }`; `400 Bad Request` when FlySto doesn't accept the token; `401` when not signed in.
 
 ---

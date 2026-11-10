@@ -268,6 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
         .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler).get(flysto::status_handler))
         .route("/api/v0/me/flysto", put(flysto::put_token).delete(flysto::delete_token))
+        .route("/api/v0/me/flysto/auto", put(flysto::put_auto))
         // The app's account panel, web commands and "flight done" notification.
         .route("/api/v0/me", get(me::me_handler))
         .route("/content/flights/:id", get(flight_detail_handler))
@@ -610,7 +611,8 @@ async fn settings_handler(
 
     let nav = nav_for(&state, &headers, "settings", "Settings").await;
     let flysto_connected = flysto::connected(&state.db, user_id).await.unwrap_or(false);
-    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds, flysto_connected };
+    let flysto_auto = flysto::auto(&state.db, user_id).await.unwrap_or(true);
+    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds, flysto_connected, flysto_auto };
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {

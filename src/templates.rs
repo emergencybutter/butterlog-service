@@ -231,7 +231,8 @@ pub struct SettingsPage {
     /// Guilds with channels currently receiving this user's notifications.
     pub notified_guilds: Vec<NotifiedGuild>,
     /// Whether the pilot's FlySto API token is kept, for uploading flights there.
-    pub flysto_connected: bool,
+    pub flysto_connected: bool,    /// Whether ended flights go there by themselves.
+    pub flysto_auto: bool,
 }
 
 pub struct AdminGuild {
@@ -530,6 +531,7 @@ mod tests {
                 channels: vec![NotifiedChannel { id: "1".into(), name: "flight-log".into() }],
             }],
             flysto_connected: false,
+            flysto_auto: true,
         };
         std::fs::write(format!("{}/shell_settings.html", out), settings.render().unwrap()).unwrap();
 
@@ -595,6 +597,7 @@ mod tests {
             }],
             notified_guilds: vec![],
             flysto_connected: true,
+            flysto_auto: true,
         };
         let html = page.render().unwrap();
         assert!(!html.contains("<img src=x onerror"));
