@@ -37,8 +37,10 @@
                 <a class="fv-btn fv-btn-quiet" href="{{ export_href }}" download title="Export for FlySto (CSV)">Export CSV</a>
                 {% endif %}
                 {% if !upload_href.is_empty() %}
-                {% if flysto_connected %}
-                <button class="fv-btn fv-btn-quiet" type="button" data-flysto-upload="{{ upload_href }}" title="Send this flight to your FlySto account">Upload to FlySto</button>
+                {% if flysto_state == "done" %}
+                <a class="fv-btn fv-btn-quiet" href="{{ flysto_url }}" target="_blank" rel="noopener" title="This flight on your FlySto">Open on FlySto ↗</a>
+                {% else if flysto_connected %}
+                <button class="fv-btn fv-btn-quiet" type="button" data-flysto-upload="{{ upload_href }}" data-flysto-state="{{ flysto_state }}" title="Send this flight to your FlySto account">Upload to FlySto</button>
                 {% else %}
                 <a class="fv-btn fv-btn-quiet" href="/content/settings#flysto" title="Connect FlySto in Settings to upload your flights">Upload to FlySto</a>
                 {% endif %}

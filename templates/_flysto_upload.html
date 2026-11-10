@@ -1,6 +1,7 @@
 {# The Upload to FlySto button's behaviour, for any `[data-flysto-upload]` on the page:
-   posts the flight to the service, which sends it to the pilot's FlySto, and says how
-   that went. JSON, so another site can't post it with the pilot's cookie. #}
+   posts the flight to the service, which sends it to the pilot's FlySto, then asks the
+   service where it is until FlySto has processed it, and becomes the link to its log.
+   JSON, so another site can't post it with the pilot's cookie. #}
 <style>
     .flysto-toast {
         position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 100;
@@ -21,38 +22,80 @@
         t.setAttribute('role', 'status');
         t.innerHTML = html;
         document.body.appendChild(t);
-        setTimeout(() => t.remove(), error ? 8000 : 4000);
+        setTimeout(() => t.remove(), error ? 8000 : 5000);
     }
     const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const failed = async r => {
+        const data = await r.json().catch(() => ({}));
+        const msg = data.error || ('FlySto request failed (' + r.status + ')');
+        const fix = /Settings/.test(msg) ? ' <a href="/content/settings#flysto">Open Settings</a>' : '';
+        toast(esc(msg) + fix, true);
+    };
+
+    // The button becomes the link to the flight's log, as the page renders it once there.
+    function becomeLink(btn, url) {
+        const a = document.createElement('a');
+        a.className = btn.className;
+        a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        a.title = 'This flight on your FlySto';
+        a.textContent = 'Open on FlySto ↗';
+        btn.replaceWith(a);
+    }
+
+    // Asks where the flight is until FlySto has processed it: about ten seconds, often.
+    async function follow(btn, label) {
+        btn.disabled = true;
+        btn.textContent = 'Processing on FlySto…';
+        for (let i = 0; i < 40; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            let r;
+            try { r = await fetch(btn.dataset.flystoUpload, { credentials: 'same-origin' }); } catch (e) { continue; }
+            if (!r.ok) { await failed(r); break; }
+            const where = await r.json().catch(() => ({}));
+            if (where.state === 'done') {
+                becomeLink(btn, where.url);
+                toast('Processed by FlySto. <a href="' + esc(where.url) + '" target="_blank" rel="noopener">Open it</a>');
+                return;
+            }
+            if (where.state === 'empty') { toast('FlySto processed the file but found no flight in it.', true); break; }
+            if (where.state === 'none') break;
+        }
+        btn.disabled = false;
+        btn.textContent = label;
+    }
+
     document.querySelectorAll('[data-flysto-upload]').forEach(btn => {
         const label = btn.textContent;
         btn.addEventListener('click', async () => {
             btn.disabled = true;
             btn.textContent = 'Uploading…';
+            let r;
             try {
-                const r = await fetch(btn.dataset.flystoUpload, {
+                r = await fetch(btn.dataset.flystoUpload, {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' }, body: '{}',
                 });
-                if (r.ok) {
-                    const data = await r.json().catch(() => ({}));
-                    btn.textContent = 'On FlySto ✓';
-                    const flysto = '<a href="https://www.flysto.net/" target="_blank" rel="noopener">your FlySto</a>';
-                    toast(data.duplicate
-                        ? 'Already on ' + flysto + ': it has this flight from an earlier upload.'
-                        : 'Sent to ' + flysto + '. It shows there once FlySto has processed it.');
-                    return;
-                }
-                const data = await r.json().catch(() => ({}));
-                const msg = data.error || ('Upload failed (' + r.status + ')');
-                const fix = /Settings/.test(msg) ? ' <a href="/content/settings#flysto">Open Settings</a>' : '';
-                toast(esc(msg) + fix, true);
             } catch (e) {
                 toast('Upload failed: the service could not be reached.', true);
+                btn.disabled = false; btn.textContent = label;
+                return;
             }
-            btn.disabled = false;
-            btn.textContent = label;
+            if (!r.ok) {
+                await failed(r);
+                btn.disabled = false; btn.textContent = label;
+                return;
+            }
+            const where = await r.json().catch(() => ({}));
+            if (where.state === 'done') {
+                becomeLink(btn, where.url);
+                toast(where.duplicate ? 'Already on your FlySto.' : 'Sent to your FlySto.');
+                return;
+            }
+            toast(where.duplicate ? 'Already sent to FlySto: waiting for it to be processed.' : 'Sent to FlySto: it is processing the flight.');
+            follow(btn, label);
         });
+        // Uploaded, but FlySto hadn't finished with it when the page was made.
+        if (btn.dataset.flystoState === 'processing') follow(btn, label);
     });
 })();
 </script>

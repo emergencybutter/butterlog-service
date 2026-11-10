@@ -263,7 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
         .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
-        .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler))
+        .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler).get(flysto::status_handler))
         .route("/api/v0/me/flysto", put(flysto::put_token).delete(flysto::delete_token))
         .route("/content/flights/:id", get(flight_detail_handler))
         .route(
@@ -691,6 +691,9 @@ async fn flight_detail_page(
         Some(id) if exportable => flysto::connected(&state.db, id).await?,
         _ => false,
     };
+    // Where it already is on FlySto, for the page to link it rather than offer it again.
+    let flysto = if exportable { flysto::pointer(&state.db, flight_id).await? } else { flysto::Pointer::None };
+    let (flysto_state, flysto_url) = (flysto.state().to_string(), flysto.url().to_string());
 
     // Every flight shows all of it: its track, from wherever it now is, in the full view.
     if let Some(doc) = flight_doc::document(&state.db, &state.r2, flight_id).await? {
@@ -699,6 +702,8 @@ async fn flight_detail_page(
             export_href,
             upload_href,
             flysto_connected,
+            flysto_state,
+            flysto_url,
             simulator: doc["simulator"].as_str().unwrap_or_default().to_string(),
             json_escaped: script_json(&doc.to_string()),
         };
@@ -771,6 +776,8 @@ async fn flight_detail_page(
         export_href,
         upload_href,
         flysto_connected,
+        flysto_state,
+        flysto_url,
     };
 
     Ok(Html(page.render()?).into_response())
@@ -1708,6 +1715,8 @@ async fn flight_share_detail_handler(
         export_href: String::new(),
         upload_href: String::new(),
         flysto_connected: false,
+        flysto_state: String::new(),
+        flysto_url: String::new(),
         simulator: simulator.unwrap_or_default(),
         json_escaped: script_json(&json_str),
     };

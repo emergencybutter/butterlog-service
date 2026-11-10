@@ -294,6 +294,8 @@ Sends the flight's CSV (as the export above), zipped, to the pilot's FlySto acco
 
 *   **Response:** `200 OK` `{ "uploaded": true, "duplicate": false, "fileId": "<FlySto's>" }`, `duplicate` true when FlySto already had the log (its 409); `409 Conflict` when the pilot hasn't connected FlySto; `404 Not Found` for someone else's flight or one with no telemetry; `502 Bad Gateway` with FlySto's reason when it refuses (an expired token says to update it in Settings).
 
+The upload answers, and `GET /content/flights/:id/upload/flysto` (the owner's) says, where the flight is on FlySto: `{ "state": "none" | "processing" | "done" | "empty", "url": "<its FlySto log>" }`. Each upload's FlySto `fileId` is kept in `flysto_uploads`; while it is `processing`, the GET asks FlySto (`GET /public-api/log-files/{fileId}`: `{"processed": ..., "logs": [...]}`, about ten seconds after an upload) and keeps the logs it made, the first linked as `https://www.flysto.net/logs/<id>`. `empty`: FlySto found no flight in the file. A file deleted on FlySto (its 404) is forgotten, back to `none`. The flight page links a `done` flight's log in place of the upload.
+
 #### FlySto connection
 `PUT /api/v0/me/flysto` with `{ "token": "<FlySto API token>" }` keeps the signed-in pilot's token, made at `https://www.flysto.net/account/api`, once FlySto accepts it (`GET /public-api/logs?type=all&limit=1`). `DELETE /api/v0/me/flysto` forgets it. The token is never returned.
 

@@ -111,6 +111,10 @@ pub struct FlightDetailPage {
     pub upload_href: String,
     /// Whether its pilot has connected FlySto; without, the upload leads to Settings.
     pub flysto_connected: bool,
+    /// Where it is on FlySto (`flysto::Pointer`): `none`, `processing`, `done` or `empty`.
+    pub flysto_state: String,
+    /// Its log on FlySto once there (`done`); empty before.
+    pub flysto_url: String,
 }
 
 /// A single label/value row in a flight-detail stats card.
@@ -265,6 +269,10 @@ pub struct FlightViewPage {
     pub upload_href: String,
     /// Whether its pilot has connected FlySto; without, the upload leads to Settings.
     pub flysto_connected: bool,
+    /// Where it is on FlySto (`flysto::Pointer`): `none`, `processing`, `done` or `empty`.
+    pub flysto_state: String,
+    /// Its log on FlySto once there (`done`); empty before.
+    pub flysto_url: String,
     /// `MSFS`, `X-Plane`, or empty when unknown (an old share without its flight).
     /// The renderer reads the track's raw pitch and roll through it.
     pub simulator: String,
@@ -333,6 +341,8 @@ mod tests {
             export_href: String::new(),
             upload_href: String::new(),
             flysto_connected: false,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
             simulator: r#"" ; alert(1); //"#.into(),
             json_escaped: "{}".into(),
         }
@@ -352,6 +362,8 @@ mod tests {
             export_href: String::new(),
             upload_href: String::new(),
             flysto_connected: false,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -382,6 +394,8 @@ mod tests {
             export_href: "/content/flights/7/export/flysto.csv".into(),
             upload_href: "/content/flights/7/upload/flysto".into(),
             flysto_connected: true,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
         };
         let html = page.render().unwrap();
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -554,6 +568,8 @@ mod tests {
             export_href: String::new(),
             upload_href: String::new(),
             flysto_connected: false,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -600,6 +616,8 @@ mod tests {
             export_href: "/content/flights/7/export/flysto.csv".into(),
             upload_href: "/content/flights/7/upload/flysto".into(),
             flysto_connected: true,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: r#"{"summary":{"x":"</script>"}}"#.into(),
         };
@@ -607,12 +625,25 @@ mod tests {
         assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
         assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"</script>"}};"#));
         assert!(!html.contains("Delete share"));
+        assert!(html.contains(r#"data-flysto-upload="/content/flights/7/upload/flysto""#));
+        // Already on FlySto: the page links its log rather than offering it again.
+        let on_flysto = FlightViewPage {
+            flysto_state: "done".into(),
+            flysto_url: "https://www.flysto.net/logs/y6wg6irz".into(),
+            ..owner
+        }
+        .render()
+        .unwrap();
+        assert!(on_flysto.contains(r#"href="https://www.flysto.net/logs/y6wg6irz""#) && on_flysto.contains("Open on FlySto"));
+        assert!(!on_flysto.contains(r#"data-flysto-upload=""#));
 
         let visitor = FlightViewPage {
             nav: nav("flights"),
             export_href: String::new(),
             upload_href: String::new(),
             flysto_connected: false,
+            flysto_state: "none".into(),
+            flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         };

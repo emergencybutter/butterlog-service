@@ -105,7 +105,7 @@
         <div class="pilot">Flown by {{ pilot }}</div>
         {{ landing_badge|safe }}
         {% if !export_href.is_empty() %}<div><a href="{{ export_href }}" class="share-link" download>Export for FlySto (CSV) ↓</a></div>{% endif %}
-        {% if !upload_href.is_empty() %}<div>{% if flysto_connected %}<button type="button" class="share-link" data-flysto-upload="{{ upload_href }}">Upload to FlySto ↑</button>{% else %}<a href="/content/settings#flysto" class="share-link">Upload to FlySto ↑</a>{% endif %}</div>{% endif %}
+        {% if !upload_href.is_empty() %}<div>{% if flysto_state == "done" %}<a href="{{ flysto_url }}" class="share-link" target="_blank" rel="noopener">Open on FlySto ↗</a>{% else if flysto_connected %}<button type="button" class="share-link" data-flysto-upload="{{ upload_href }}" data-flysto-state="{{ flysto_state }}">Upload to FlySto ↑</button>{% else %}<a href="/content/settings#flysto" class="share-link">Upload to FlySto ↑</a>{% endif %}</div>{% endif %}
         {% if !touchdown_stats.is_empty() || !peak_stats.is_empty() %}
         <div class="stats-grid">
             {% if !touchdown_stats.is_empty() %}

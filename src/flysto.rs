@@ -146,10 +146,27 @@ pub async fn upload_handler(
     // already has (the same flight uploaded again), the existing one's.
     let status = r.status().as_u16();
     if status == 200 || status == 409 {
-        let file_id = file_id(&r.text().await.unwrap_or_default());
         let duplicate = status == 409;
-        tracing::info!(flight_id, user_id, duplicate, file_id = file_id.as_deref(), "uploaded to FlySto");
-        return Ok(Json(json!({ "uploaded": true, "duplicate": duplicate, "fileId": file_id })));
+        let Some(file_id) = file_id(&r.text().await.unwrap_or_default()) else {
+            return Err(AppError::Upstream("FlySto took the flight but didn't say where it put it".to_string()));
+        };
+        tracing::info!(flight_id, user_id, duplicate, file_id, "uploaded to FlySto");
+        // The same file again keeps what is known of it; another starts over.
+        sqlx::query(
+            "INSERT INTO flysto_uploads (flight_id, user_id, file_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (flight_id) DO UPDATE SET \
+               user_id = EXCLUDED.user_id, file_id = EXCLUDED.file_id, uploaded_at = NOW(), \
+               processed = flysto_uploads.processed AND flysto_uploads.file_id = EXCLUDED.file_id, \
+               log_ids = CASE WHEN flysto_uploads.file_id = EXCLUDED.file_id THEN flysto_uploads.log_ids ELSE '{}' END",
+        )
+        .bind(flight_id)
+        .bind(user_id)
+        .bind(&file_id)
+        .execute(&state.db)
+        .await?;
+        let mut answer = where_it_is(&state, flight_id, &token).await?;
+        answer["duplicate"] = json!(duplicate);
+        return Ok(Json(answer));
     }
     match status {
         401 | 403 => Err(AppError::Upstream(
@@ -157,6 +174,140 @@ pub async fn upload_handler(
         )),
         _ => Err(AppError::Upstream(refusal(r).await)),
     }
+}
+
+/// Where a flight is on FlySto, as the pages show it: `none` (never uploaded),
+/// `processing`, `done` with its log's `url`, or `empty` when FlySto found no flight in it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pointer {
+    None,
+    Processing,
+    Done(String),
+    Empty,
+}
+
+impl Pointer {
+    fn of(processed: bool, log_ids: &[String]) -> Self {
+        match (processed, log_ids.first()) {
+            (false, _) => Pointer::Processing,
+            (true, Some(id)) => Pointer::Done(log_url(id)),
+            (true, None) => Pointer::Empty,
+        }
+    }
+
+    pub fn state(&self) -> &'static str {
+        match self {
+            Pointer::None => "none",
+            Pointer::Processing => "processing",
+            Pointer::Done(_) => "done",
+            Pointer::Empty => "empty",
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        if let Pointer::Done(url) = self { url } else { "" }
+    }
+
+    fn json(&self) -> Value {
+        json!({ "state": self.state(), "url": self.url() })
+    }
+}
+
+/// A FlySto log's page.
+fn log_url(id: &str) -> String {
+    format!("https://www.flysto.net/logs/{}", id.trim())
+}
+
+/// What is known of the flight on FlySto, without asking it.
+pub async fn pointer(db: &sqlx::PgPool, flight_id: i64) -> Result<Pointer, sqlx::Error> {
+    let row: Option<(bool, Vec<String>)> =
+        sqlx::query_as("SELECT processed, log_ids FROM flysto_uploads WHERE flight_id = $1")
+            .bind(flight_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map_or(Pointer::None, |(processed, logs)| Pointer::of(processed, &logs)))
+}
+
+/// Where the flight is on FlySto, asking FlySto while it is still processing the file
+/// (`GET /log-files/{fileId}`: `{"processed": ..., "logs": [...]}`), and keeping its answer.
+async fn where_it_is(state: &AppState, flight_id: i64, token: &str) -> Result<Value, AppError> {
+    let row: Option<(String, bool, Vec<String>)> =
+        sqlx::query_as("SELECT file_id, processed, log_ids FROM flysto_uploads WHERE flight_id = $1")
+            .bind(flight_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((file_id, processed, logs)) = row else { return Ok(Pointer::None.json()) };
+    if processed {
+        return Ok(Pointer::of(true, &logs).json());
+    }
+    let r = state
+        .http_client
+        .get(format!("{API}/log-files/{file_id}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    match r.status().as_u16() {
+        200 => {}
+        // Deleted on FlySto: it is no longer there to point at.
+        404 => {
+            sqlx::query("DELETE FROM flysto_uploads WHERE flight_id = $1")
+                .bind(flight_id)
+                .execute(&state.db)
+                .await?;
+            return Ok(Pointer::None.json());
+        }
+        401 | 403 => {
+            return Err(AppError::Upstream(
+                "FlySto no longer accepts your API token: update it in Settings".to_string(),
+            ));
+        }
+        _ => return Err(AppError::Upstream(refusal(r).await)),
+    }
+    let (processed, logs) = file_state(&r.text().await.unwrap_or_default());
+    sqlx::query("UPDATE flysto_uploads SET processed = $2, log_ids = $3, checked_at = NOW() WHERE flight_id = $1")
+        .bind(flight_id)
+        .bind(processed)
+        .bind(&logs)
+        .execute(&state.db)
+        .await?;
+    Ok(Pointer::of(processed, &logs).json())
+}
+
+/// `GET /content/flights/:id/upload/flysto`: where the owner's flight is on FlySto, which
+/// the page asks until FlySto has processed it.
+pub async fn status_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let user_id = signed_in(&state, &headers).await?;
+    let owner: Option<i64> = sqlx::query_scalar("SELECT user_id FROM flights WHERE id = $1")
+        .bind(flight_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if owner != Some(user_id) {
+        return Err(AppError::NotFound("Flight not found".to_string()));
+    }
+    let token: Option<String> = sqlx::query_scalar("SELECT flysto_token FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    match token {
+        Some(token) => where_it_is(&state, flight_id, &token).await.map(Json),
+        // Without a token, only what is already known.
+        None => Ok(Json(pointer(&state.db, flight_id).await?.json())),
+    }
+}
+
+/// FlySto's state of an uploaded file, `{"processed": ..., "logs": [...]}` as text:
+/// whether it is processed, and the logs it made.
+fn file_state(body: &str) -> (bool, Vec<String>) {
+    let v: Value = serde_json::from_str(body).unwrap_or_default();
+    let logs = v["logs"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    (v["processed"].as_bool().unwrap_or(false), logs)
 }
 
 /// The `fileId` of FlySto's answer to an upload, which it sends as text.
@@ -173,6 +324,17 @@ fn file_id(body: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn a_processed_file_points_at_its_log() {
+        // As FlySto answered for the KAST circuit uploaded on 2026-11-10.
+        assert_eq!(file_state(r#"{"processed":false}"#), (false, vec![]));
+        let (processed, logs) = file_state(r#"{"processed":true,"logs":["y6wg6irz"]}"#);
+        assert_eq!(Pointer::of(processed, &logs), Pointer::Done("https://www.flysto.net/logs/y6wg6irz".into()));
+        assert_eq!(Pointer::of(false, &[]).state(), "processing");
+        assert_eq!(Pointer::of(true, &[]).state(), "empty");
+        assert_eq!(file_state("not json"), (false, vec![]));
+    }
 
     #[test]
     fn the_uploaded_files_id_is_read_from_flystos_text() {
