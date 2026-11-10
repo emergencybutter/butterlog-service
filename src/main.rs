@@ -27,6 +27,7 @@ mod shares;
 mod flight_doc;
 mod export;
 mod flysto;
+mod me;
 mod anonymous;
 mod normalise;
 mod analysis;
@@ -267,6 +268,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
         .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler).get(flysto::status_handler))
         .route("/api/v0/me/flysto", put(flysto::put_token).delete(flysto::delete_token))
+        // The app's account panel, web commands and "flight done" notification.
+        .route("/api/v0/me", get(me::me_handler))
         .route("/content/flights/:id", get(flight_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
