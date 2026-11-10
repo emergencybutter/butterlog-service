@@ -1394,9 +1394,16 @@ function renderFlight3D(d) {
     };
     const segs = [];
     for (let i = 0; i < pts.length - 1; i++) segs.push({ path: [pts[i], pts[i + 1]], color: altColor(pts[i][2] / Z) });
-    // Faint vertical "curtain" dropping from the track to the ground to convey height.
-    const drops = [], dstep = Math.max(1, Math.floor(pts.length / 60));
-    for (let i = 0; i < pts.length; i += dstep) drops.push({ path: [pts[i], [pts[i][0], pts[i][1], 0]] });
+    // A translucent curtain hanging from the track to the ground, so the path reads
+    // as a shape over the land rather than a line floating at no telling where. One
+    // panel per segment, down to sea level: the terrain, opaque, hides what is below
+    // it, so each panel seems to stand on the ground. A stop has no width to hang one.
+    const curtain = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+        const [a, b] = [pts[i], pts[i + 1]];
+        if (a[0] === b[0] && a[1] === b[1]) continue;
+        curtain.push({ polygon: [a, b, [b[0], b[1], 0], [a[0], a[1], 0]], color: segs[i].color });
+    }
 
     const events = (d.summary && d.summary.events) || [];
     const legName = { downwind: 'Downwind', base: 'Base', final: 'Final' };
@@ -1445,7 +1452,10 @@ function renderFlight3D(d) {
     });
     const statics = [
         terrain,
-        new deck.PathLayer({ id: 'drops', data: drops, getPath: p => p.path, getColor: [255, 176, 0, 45], widthUnits: 'pixels', getWidth: 1, widthMinPixels: 1 }),
+        // Vertical, so tessellated in its own plane (`_full3d`); unlit, and writing no
+        // depth, so where it folds over itself (a circuit) it neither hides itself nor
+        // the track behind it.
+        new deck.SolidPolygonLayer({ id: 'curtain', data: curtain, _full3d: true, getPolygon: c => c.polygon, getFillColor: c => [...c.color, 60], material: false, parameters: { depthWriteEnabled: false } }),
         new deck.PathLayer({ id: 'track', data: segs, getPath: p => p.path, getColor: p => p.color, widthUnits: 'pixels', getWidth: 4, widthMinPixels: 2, capRounded: true, jointRounded: true }),
         new deck.ScatterplotLayer({ id: 'events', data: evPts, getPosition: e => e.position, getRadius: 6, radiusUnits: 'pixels', getFillColor: e => e.color, stroked: true, getLineColor: [10, 12, 13], lineWidthMinPixels: 1.5 }),
         new deck.TextLayer({ id: 'evlabels', data: evPts, getPosition: e => e.position, getText: e => e.label, getSize: 11, getColor: [238, 241, 234], getPixelOffset: [0, -14], fontFamily: 'monospace', background: true, getBackgroundColor: [16, 19, 20, 190], backgroundPadding: [4, 2] }),

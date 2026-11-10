@@ -19,13 +19,23 @@
         /* Rows lead to that type's screenshots. Interactive, so they take a
            hover, but nothing moves - this is a table, not a deck of cards. */
         .srow {
-            display: block; padding: 7px 4px 9px; border-top: 1px solid var(--border);
+            display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; align-items: center;
+            padding: 8px 4px; border-top: 1px solid var(--border);
             color: inherit; text-decoration: none; border-radius: var(--radius-sm);
             transition: background-color var(--t);
         }
         a.srow:hover { background: var(--surface-2); }
         a.srow:hover .icao { color: var(--accent-text); }
         .srow:first-of-type { border-top: 0; }
+        /* One screenshot taken on the type, the newest, in a neutral frame so the
+           picture carries the colour. Most types have none: their slot stays, empty
+           and unframed, so the ranks and names keep one column down the board
+           without a wall of blank boxes. */
+        .shot { width: 84px; aspect-ratio: 16 / 10; }
+        .shot img {
+            display: block; width: 100%; height: 100%; object-fit: cover;
+            border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+        }
         .srow-head { display: flex; align-items: baseline; gap: 8px; }
         .rank { font-family: var(--font-body); font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--text-muted); width: 1.4em; flex: none; }
         .icao { font-family: var(--font-display); font-weight: 700; font-size: 0.92rem; letter-spacing: -0.01em; flex: none; }
@@ -49,7 +59,7 @@
 
     <div class="view-head">
         <div class="view-head-inner">
-            <span class="view-title">{% if mine %}My Aircrafts{% else %}Aircrafts{% endif %}</span>
+            <span class="view-title">Aircrafts</span>
             <span class="view-sub">{% if mine %}Types you have flown{% else %}Types across every pilot{% endif %}</span>
             {% if !scope_mine_href.is_empty() %}
             <div class="view-actions">
@@ -74,6 +84,8 @@
             <h2 class="board-title">By Flights <span class="metric">count</span></h2>
             {% for r in by_flights %}
             <a class="srow" href="{{ r.href }}">
+                <div class="shot">{% if !r.shot.is_empty() %}<img src="{{ r.shot }}" alt="" loading="lazy" decoding="async">{% endif %}</div>
+                <div class="srow-body">
                 <div class="srow-head">
                     <span class="rank">{{ r.rank }}</span>
                     <span class="icao">{{ r.icao }}</span>
@@ -82,6 +94,7 @@
                 </div>
                 <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
                 <div class="sub">{{ r.sub }}</div>
+                </div>
             </a>
             {% endfor %}
         </div>
@@ -90,6 +103,8 @@
             <h2 class="board-title">By Time <span class="metric">hours flown</span></h2>
             {% for r in by_time %}
             <a class="srow" href="{{ r.href }}">
+                <div class="shot">{% if !r.shot.is_empty() %}<img src="{{ r.shot }}" alt="" loading="lazy" decoding="async">{% endif %}</div>
+                <div class="srow-body">
                 <div class="srow-head">
                     <span class="rank">{{ r.rank }}</span>
                     <span class="icao">{{ r.icao }}</span>
@@ -98,6 +113,7 @@
                 </div>
                 <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
                 <div class="sub">{{ r.sub }}</div>
+                </div>
             </a>
             {% endfor %}
         </div>
@@ -106,6 +122,8 @@
             <h2 class="board-title">By Distance <span class="metric">nautical miles</span></h2>
             {% for r in by_distance %}
             <a class="srow" href="{{ r.href }}">
+                <div class="shot">{% if !r.shot.is_empty() %}<img src="{{ r.shot }}" alt="" loading="lazy" decoding="async">{% endif %}</div>
+                <div class="srow-body">
                 <div class="srow-head">
                     <span class="rank">{{ r.rank }}</span>
                     <span class="icao">{{ r.icao }}</span>
@@ -114,6 +132,7 @@
                 </div>
                 <div class="bar-track"><div class="bar-fill" style="width: {{ r.pct }}%"></div></div>
                 <div class="sub">{{ r.sub }}</div>
+                </div>
             </a>
             {% endfor %}
         </div>

@@ -182,7 +182,7 @@
                     gap: 0.75rem;
                     margin-top: 1rem;
                 }
-                input[type="text"] {
+                input[type="text"], input[type="password"] {
                     flex: 1;
                     background: var(--surface-2);
                     border: 1px solid var(--border);
@@ -208,6 +208,8 @@
                 button:hover {
                     background: var(--accent-hover);
                 }
+                button.btn-quiet { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+                button.btn-quiet:hover { color: var(--text); background: var(--surface-2); }
                 /* Toast Notifications */
                 .toast-container {
                     position: fixed;
@@ -255,6 +257,7 @@
             font-family: var(--font-body); font-size: 0.8rem; font-weight: 600; color: var(--text);
         }
         .section-desc { margin: 0 0 14px; color: var(--text-muted); font-size: 0.84rem; max-width: 60ch; }
+        .section-desc a { color: var(--accent-text); }
     </style>
 </head>
 <body>
@@ -263,7 +266,7 @@
     <div class="view-head">
         <div class="view-head-inner">
             <span class="view-title">Settings</span>
-            <span class="view-sub">Discord notifications</span>
+            <span class="view-sub">Discord notifications and FlySto</span>
         </div>
     </div>
 
@@ -343,6 +346,24 @@
                 {% endif %}
             </div>
         </section>
+
+        <section class="settings-section" id="flysto">
+            <div class="section-title-container">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                <span class="section-title">FlySto</span>
+                {% if flysto_connected %}<span class="badge notified-badge">Connected</span>{% endif %}
+            </div>
+            {% if flysto_connected %}
+            <p class="section-desc">Your flights can be sent to your FlySto account with <strong>Upload to FlySto</strong> on their page. Paste a new token to replace the one kept, or disconnect.</p>
+            {% else %}
+            <p class="section-desc">Send your flights to FlySto with one click from their page. Create an API token on <a href="https://www.flysto.net/account/api" target="_blank" rel="noopener">your FlySto account's API page</a> and paste it here. ButterLog keeps it only to upload the flights you ask it to.</p>
+            {% endif %}
+            <form class="input-group" id="flysto-form" autocomplete="off">
+                <input type="password" id="flysto-token" placeholder="FlySto API token" aria-label="FlySto API token" required>
+                <button type="submit">{% if flysto_connected %}Replace{% else %}Connect{% endif %}</button>
+                {% if flysto_connected %}<button type="button" class="btn-quiet" id="flysto-disconnect">Disconnect</button>{% endif %}
+            </form>
+        </section>
     </div>
 
 {% include "_app_shell_foot.html" %}
@@ -355,6 +376,33 @@
                     container.appendChild(toast);
                     setTimeout(() => toast.remove(), 3000);
                 }
+
+                // FlySto: the token is checked by FlySto before it is kept.
+                const flystoForm = document.getElementById('flysto-form');
+                async function flysto(method, body) {
+                    try {
+                        const r = await fetch('/api/v0/me/flysto', {
+                            method, credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: body ? JSON.stringify(body) : undefined,
+                        });
+                        if (r.ok) {
+                            showToast(method === 'PUT' ? 'FlySto connected' : 'FlySto disconnected', 'success');
+                            setTimeout(() => window.location.reload(), 800);
+                        } else {
+                            const data = await r.json().catch(() => ({}));
+                            showToast(data.error || 'Request failed', 'error');
+                        }
+                    } catch (err) {
+                        showToast('Network error occurred', 'error');
+                    }
+                }
+                flystoForm.addEventListener('submit', e => {
+                    e.preventDefault();
+                    flysto('PUT', { token: document.getElementById('flysto-token').value });
+                });
+                const flystoOff = document.getElementById('flysto-disconnect');
+                if (flystoOff) flystoOff.addEventListener('click', () => flysto('DELETE'));
 
                 async function toggleAllowlist(channelId, guildId, channelName, checked) {
                     try {

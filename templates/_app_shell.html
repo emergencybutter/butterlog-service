@@ -15,27 +15,21 @@
 
     <nav class="rail" id="rail" aria-label="Sections">
         <a class="brand" href="/content" aria-label="ButterLog">
-            <span class="brand-mark">BL</span>
+            <img class="brand-mark" src="/content/logo.png" alt="" width="32" height="32">
             <span class="brand-word">ButterLog</span>
         </a>
 
         <ul class="rail-nav">
             <li>
-                <a class="rail-item{% if nav.active == "community" %} is-active{% endif %}" href="/content">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                    <span>Community</span>
-                </a>
-            </li>
-            <li>
-                <a class="rail-item{% if nav.active == "flights" %} is-active{% endif %}" href="{{ nav.my_flights_href }}">
+                <a class="rail-item{% if nav.active == "flights" %} is-active{% endif %}" href="{{ nav.flights_href }}">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
-                    <span>My Flights</span>
+                    <span>Flights</span>
                 </a>
             </li>
             <li>
-                <a class="rail-item{% if nav.active == "aircraft" %} is-active{% endif %}" href="{{ nav.my_aircraft_href }}">
+                <a class="rail-item{% if nav.active == "aircraft" %} is-active{% endif %}" href="{{ nav.aircraft_href }}">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c.9 0 1.6 1.2 1.6 2.7v4l7.4 4.3v2l-7.4-2.2v4.3l2.5 1.8v1.6L12 19.4l-4.1 1.1v-1.6l2.5-1.8v-4.3L3 15v-2l7.4-4.3v-4C10.4 3.2 11.1 2 12 2z"/></svg>
-                    <span>My Aircrafts</span>
+                    <span>Aircrafts</span>
                 </a>
             </li>
             <li>

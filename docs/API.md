@@ -287,6 +287,18 @@ The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one ro
 
 *   **Response:** `200 OK` with `Content-Type: text/csv` as an attachment; `404 Not Found` for someone else's flight, or one with no telemetry.
 
+#### Upload to FlySto
+`POST /content/flights/:id/upload/flysto`
+
+Sends the flight's CSV (as the export above), zipped, to the pilot's FlySto account: `POST https://www.flysto.net/public-api/log-upload?id=butterlog-<id>` with `Content-Type: application/zip` and the pilot's FlySto API token as `Authorization: Bearer` (FlySto's API: `https://www.flysto.net/public-api/swagger`). The signed-in pilot's own flights only. The flight page posts it with `Content-Type: application/json`.
+
+*   **Response:** `200 OK` `{ "uploaded": true, "duplicate": false, "fileId": "<FlySto's>" }`, `duplicate` true when FlySto already had the log (its 409); `409 Conflict` when the pilot hasn't connected FlySto; `404 Not Found` for someone else's flight or one with no telemetry; `502 Bad Gateway` with FlySto's reason when it refuses (an expired token says to update it in Settings).
+
+#### FlySto connection
+`PUT /api/v0/me/flysto` with `{ "token": "<FlySto API token>" }` keeps the signed-in pilot's token, made at `https://www.flysto.net/account/api`, once FlySto accepts it (`GET /public-api/logs?type=all&limit=1`). `DELETE /api/v0/me/flysto` forgets it. The token is never returned.
+
+*   **Response:** `200 OK` `{ "connected": true | false }`; `400 Bad Request` when FlySto doesn't accept the token; `401` when not signed in.
+
 ---
 
 ### Multiplayer

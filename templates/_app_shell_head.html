@@ -19,7 +19,7 @@
     /* ── Rail ─────────────────────────────────────────────────────────────
        A narrow band of chrome. Icons carry the navigation; the labels under
        them are small enough to read as captions rather than as a menu of
-       links. The width is set by the longest label - "My Aircrafts" wrapping
+       links. The width is set by the longest label - "Aircrafts" wrapping
        to two lines would make one item taller than the rest and break the
        rhythm of the column. */
     .rail {
@@ -36,10 +36,8 @@
         border-bottom: 1px solid var(--border);
         text-decoration: none;
     }
-    .brand-mark {
-        font-family: var(--font-display); font-weight: 800; font-size: 0.95rem;
-        letter-spacing: -0.02em; color: var(--accent-text);
-    }
+    /* The app's icon, the butter dish: the product's own mark, shown as it is. */
+    .brand-mark { display: block; width: 32px; height: 32px; flex: none; }
     .brand-word { display: none; }
 
     .rail-nav { list-style: none; margin: 0; padding: 8px 0 0; flex: 1 1 auto; }

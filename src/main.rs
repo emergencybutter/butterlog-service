@@ -26,6 +26,7 @@ mod screenshots;
 mod shares;
 mod flight_doc;
 mod export;
+mod flysto;
 mod anonymous;
 mod normalise;
 mod analysis;
@@ -116,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(home_handler))
         .route("/content", get(content_handler))
+        .route("/content/logo.png", get(logo_handler))
         .route("/content/flight/user/:user_id", get(content_user_handler))
         .route("/content/settings", get(settings_handler))
         .route("/content/telemetry", get(telemetry_handler))
@@ -261,6 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
         .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
+        .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler))
+        .route("/api/v0/me/flysto", put(flysto::put_token).delete(flysto::delete_token))
         .route("/content/flights/:id", get(flight_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
@@ -600,7 +604,8 @@ async fn settings_handler(
         .collect();
 
     let nav = nav_for(&state, &headers, "settings", "Settings").await;
-    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds };
+    let flysto_connected = flysto::connected(&state.db, user_id).await.unwrap_or(false);
+    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds, flysto_connected };
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -663,7 +668,7 @@ async fn flight_detail_page(
             let page = templates::LiveDetailPage {
                 // A flight you opened from a list is still that list's section;
                 // the route itself is named in the view bar.
-                nav: nav_for(&state, &headers, "community", "Flight").await,
+                nav: nav_for(&state, &headers, "flights", "Flight").await,
                 flight_id,
                 is_owner: viewer == Some(owner_id),
             };
@@ -673,17 +678,27 @@ async fn flight_detail_page(
 
     let viewer = handlers::get_user_id_from_session(&state.db, &headers).await.ok();
     let is_owner = viewer.is_some() && viewer == owner;
-    let export_href = if is_owner && export::exportable(&state.db, flight_id).await? {
-        format!("/content/flights/{flight_id}/export/flysto.csv")
+    let exportable = is_owner && export::exportable(&state.db, flight_id).await?;
+    let (export_href, upload_href) = if exportable {
+        (
+            format!("/content/flights/{flight_id}/export/flysto.csv"),
+            format!("/content/flights/{flight_id}/upload/flysto"),
+        )
     } else {
-        String::new()
+        (String::new(), String::new())
+    };
+    let flysto_connected = match viewer {
+        Some(id) if exportable => flysto::connected(&state.db, id).await?,
+        _ => false,
     };
 
     // Every flight shows all of it: its track, from wherever it now is, in the full view.
     if let Some(doc) = flight_doc::document(&state.db, &state.r2, flight_id).await? {
         let page = templates::FlightViewPage {
-            nav: nav_for(&state, &headers, "community", "Flight").await,
+            nav: nav_for(&state, &headers, "flights", "Flight").await,
             export_href,
+            upload_href,
+            flysto_connected,
             simulator: doc["simulator"].as_str().unwrap_or_default().to_string(),
             json_escaped: script_json(&doc.to_string()),
         };
@@ -734,7 +749,7 @@ async fn flight_detail_page(
     );
 
     let page = templates::FlightDetailPage {
-        nav: nav_for(&state, &headers, "community", "Flight").await,
+        nav: nav_for(&state, &headers, "flights", "Flight").await,
         dep,
         arr_display: arr.unwrap_or_else(|| "In Flight".to_string()),
         pilot: global_name.unwrap_or(username),
@@ -754,6 +769,8 @@ async fn flight_detail_page(
         touchdown_stats,
         peak_stats,
         export_href,
+        upload_href,
+        flysto_connected,
     };
 
     Ok(Html(page.render()?).into_response())
@@ -858,6 +875,20 @@ fn discord_avatar_url(discord_id: &str, avatar_hash: Option<&str>) -> String {
     }
 }
 
+/// The app's icon, the butter dish, which the rail shows as the brand: built in, so the
+/// pages need nothing deployed beside the service.
+async fn logo_handler() -> Response {
+    const LOGO: &[u8] = include_bytes!("../assets/logo-64.png");
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        LOGO,
+    )
+        .into_response()
+}
+
 async fn content_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -873,8 +904,8 @@ async fn content_handler(
     .fetch_all(&state.db)
     .await?;
 
-    let nav = nav_for(&state, &headers, "community", "Community").await;
-    render_flights_page(&state, flights, "Every pilot", nav).await
+    let nav = nav_for(&state, &headers, "flights", "Flights").await;
+    render_flights_page(&state, flights, "Flown by every pilot", "everyone", nav).await
 }
 
 async fn content_user_handler(
@@ -889,13 +920,16 @@ async fn content_user_handler(
         return Ok((axum::http::StatusCode::NOT_FOUND, Html("<h1>Pilot not found</h1>".to_string())).into_response());
     }
     let private = anonymous::private_headers(&state.db, user_id).await?;
-    let subtitle = if private.is_empty() {
-        "Single pilot".to_string()
-    } else {
+    let own = logged_in_user_id == Some(user_id);
+    let subtitle = if !private.is_empty() {
         format!(
             "Each flight is kept {} days after it ends. Sign in with Discord from the app to keep them.",
             anonymous::RETENTION_DAYS
         )
+    } else if own {
+        "Flown by you".to_string()
+    } else {
+        "Flown by one pilot".to_string()
     };
 
     // Latest flights for a single pilot
@@ -909,17 +943,10 @@ async fn content_user_handler(
     .fetch_all(&state.db)
     .await?;
 
-    // Someone else's log is still the community view - only your own flights
-    // light up My Flights in the rail.
-    let own = logged_in_user_id == Some(user_id);
-    let nav = nav_for(
-        &state,
-        &headers,
-        if own { "flights" } else { "community" },
-        if own { "My Flights" } else { "Community" },
-    )
-    .await;
-    let mut response = render_flights_page(&state, flights, &subtitle, nav).await?;
+    // Your own are the Mine tab; another pilot's are neither tab, still Flights.
+    let nav = nav_for(&state, &headers, "flights", "Flights").await;
+    let scope = if own { "mine" } else { "" };
+    let mut response = render_flights_page(&state, flights, &subtitle, scope, nav).await?;
     response.headers_mut().extend(private);
     Ok(response)
 }
@@ -928,6 +955,7 @@ async fn render_flights_page(
     state: &AppState,
     flights: Vec<FlightListRow>,
     subtitle: &str,
+    scope: &str,
     nav: templates::Nav,
 ) -> Result<Response, AppError> {
     let flight_ids: Vec<i64> = flights.iter().map(|f| f.0).collect();
@@ -1001,6 +1029,7 @@ async fn render_flights_page(
     let page = templates::FlightsPage {
         nav,
         subtitle: subtitle.to_string(),
+        scope: scope.to_string(),
         flights: cards,
     };
 
@@ -1359,6 +1388,7 @@ fn to_stat_rows(
     // Row links stay inside the board's own scope: a row on "mine" opens my
     // shots of that type, a row on "everyone" opens everyone's.
     base: &str,
+    shots: &std::collections::HashMap<String, String>,
 ) -> Vec<templates::StatRow> {
     let top = stats.first().map(&metric).filter(|&m| m > 0.0);
     stats
@@ -1369,6 +1399,7 @@ fn to_stat_rows(
             // Unknown codes keep an empty name rather than echoing the code.
             name: aircraft_names().get(&s.icao).cloned().unwrap_or_default(),
             href: format!("{}/{}", base, percent_encode_segment(&s.icao)),
+            shot: shots.get(&s.icao).cloned().unwrap_or_default(),
             icao: s.icao.clone(),
             value: value(s),
             sub: sub(s),
@@ -1451,13 +1482,7 @@ async fn render_aircraft_type_page(
 
     let urls: Vec<&str> = shots.iter().map(|s| s.url.as_str()).collect();
     let page = templates::AircraftTypePage {
-        nav: nav_for(
-            state,
-            headers,
-            "aircraft",
-            if mine { "My Aircrafts" } else { "Aircrafts" },
-        )
-        .await,
+        nav: nav_for(state, headers, "aircraft", "Aircrafts").await,
         name: aircraft_names().get(&icao).cloned().unwrap_or_default(),
         mine,
         scope_all_href: if viewer.is_some() {
@@ -1477,6 +1502,19 @@ async fn render_aircraft_type_page(
     Ok(Html(page.render()?).into_response())
 }
 
+/// One screenshot for each aircraft type, by type code: the newest taken on it, among
+/// `user`'s flights or, without one, everyone's but those of pilots gone anonymous - what
+/// the type's own page would open on.
+async fn aircraft_shots(db: &sqlx::PgPool, user: Option<i64>) -> Result<std::collections::HashMap<String, String>, AppError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (icao) icao, url FROM (            SELECT UPPER(TRIM(f.statistics->>'resolved_icao')) AS icao, s.url, s.created_at              FROM screenshots s              JOIN flights f ON f.id = s.flight_id              JOIN users u ON u.id = f.user_id             WHERE ($1::bigint IS NULL OR f.user_id = $1)               AND (u.anonymous_since IS NULL OR f.user_id = $1)) t           WHERE icao <> ''           ORDER BY icao, created_at DESC",
+    )
+    .bind(user)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 async fn render_aircraft_page(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -1486,6 +1524,7 @@ async fn render_aircraft_page(
     let mine = mine && viewer.is_some();
     let base = if mine { "/content/aircraft" } else { "/content/stats" };
     let s = aggregate_aircraft_stats(&state.db, if mine { viewer } else { None }).await?;
+    let shots = aircraft_shots(&state.db, if mine { viewer } else { None }).await?;
 
     let hours = |a: &AircraftStat| format!("{:.1} h", a.total_hours);
     let dist = |a: &AircraftStat| format!("{} nm", group_thousands(a.total_distance_nm.round() as i64));
@@ -1494,13 +1533,7 @@ async fn render_aircraft_page(
     };
 
     let page = templates::StatsPage {
-        nav: nav_for(
-            state,
-            headers,
-            "aircraft",
-            if mine { "My Aircrafts" } else { "Aircrafts" },
-        )
-        .await,
+        nav: nav_for(state, headers, "aircraft", "Aircrafts").await,
         mine,
         // The scope switch only appears for someone who has a "mine" to switch to.
         scope_all_href: if viewer.is_some() { "/content/stats".to_string() } else { String::new() },
@@ -1511,6 +1544,7 @@ async fn render_aircraft_page(
             &count,
             |a| format!("{} · {}", hours(a), dist(a)),
             base,
+            &shots,
         ),
         by_time: to_stat_rows(
             &s.by_time,
@@ -1518,6 +1552,7 @@ async fn render_aircraft_page(
             &hours,
             |a| format!("{} · {}", count(a), dist(a)),
             base,
+            &shots,
         ),
         by_distance: to_stat_rows(
             &s.by_distance,
@@ -1525,6 +1560,7 @@ async fn render_aircraft_page(
             &dist,
             |a| format!("{} · {}", count(a), hours(a)),
             base,
+            &shots,
         ),
     };
     Ok(Html(page.render()?).into_response())
@@ -1668,8 +1704,10 @@ async fn flight_share_detail_handler(
     };
 
     let page = templates::FlightViewPage {
-        nav: nav_for(&state, &headers, "community", "Flight").await,
+        nav: nav_for(&state, &headers, "flights", "Flight").await,
         export_href: String::new(),
+        upload_href: String::new(),
+        flysto_connected: false,
         simulator: simulator.unwrap_or_default(),
         json_escaped: script_json(&json_str),
     };
@@ -1699,6 +1737,14 @@ mod tests {
         assert_eq!(go(Method::GET, "//evil.example/").await.status(), StatusCode::NOT_FOUND);
         assert_eq!(go(Method::POST, "/content/").await.status(), StatusCode::NOT_FOUND);
         assert_eq!(go(Method::GET, "/nothing").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_logo_is_the_apps_icon_as_a_png() {
+        let r = logo_handler().await;
+        assert_eq!(r.headers()[axum::http::header::CONTENT_TYPE], "image/png");
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"\x89PNG"));
     }
 
     #[test]

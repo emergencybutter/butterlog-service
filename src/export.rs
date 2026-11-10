@@ -143,14 +143,9 @@ pub fn flysto_csv(airframe: &str, samples: &[Sample]) -> String {
     out
 }
 
-/// `GET /content/flights/:id/export/flysto.csv`, the signed-in owner's only: the telemetry
-/// is theirs, at a rate the public pages don't show.
-pub async fn flysto_handler(
-    State(state): State<AppState>,
-    Path(flight_id): Path<i64>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let viewer = crate::handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+/// The flight's FlySto CSV, for its signed-in owner only (`viewer`): the telemetry is
+/// theirs, at a rate the public pages don't show. Not found for anyone else.
+pub async fn owned_csv(state: &AppState, flight_id: i64, viewer: Option<i64>) -> Result<String, AppError> {
     let owner: Option<i64> = sqlx::query_scalar("SELECT user_id FROM flights WHERE id = $1")
         .bind(flight_id)
         .fetch_optional(&state.db)
@@ -165,9 +160,19 @@ pub async fn flysto_handler(
     let (title, samples) = crate::analysis::ingest::flight_samples(&state.db, &segments, flight_id)
         .await?
         .ok_or_else(|| AppError::NotFound("No telemetry for this flight".to_string()))?;
-    let csv = tokio::task::spawn_blocking(move || flysto_csv(&title, &samples))
+    tokio::task::spawn_blocking(move || flysto_csv(&title, &samples))
         .await
-        .map_err(|e| AppError::Storage(e.to_string()))?;
+        .map_err(|e| AppError::Storage(e.to_string()))
+}
+
+/// `GET /content/flights/:id/export/flysto.csv`, the signed-in owner's only.
+pub async fn flysto_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let viewer = crate::handlers::get_user_id_from_session(&state.db, &headers).await.ok();
+    let csv = owned_csv(&state, flight_id, viewer).await?;
     Ok((
         [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),

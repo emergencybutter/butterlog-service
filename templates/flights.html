@@ -104,10 +104,17 @@
 
     <div class="view-head">
         <div class="view-head-inner">
-            <span class="view-title">{% if nav.active == "flights" %}My Flights{% else %}Community{% endif %}</span>
+            <span class="view-title">Flights</span>
             <span class="view-sub">{{ subtitle }}</span>
             <div class="view-actions">
                 <span class="view-sub">{{ flights.len() }} flight{% if flights.len() != 1 %}s{% endif %}</span>
+                {# The scope switch, as on Aircrafts: only for someone with a "mine". #}
+                {% if nav.signed_in %}
+                <div class="seg">
+                    <a href="{{ nav.flights_href }}" class="{% if scope == "mine" %}is-on{% endif %}">Mine</a>
+                    <a href="/content" class="{% if scope == "everyone" %}is-on{% endif %}">Everyone</a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>

@@ -27,6 +27,9 @@ pub enum AppError {
     Unprocessable(String),
     /// Rate limit exceeded.
     TooManyRequests(String),
+    /// Another service refused the request, for the reason given (FlySto turning down
+    /// an upload), shown as it is.
+    Upstream(String),
 }
 
 impl From<askama::Error> for AppError {
@@ -105,6 +108,10 @@ impl IntoResponse for AppError {
                 (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
             }
             AppError::TooManyRequests(ref msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
+            AppError::Upstream(ref msg) => {
+                tracing::warn!("Upstream refused: {}", msg);
+                (StatusCode::BAD_GATEWAY, msg.clone())
+            }
         };
 
         let body = Json(json!({
@@ -132,6 +139,7 @@ impl std::fmt::Display for AppError {
             AppError::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
             AppError::Unprocessable(msg) => write!(f, "Unprocessable: {}", msg),
             AppError::TooManyRequests(msg) => write!(f, "Too many requests: {}", msg),
+            AppError::Upstream(msg) => write!(f, "Upstream refused: {}", msg),
         }
     }
 }

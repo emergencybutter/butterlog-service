@@ -36,6 +36,13 @@
                 {% if !export_href.is_empty() %}
                 <a class="fv-btn fv-btn-quiet" href="{{ export_href }}" download title="Export for FlySto (CSV)">Export CSV</a>
                 {% endif %}
+                {% if !upload_href.is_empty() %}
+                {% if flysto_connected %}
+                <button class="fv-btn fv-btn-quiet" type="button" data-flysto-upload="{{ upload_href }}" title="Send this flight to your FlySto account">Upload to FlySto</button>
+                {% else %}
+                <a class="fv-btn fv-btn-quiet" href="/content/settings#flysto" title="Connect FlySto in Settings to upload your flights">Upload to FlySto</a>
+                {% endif %}
+                {% endif %}
                 <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Debrief</button>
             </div>
         </div>
@@ -78,5 +85,6 @@ if (location.hash === '#replay') {
     window.addEventListener('load', () => { if (FlightReplay.ready()) FlightReplay.play(); });
 }
 </script>
+{% if flysto_connected %}{% include "_flysto_upload.html" %}{% endif %}
 </body>
 </html>

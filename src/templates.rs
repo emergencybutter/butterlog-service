@@ -7,29 +7,28 @@ use askama::Template;
 /// Navigation state for the `/content` application chrome. Every page rendered
 /// inside the shell carries one, and `_app_shell.html` reads it directly.
 pub struct Nav {
-    /// `community` | `flights` | `aircraft` | `settings`. Drives the active mark.
+    /// `flights` | `aircraft` | `map` | `settings`. Drives the active mark.
     pub active: String,
     /// The current view's name, shown in the narrow-screen top bar.
     pub section: String,
     pub signed_in: bool,
-    /// Where the two personal destinations point. Signed out, both send the
-    /// visitor through the login flow rather than disappearing - a menu that
-    /// changes shape depending on session state is harder to learn.
-    pub my_flights_href: String,
-    pub my_aircraft_href: String,
+    /// Where Flights and Aircrafts open: the pilot's own, signed in, as each page's
+    /// Mine; everyone's, signed out, who have no "mine" to show.
+    pub flights_href: String,
+    pub aircraft_href: String,
     pub avatar_url: String,
     pub display_name: String,
 }
 
 impl Nav {
-    /// The signed-out rail: personal destinations route through login.
+    /// The signed-out rail: Flights and Aircrafts open on everyone's.
     pub fn anonymous(active: &str, section: &str) -> Self {
         Nav {
             active: active.to_string(),
             section: section.to_string(),
             signed_in: false,
-            my_flights_href: "/api/v0/auth/login".to_string(),
-            my_aircraft_href: "/api/v0/auth/login".to_string(),
+            flights_href: "/content".to_string(),
+            aircraft_href: "/content/stats".to_string(),
             avatar_url: String::new(),
             display_name: String::new(),
         }
@@ -40,8 +39,8 @@ impl Nav {
             active: active.to_string(),
             section: section.to_string(),
             signed_in: true,
-            my_flights_href: format!("/content/flight/user/{}", user_id),
-            my_aircraft_href: "/content/aircraft".to_string(),
+            flights_href: format!("/content/flight/user/{}", user_id),
+            aircraft_href: "/content/aircraft".to_string(),
             avatar_url: avatar,
             display_name: name,
         }
@@ -108,6 +107,10 @@ pub struct FlightDetailPage {
     pub peak_stats: Vec<StatItem>,
     /// The FlySto export, for its pilot when its telemetry has it; empty hides it.
     pub export_href: String,
+    /// Where its pilot sends it to FlySto, beside the export; empty hides it.
+    pub upload_href: String,
+    /// Whether its pilot has connected FlySto; without, the upload leads to Settings.
+    pub flysto_connected: bool,
 }
 
 /// A single label/value row in a flight-detail stats card.
@@ -120,8 +123,11 @@ pub struct StatItem {
 #[template(path = "flights.html")]
 pub struct FlightsPage {
     pub nav: Nav,
-    /// Short context line beside the view title, e.g. "Every pilot".
+    /// Short context line beside the view title, e.g. "Flown by every pilot".
     pub subtitle: String,
+    /// Which of the Mine / Everyone tabs this list is: `mine`, `everyone`, or empty
+    /// for another pilot's, neither.
+    pub scope: String,
     pub flights: Vec<FlightCard>,
 }
 
@@ -179,6 +185,8 @@ pub struct StatRow {
     pub pct: u32,
     /// Where the row leads: this type's screenshots, in the board's own scope.
     pub href: String,
+    /// One of those screenshots, the newest, shown in the row; empty without any.
+    pub shot: String,
 }
 
 /// Every screenshot taken in one aircraft type, newest first.
@@ -218,6 +226,8 @@ pub struct SettingsPage {
     pub admin_guilds: Vec<AdminGuild>,
     /// Guilds with channels currently receiving this user's notifications.
     pub notified_guilds: Vec<NotifiedGuild>,
+    /// Whether the pilot's FlySto API token is kept, for uploading flights there.
+    pub flysto_connected: bool,
 }
 
 pub struct AdminGuild {
@@ -251,6 +261,10 @@ pub struct FlightViewPage {
     pub nav: Nav,
     /// The FlySto export, for the flight's pilot when its telemetry has it; empty hides it.
     pub export_href: String,
+    /// Where its pilot sends it to FlySto, beside the export; empty hides it.
+    pub upload_href: String,
+    /// Whether its pilot has connected FlySto; without, the upload leads to Settings.
+    pub flysto_connected: bool,
     /// `MSFS`, `X-Plane`, or empty when unknown (an old share without its flight).
     /// The renderer reads the track's raw pitch and roll through it.
     pub simulator: String,
@@ -264,11 +278,10 @@ mod tests {
 
     fn nav(active: &str) -> Nav {
         let section = match active {
-            "flights" => "My Flights",
-            "aircraft" => "My Aircrafts",
+            "aircraft" => "Aircrafts",
             "settings" => "Settings",
             "map" => "Live Map",
-            _ => "Community",
+            _ => "Flights",
         };
         Nav::signed_in(active, section, 7, "Pilot".into(), "https://example.invalid/a.png".into())
     }
@@ -281,7 +294,7 @@ mod tests {
 
     #[test]
     fn live_page_wires_its_flight_id_into_the_poller() {
-        let html = LiveDetailPage { nav: nav("community"), flight_id: 4242, is_owner: false }.render().unwrap();
+        let html = LiveDetailPage { nav: nav("flights"), flight_id: 4242, is_owner: false }.render().unwrap();
         assert!(html.contains("const FLIGHT_ID = 4242;"));
         // The shared renderer must be inlined, not just referenced: the live
         // page and the share page draw with the same code.
@@ -296,11 +309,11 @@ mod tests {
     fn only_the_pilot_gets_the_sim_control_strip() {
         // Remote control of a running simulator is the one owner-only part of
         // the live-flight feature; a visitor must not even receive the markup.
-        let visitor = LiveDetailPage { nav: nav("community"), flight_id: 1, is_owner: false }.render().unwrap();
+        let visitor = LiveDetailPage { nav: nav("flights"), flight_id: 1, is_owner: false }.render().unwrap();
         assert!(!visitor.contains("controls-mount"));
         assert!(!visitor.contains("Sim controls"));
 
-        let owner = LiveDetailPage { nav: nav("community"), flight_id: 1, is_owner: true }.render().unwrap();
+        let owner = LiveDetailPage { nav: nav("flights"), flight_id: 1, is_owner: true }.render().unwrap();
         assert!(owner.contains("controls-mount"));
         assert!(owner.contains("Sim controls"));
         // Pause is the stable control; the autopilot ones sit behind the beta
@@ -316,8 +329,10 @@ mod tests {
     #[test]
     fn a_hostile_simulator_name_cannot_break_out_of_the_share_page() {
         let html = FlightViewPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             export_href: String::new(),
+            upload_href: String::new(),
+            flysto_connected: false,
             simulator: r#"" ; alert(1); //"#.into(),
             json_escaped: "{}".into(),
         }
@@ -333,8 +348,10 @@ mod tests {
     #[test]
     fn share_page_uses_the_same_shared_renderer() {
         let html = FlightViewPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             export_href: String::new(),
+            upload_href: String::new(),
+            flysto_connected: false,
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -347,7 +364,7 @@ mod tests {
     #[test]
     fn flight_detail_escapes_user_content() {
         let page = FlightDetailPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             dep: "KSFO".into(),
             arr_display: "KLAX".into(),
             pilot: "<script>alert(1)</script>".into(),
@@ -363,6 +380,8 @@ mod tests {
             touchdown_stats: vec![StatItem { label: "Vertical Speed".into(), value: "-121.00 fpm".into() }],
             peak_stats: vec![StatItem { label: "Indicated Airspeed".into(), value: "142.00 kts".into() }],
             export_href: "/content/flights/7/export/flysto.csv".into(),
+            upload_href: "/content/flights/7/upload/flysto".into(),
+            flysto_connected: true,
         };
         let html = page.render().unwrap();
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -383,8 +402,9 @@ mod tests {
     #[test]
     fn flights_page_nav_and_cards() {
         let page = FlightsPage {
-            nav: nav("community"),
-            subtitle: "Every pilot".into(),
+            nav: nav("flights"),
+            subtitle: "Flown by every pilot".into(),
+            scope: "everyone".into(),
             flights: vec![FlightCard {
                 href: "/content/flights/9".into(),
                 avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
@@ -411,13 +431,22 @@ mod tests {
         // The rail is the navigation now, and it knows whose session this is.
         assert!(html.contains(r#"href="/content/flight/user/7""#));
         assert!(html.contains(r#"href="/content/aircraft""#));
+        // One Flights entry, with the Mine / Everyone switch on this list's tab.
+        assert!(html.contains("<span>Flights</span>") && !html.contains("Community"));
+        assert!(html.contains(r#"<a href="/content" class="is-on">Everyone</a>"#));
+        assert!(html.contains(r#"<a href="/content/flight/user/7" class="">Mine</a>"#));
+        // Signed out: no "mine" to switch to, and the rail opens everyone's.
+        let html = FlightsPage { nav: Nav::anonymous("flights", "Flights"), ..page }.render().unwrap();
+        assert!(!html.contains(">Mine</a>"));
+        assert!(html.contains(r#"href="/content""#) && html.contains(r#"href="/content/stats""#));
     }
 
     #[test]
     fn an_empty_list_says_so() {
         let empty = FlightsPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             subtitle: "s".into(),
+            scope: String::new(),
             flights: vec![],
         };
         let html = empty.render().unwrap();
@@ -450,7 +479,7 @@ mod tests {
             mk("EGLL", "LFPG", "A320neo", "A20N", "British Airways", "X-Plane", "12 Aug 2026, 09:11 UTC", r#"<div class="badge badge-firm">FIRM<span class="badge-detail"> 284 fpm</span></div>"#, vec![shot.clone()]),
             mk("EBOS", "EHAM", "Citation Longitude", "C68A", "Skyward", "MSFS", "02 Aug 2026, 15:40 UTC", r#"<div class="badge badge-ongoing">ONGOING</div>"#, vec![]),
         ];
-        let page = FlightsPage { nav: nav("community"), subtitle: "Every pilot".into(), flights };
+        let page = FlightsPage { nav: nav("flights"), subtitle: "Flown by every pilot".into(), scope: "everyone".into(), flights };
         std::fs::write(format!("{}/shell_community.html", out), page.render().unwrap()).unwrap();
 
         let rows = |n: usize| (1..=n).map(|i| StatRow {
@@ -462,6 +491,8 @@ mod tests {
             sub: format!("{:.1} h · {} nm", 61.0 - i as f64 * 8.0, 4200 - i * 500),
             pct: (100 - (i - 1) * 18) as u32,
             href: format!("/content/aircraft/{}", ["A20N", "C185", "B738", "A306", "C68A"][i - 1]),
+            // Not every type has a screenshot.
+            shot: if i == 3 { String::new() } else { shot.clone() },
         }).collect::<Vec<_>>();
         let stats = StatsPage {
             nav: nav("aircraft"), mine: true,
@@ -484,12 +515,13 @@ mod tests {
                 name: "Voyager Aviation".into(),
                 channels: vec![NotifiedChannel { id: "1".into(), name: "flight-log".into() }],
             }],
+            flysto_connected: false,
         };
         std::fs::write(format!("{}/shell_settings.html", out), settings.render().unwrap()).unwrap();
 
         std::fs::write(format!("{}/shell_map.html", out), MapPage { nav: nav("map") }.render().unwrap()).unwrap();
 
-        let empty = FlightsPage { nav: nav("flights"), subtitle: "Single pilot".into(), flights: vec![] };
+        let empty = FlightsPage { nav: nav("flights"), subtitle: "Flown by you".into(), scope: "mine".into(), flights: vec![] };
         std::fs::write(format!("{}/shell_empty.html", out), empty.render().unwrap()).unwrap();
 
         let shot = |dep: &str, arr: &str, who: &str, d: &str| TypeShot {
@@ -518,8 +550,10 @@ mod tests {
         std::fs::write(format!("{}/shell_type.html", out), ty.render().unwrap()).unwrap();
 
         let share = FlightViewPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             export_href: String::new(),
+            upload_href: String::new(),
+            flysto_connected: false,
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         }
@@ -544,9 +578,12 @@ mod tests {
                 }],
             }],
             notified_guilds: vec![],
+            flysto_connected: true,
         };
         let html = page.render().unwrap();
         assert!(!html.contains("<img src=x onerror"));
+        // Connected to FlySto: it says so, and offers to disconnect, never the token.
+        assert!(html.contains(r#"id="flysto""#) && html.contains("Disconnect"));
         assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
         // js_name renders raw (backslash-escaped for the JS string)
         assert!(html.contains("toggleAllowlist('123', '456', 'it\'s-a-channel', this.checked)"));
@@ -557,8 +594,10 @@ mod tests {
     #[test]
     fn flight_view_owner_export_and_json() {
         let owner = FlightViewPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             export_href: "/content/flights/7/export/flysto.csv".into(),
+            upload_href: "/content/flights/7/upload/flysto".into(),
+            flysto_connected: true,
             simulator: "MSFS".into(),
             json_escaped: r#"{"summary":{"x":"</script>"}}"#.into(),
         };
@@ -568,8 +607,10 @@ mod tests {
         assert!(!html.contains("Delete share"));
 
         let visitor = FlightViewPage {
-            nav: nav("community"),
+            nav: nav("flights"),
             export_href: String::new(),
+            upload_href: String::new(),
+            flysto_connected: false,
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
         };
