@@ -143,7 +143,13 @@ struct Fuel {
 
 impl Fuel {
     fn sample(&mut self, s: &Sample) {
-        let Some(total) = s.get(Field::FuelLeft).zip(s.get(Field::FuelRight)).map(|(l, r)| l + r) else { return };
+        if let Some(total) = s.get(Field::FuelLeft).zip(s.get(Field::FuelRight)).map(|(l, r)| l + r) {
+            self.total(total);
+        }
+    }
+
+    /// The fuel on board at one moment, both tanks.
+    fn total(&mut self, total: f64) {
         if total <= 0.0 {
             return;
         }
@@ -163,6 +169,15 @@ impl Fuel {
         let first = self.first.filter(|_| !self.added)?;
         Some(first - self.last)
     }
+}
+
+/// The fuel burnt over a track's fuel on board, both tanks, as [`Fuel`] gathers it from
+/// samples: for the app's flights, whose documents have no `fuel_consumed` (598 showed 0
+/// gallons burnt), worked out from the track it uploaded instead.
+pub fn fuel_consumed(totals: impl IntoIterator<Item = f64>) -> Option<f64> {
+    let mut fuel = Fuel::default();
+    totals.into_iter().for_each(|t| fuel.total(t));
+    fuel.consumed()
 }
 
 /// Fuel going up by this fraction of the starting quantity (or by 1) is fuel added.

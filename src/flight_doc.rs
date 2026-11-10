@@ -98,6 +98,15 @@ fn add_debriefs(summary: &mut crate::live::LiveSummary, statistics: &Value, trac
     debriefs
 }
 
+/// The fuel burnt over a track in the renderer's shape, from its tanks' columns; `None`
+/// without them, or with fuel added on the way.
+fn fuel_consumed(track: &Value) -> Option<f64> {
+    let column = |key: &str| track.get(key).and_then(Value::as_array).filter(|c| !c.is_empty());
+    let (left, right) = (column("fuel_left")?, column("fuel_right")?);
+    let totals = left.iter().zip(right).filter_map(|(l, r)| Some(l.as_f64()? + r.as_f64()?));
+    crate::analysis::statistics::fuel_consumed(totals)
+}
+
 /// The flight's page document; `None` when no track of it is left anywhere.
 pub async fn document(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Option<Value>, AppError> {
     let row: Option<(Value, Option<String>, String)> =
@@ -109,6 +118,9 @@ pub async fn document(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Opti
     let Some(track) = track(db, r2, flight_id).await? else { return Ok(None) };
     let screenshots = crate::live::load_screenshots(db, flight_id).await?;
     let mut summary = crate::live::adapt_summary(&statistics, notes.as_deref(), screenshots.len(), status == "ended");
+    if statistics.get("fuel_consumed").is_none() {
+        summary.fuel_consumed = fuel_consumed(&track).unwrap_or_default();
+    }
     let debriefs = add_debriefs(&mut summary, &statistics, &track);
     Ok(Some(json!({
         "transposedData": track,
@@ -221,6 +233,19 @@ pub async fn covering_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fuel_burnt_comes_from_the_tracks_tanks() {
+        // 598's: the right tank feeding, zeros where a sample carried no fuel.
+        let track = json!({ "fuel_left": [26.7, 0.0, 26.7, 26.7], "fuel_right": [25.2, 0.0, 23.0, 21.7] });
+        let burnt = fuel_consumed(&track).unwrap();
+        assert!((burnt - 3.5).abs() < 1e-9, "{burnt}");
+        // Refuelled on the way: no figure, rather than a wrong one.
+        let refuelled = json!({ "fuel_left": [20.0, 18.0, 30.0], "fuel_right": [20.0, 18.0, 30.0] });
+        assert_eq!(fuel_consumed(&refuelled), None);
+        // A track without the tanks says nothing either.
+        assert_eq!(fuel_consumed(&json!({ "fuel_left": [10.0] })), None);
+    }
 
     fn unreachable_r2() -> R2Client {
         R2Client::new(&crate::config::Config {

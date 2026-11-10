@@ -1123,7 +1123,9 @@ mod tests {
         let (seq, payload) = &segment.chunks[0];
         crate::sessions::store_chunk(&db, user, session, *seq, &butterlog_wire::compress(payload, 3)).await.unwrap();
 
-        // Telemetry arriving, the switch off.
+        // Telemetry arriving switched it on; switched off by hand, the app makes them.
+        assert!(service_makes_flights(&db, user).await.unwrap());
+        sqlx::query("UPDATE users SET service_flights_since = NULL WHERE id = $1").bind(user).execute(&db).await.unwrap();
         assert!(!service_makes_flights(&db, user).await.unwrap());
         sqlx::query("UPDATE users SET service_flights_since = NOW() WHERE id = $1").bind(user).execute(&db).await.unwrap();
         assert!(service_makes_flights(&db, user).await.unwrap());

@@ -193,6 +193,12 @@ pub async fn open_session(
             "This session was opened with a different channel table".to_string(),
         ));
     }
+    // A user whose telemetry arrives has the service make their flights from it (rollout
+    // phase 5), from now on: 598, analysed but left the app's, showed no fuel burnt.
+    sqlx::query("UPDATE users SET service_flights_since = NOW() WHERE id = $1 AND service_flights_since IS NULL")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     let mut opened = cursor(db, user_id, id).await?;
     opened.identity = Some(identity);
@@ -824,6 +830,23 @@ mod tests {
             open_session(&db, me, Uuid::new_v4(), b"BLS1 garbage").await,
             Err(AppError::Unprocessable(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_users_telemetry_has_the_service_make_their_flights() {
+        let Some(db) = db().await else { return };
+        let me = user(&db).await;
+        let since = || {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>("SELECT service_flights_since FROM users WHERE id = $1")
+                .bind(me)
+                .fetch_one(&db)
+        };
+        assert_eq!(since().await.unwrap(), None);
+        open_session(&db, me, Uuid::new_v4(), &opening(1e-7)).await.unwrap();
+        let first = since().await.unwrap().expect("switched on");
+        // A later session keeps the switch where it was.
+        open_session(&db, me, Uuid::new_v4(), &opening(1e-7)).await.unwrap();
+        assert_eq!(since().await.unwrap(), Some(first));
     }
 
     #[tokio::test]
