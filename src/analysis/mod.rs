@@ -3,6 +3,7 @@
 //! on sessions as they end.
 
 pub mod compare;
+pub mod cruise;
 pub mod debrief;
 pub mod flight;
 pub mod ingest;

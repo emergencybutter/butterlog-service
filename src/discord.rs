@@ -482,7 +482,9 @@ pub async fn sync_flight_discord(
     // Where it is on FlySto, once processed there (`flysto.rs`).
     let flysto = crate::flysto::pointer(db, flight_id).await?;
     let flysto_url = Some(flysto.url()).filter(|u| !u.is_empty());
-    let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref(), flysto_url)?;
+    // Landed: the cruise and the debriefs, from the flight's page document.
+    let landed = if is_landed { landed_extras(db, r2, flight_id).await } else { Landed::default() };
+    let (embeds, _) = assemble_embeds(&statistics, &user_info, base_url, &gallery_url, notes.as_deref(), flysto_url, &landed)?;
 
     // 8. Build attachments + helper embeds. Only re-download from R2 when the screenshot set
     // changed or a brand-new message must be sent; otherwise reuse the already-attached files
@@ -632,6 +634,148 @@ pub async fn sync_flight_discord(
     Ok(())
 }
 
+/// What a landed post adds from the flight's track: the altitude it cruised at, and the
+/// debrief of each takeoff and approach, as the page shows them.
+#[derive(Default)]
+pub struct Landed {
+    pub cruise_ft: Option<f64>,
+    pub debriefs: Vec<Value>,
+}
+
+async fn landed_extras(db: &PgPool, r2: &R2Client, flight_id: i64) -> Landed {
+    match crate::flight_doc::document(db, r2, flight_id).await {
+        Ok(Some(doc)) => {
+            let simulator = doc.get("simulator").and_then(Value::as_str).unwrap_or_default();
+            let pts = crate::analysis::pattern::points(&doc["transposedData"], simulator);
+            Landed {
+                cruise_ft: crate::analysis::cruise::cruise_altitude(&pts),
+                debriefs: doc.get("debriefs").and_then(Value::as_array).cloned().unwrap_or_default(),
+            }
+        }
+        Ok(None) => Landed::default(),
+        Err(e) => {
+            tracing::warn!(flight_id, "no cruise or debrief for the Discord post: {e:?}");
+            Landed::default()
+        }
+    }
+}
+
+/// Debriefs a post shows; the rest are on the flight's page.
+const MAX_POSTED_DEBRIEFS: usize = 3;
+/// Discord's limit on a field's text.
+const FIELD_MAX_CHARS: usize = 1024;
+
+/// A whole number with thousands separators.
+fn grouped(n: f64) -> String {
+    let s = (n.round().abs() as i64).to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0.0 { format!("-{out}") } else { out }
+}
+
+/// A debrief as a post's field, `(name, text)`: what it was, its key figures, what to work
+/// on and what went well, as the page's `debriefHead` (`_flight_render.html`) puts them.
+fn debrief_field(db: &Value, at: Option<&str>) -> (String, String) {
+    let num = |path: &str| db.pointer(path).and_then(Value::as_f64);
+    let wind = |leg: &str| match (num(&format!("/legs/{leg}/headwindKt")), num(&format!("/legs/{leg}/crosswindKt"))) {
+        (Some(h), Some(c)) => Some(format!(
+            "{:.0} kt {} · {:.0} kt from the {}",
+            h.abs(),
+            if h >= 0.0 { "head" } else { "tail" },
+            c.abs(),
+            if c >= 0.0 { "right" } else { "left" }
+        )),
+        _ => None,
+    };
+    let fig = |label: &str, v: Option<String>| v.map(|v| format!("{label} **{v}**"));
+    let (title, sub, figs, none) = if db.get("phase").and_then(Value::as_str) == Some("takeoff") {
+        let rolling = db.pointer("/legs/roll/rolling").and_then(Value::as_bool).unwrap_or(false);
+        let runway_matches = db.get("runwayMatches").and_then(Value::as_bool).unwrap_or(false);
+        let sub = vec![
+            Some(if rolling { "Rolling takeoff" } else { "From a standstill" }.to_string()),
+            num("/legs/roll/usedFt").filter(|_| runway_matches).map(|f| format!("{} ft of runway", grouped(f))),
+            num("/legs/climb/levelledOffFt").map(|f| format!("levelled at {} ft", grouped(f))),
+        ];
+        let figs = vec![
+            fig("Rotated at", num("/legs/rotation/rotateKt").map(|v| format!("{v:.0} kt"))),
+            fig("lifted off at", num("/legs/rotation/liftoffKt").map(|v| format!("{v:.0} kt"))),
+            fig("pitch rate", num("/legs/rotation/pitchRateDps").map(|v| format!("{v:.1}°/s"))),
+            fig("climb", num("/legs/climb/climbFpm").map(|v| format!("{} fpm", grouped(v)))),
+            fig("wind on the roll", wind("roll")),
+        ];
+        ("Takeoff debrief", sub, figs, "Nothing to work on in this takeoff.")
+    } else {
+        let right = db.get("circuit").and_then(Value::as_str) == Some("right");
+        let kind = match db.get("approach").and_then(Value::as_str) {
+            Some("circuit") => format!("{} circuit", if right { "Right" } else { "Left" }),
+            Some("base entry") => format!("Joined on {} base", if right { "right" } else { "left" }),
+            _ => "Straight-in".to_string(),
+        };
+        let sub = vec![
+            Some(kind),
+            num("/legs/final/lengthNm").map(|v| format!("{v:.1} NM final")),
+            num("/legs/final/startHeightFt").map(|v| format!("from {} ft", grouped(v))),
+        ];
+        let stable = num("/legs/final/stabilisedFromFt").map_or("not stable".to_string(), |v| format!("{} ft", grouped(v)));
+        let figs = vec![
+            Some(format!("Stabilised from **{stable}**")),
+            fig("path", num("/legs/final/pathAngleDeg").map(|v| format!("{v:.1}°"))),
+            fig("final speed", num("/legs/final/finalSpeedKt").map(|v| format!("{v:.0} kt"))),
+            fig("max sink", num("/legs/final/maxSinkFpm").map(|v| format!("{} fpm", grouped(v.abs())))),
+            fig("wind on final", wind("final")),
+        ];
+        ("Approach debrief", sub, figs, "Nothing to work on in this approach.")
+    };
+
+    let mut text = sub.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    if let Some(at) = at {
+        text.push_str(&format!(" · {at}Z"));
+    }
+    let figs: Vec<String> = figs.into_iter().flatten().collect();
+    if !figs.is_empty() {
+        text.push_str(&format!("\n{}", figs.join(", ")));
+    }
+    let findings: Vec<&Value> = db.get("findings").and_then(Value::as_array).map(|f| f.iter().collect()).unwrap_or_default();
+    let severity = |f: &Value| f.get("severity").and_then(Value::as_str).unwrap_or_default().to_string();
+    let line = |f: &&Value| {
+        let mark = match severity(f).as_str() {
+            "good" => "✅",
+            "caution" => "⚠️",
+            _ => "▫️",
+        };
+        format!("{mark} {}", f.get("text").and_then(Value::as_str).unwrap_or_default())
+    };
+    let (good, work): (Vec<&Value>, Vec<&Value>) = findings.into_iter().partition(|f| severity(f) == "good");
+    text.push_str("\n**To work on**\n");
+    if work.is_empty() {
+        text.push_str(none);
+    } else {
+        text.push_str(&work.iter().map(line).collect::<Vec<_>>().join("\n"));
+    }
+    if !good.is_empty() {
+        text.push_str("\n**Done well**\n");
+        text.push_str(&good.iter().map(line).collect::<Vec<_>>().join("\n"));
+    }
+    (title.to_string(), truncate(&text, FIELD_MAX_CHARS))
+}
+
+/// At most `max` characters, cut at a line where it can be, with an ellipsis.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max - 2).collect();
+    match cut.rfind('\n') {
+        Some(i) if i > cut.len() / 2 => format!("{}\n…", &cut[..i]),
+        _ => format!("{cut}…"),
+    }
+}
+
 struct LocalField {
     name: String,
     value: String,
@@ -645,6 +789,7 @@ fn assemble_embeds(
     gallery_url: &str,
     notes: Option<&str>,
     flysto_url: Option<&str>,
+    landed: &Landed,
 ) -> Result<(Vec<CreateEmbed>, Vec<String>), Box<dyn std::error::Error>> {
     let departure_icao = statistics.get("departure").and_then(|d| d.get("icao")).and_then(|v| v.as_str()).unwrap_or("Unknown");
     let departure_name = statistics.get("departure").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -752,6 +897,11 @@ fn assemble_embeds(
         }
     }
 
+    // The level flown, once landed (`analysis/cruise.rs`).
+    if let Some(ft) = landed.cruise_ft.filter(|_| is_landed) {
+        flight_info_val.push_str(&format!("\nCruised at {}", crate::analysis::cruise::format_cruise(ft)));
+    }
+
     // Distance calculation if cruising (read directly from client payload)
     if !is_landed {
         if let Some(closest) = statistics.get("closest_airport") {
@@ -809,27 +959,23 @@ fn assemble_embeds(
             }
         }
     } else {
-        // Landed stats
-        if let Some(landing) = statistics.get("landing_snapshot") {
-            let landing_stats = get_formatted_fields_for_category(landing, "landing");
-            if !landing_stats.is_empty() {
-                fields.push(LocalField {
-                    name: "Landing Stats".to_string(),
-                    value: landing_stats,
-                    inline: true,
-                });
-            }
+        // Each takeoff's and approach's debrief, as on the page. The times say which is
+        // which when there are several.
+        let many = landed.debriefs.len() > 2;
+        for db in landed.debriefs.iter().take(MAX_POSTED_DEBRIEFS) {
+            let at = db.get("at").and_then(Value::as_str).filter(|_| many).and_then(|a| a.get(11..16));
+            let (name, value) = debrief_field(db, at);
+            fields.push(LocalField { name, value, inline: false });
         }
-
-        if let Some(max_e) = max_entries {
-            let max_stats = get_formatted_fields_for_category(max_e, "normal");
-            if !max_stats.is_empty() {
-                fields.push(LocalField {
-                    name: "Max Stats".to_string(),
-                    value: max_stats,
-                    inline: true,
-                });
-            }
+        if landed.debriefs.len() > MAX_POSTED_DEBRIEFS {
+            fields.push(LocalField {
+                name: "More debriefs".to_string(),
+                value: format!(
+                    "{} more on [the flight's page]({gallery_url}#debrief)",
+                    landed.debriefs.len() - MAX_POSTED_DEBRIEFS
+                ),
+                inline: false,
+            });
         }
     }
 
@@ -889,7 +1035,7 @@ fn assemble_embeds(
 /// without the parts that are the same for both (author, links, footer, notes).
 pub fn post_lines(statistics: &Value) -> Vec<(String, String)> {
     let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
-    let Ok((embeds, _)) = assemble_embeds(statistics, &user, "", "", None, None) else {
+    let Ok((embeds, _)) = assemble_embeds(statistics, &user, "", "", None, None, &Landed::default()) else {
         return Vec::new();
     };
     let embed = serde_json::to_value(&embeds[0]).unwrap_or(Value::Null);
@@ -1126,9 +1272,57 @@ mod tests {
         assert_eq!(get("Title"), Some("Flight PHOG ✈ PHOG"));
         assert_eq!(get("Departed"), Some("Departed **Kahului** at 0205Z"));
         assert_eq!(get("Flight Info · line 1"), Some("Flying Cessna Skyhawk (C172)"));
-        assert_eq!(get("Landing Stats · Vertical Speed"), Some("-382.56 fpm"));
-        assert_eq!(get("Max Stats · Indicated Airspeed"), Some("81.24 kts"));
+        // No more figures than the page has: the max and touchdown stats are gone.
+        assert!(lines.iter().all(|(l, _)| !l.starts_with("Landing Stats") && !l.starts_with("Max Stats")), "{lines:?}");
     }
+
+    #[test]
+    fn a_landed_post_says_the_cruise_and_the_debriefs() {
+        let statistics = serde_json::json!({
+            "departure": { "icao": "KPAE", "name": "Paine" },
+            "arrival": { "icao": "KSEA", "name": "Seattle" },
+            "landing_time": "2026-11-10 10:00:00.000",
+            "airframe_name": "Boeing 737-800",
+        });
+        let landed = Landed {
+            cruise_ft: Some(11_480.0),
+            debriefs: vec![
+                serde_json::json!({ "phase": "takeoff", "at": "2026-11-10 09:20:00", "runwayMatches": true,
+                    "legs": { "roll": { "rolling": false, "usedFt": 4210.0 }, "rotation": { "rotateKt": 148.0, "liftoffKt": 152.4 }, "climb": { "climbFpm": 2100.0 } },
+                    "findings": [{ "severity": "good", "leg": "rotation", "text": "Rotated at a steady rate." }] }),
+                serde_json::json!({ "phase": "approach", "approach": "straight-in", "at": "2026-11-10 09:58:00",
+                    "legs": { "final": { "lengthNm": 6.2, "stabilisedFromFt": 1000.0, "pathAngleDeg": 3.04, "finalSpeedKt": 141.0, "maxSinkFpm": -980.0 } },
+                    "findings": [{ "severity": "caution", "leg": "final", "text": "Sink rate over 1,000 fpm below 500 ft." }] }),
+            ],
+        };
+        let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
+        let (embeds, _) = assemble_embeds(&statistics, &user, "", "https://b/content/flights/1", None, None, &landed).unwrap();
+        let embed = serde_json::to_value(&embeds[0]).unwrap();
+        let fields = embed["fields"].as_array().unwrap();
+        let field = |name: &str| fields.iter().find(|f| f["name"] == name).and_then(|f| f["value"].as_str()).unwrap_or_default().to_string();
+        assert!(field("Flight Info").contains("Cruised at 11,500 ft"), "{}", field("Flight Info"));
+        let takeoff = field("Takeoff debrief");
+        assert!(takeoff.starts_with("From a standstill · 4,210 ft of runway"), "{takeoff}");
+        assert!(takeoff.contains("Rotated at **148 kt**, lifted off at **152 kt**"), "{takeoff}");
+        assert!(takeoff.contains("Nothing to work on in this takeoff.") && takeoff.contains("✅ Rotated at a steady rate."), "{takeoff}");
+        let approach = field("Approach debrief");
+        assert!(approach.starts_with("Straight-in · 6.2 NM final"), "{approach}");
+        assert!(approach.contains("max sink **980 fpm**") && approach.contains("⚠️ Sink rate over 1,000 fpm"), "{approach}");
+
+        // In the air, neither.
+        let flying = serde_json::json!({ "departure": { "icao": "KPAE", "name": "Paine" } });
+        let (embeds, _) = assemble_embeds(&flying, &user, "", "", None, None, &landed).unwrap();
+        let text = serde_json::to_string(&embeds[0]).unwrap();
+        assert!(!text.contains("Cruised") && !text.contains("debrief"), "{text}");
+    }
+
+    #[test]
+    fn a_long_debrief_is_cut_at_a_line() {
+        let text = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let cut = truncate(&text, FIELD_MAX_CHARS);
+        assert!(cut.chars().count() <= FIELD_MAX_CHARS && cut.ends_with("\n…"), "{cut}");
+    }
+
 
     #[test]
     fn a_flight_on_flysto_links_it_in_its_post() {
@@ -1139,7 +1333,7 @@ mod tests {
         });
         let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
         let post = |flysto| {
-            let (embeds, _) = assemble_embeds(&statistics, &user, "", "", None, flysto).unwrap();
+            let (embeds, _) = assemble_embeds(&statistics, &user, "", "", None, flysto, &Landed::default()).unwrap();
             serde_json::to_string(&embeds[0]).unwrap()
         };
         let linked = post(Some("https://www.flysto.net/logs/y6wg6irz"));

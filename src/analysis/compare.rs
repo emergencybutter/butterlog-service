@@ -462,7 +462,8 @@ mod tests {
         });
         let lines = post_lines(&doc(-171.9, 117.0, "Astoria Regional Airport"), &doc(-289.3, 116.0, "Astoria"));
         let off: Vec<_> = lines.iter().filter(|l| l.off).map(|l| l.label.as_str()).collect();
-        assert_eq!(off, ["Landed", "Landing Stats · Vertical Speed"]);
+        // The post no longer shows the touchdown or max stats, so they can't differ.
+        assert_eq!(off, ["Landed"]);
         assert_eq!(first_number("Currently 0.1 nautical miles"), Some(0.1));
         assert_eq!(first_number("-382.56 fpm"), Some(-382.56));
     }
