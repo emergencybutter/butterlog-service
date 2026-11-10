@@ -79,10 +79,18 @@ pub async fn put_token(
         .bearer_auth(token)
         .send()
         .await?;
+    // 401 is a token FlySto doesn't know. 403 is one it knows but that may not list logs,
+    // which is not what it is kept for: uploading is, so it is kept.
     match r.status().as_u16() {
-        401 | 403 => return Err(AppError::BadRequest("FlySto doesn't accept this token".to_string())),
-        s if !(200..300).contains(&s) => return Err(AppError::Upstream(refusal(r).await)),
-        _ => {}
+        200..=299 => {}
+        403 => tracing::warn!(user_id, "FlySto knows the token but won't list logs with it: kept for uploads"),
+        401 => {
+            tracing::info!(user_id, "FlySto refused a token: {}", refusal(r).await);
+            return Err(AppError::BadRequest(
+                "FlySto doesn't recognise this token: copy it again from your FlySto account's API page".to_string(),
+            ));
+        }
+        _ => return Err(AppError::Upstream(refusal(r).await)),
     }
     sqlx::query("UPDATE users SET flysto_token = $1 WHERE id = $2")
         .bind(token)

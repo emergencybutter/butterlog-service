@@ -584,6 +584,8 @@ mod tests {
         assert!(!html.contains("<img src=x onerror"));
         // Connected to FlySto: it says so, and offers to disconnect, never the token.
         assert!(html.contains(r#"id="flysto""#) && html.contains("Disconnect"));
+        // What a toggle or Connect came to has somewhere to show.
+        assert!(html.contains(r#"id="toast-container""#));
         assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
         // js_name renders raw (backslash-escaped for the JS string)
         assert!(html.contains("toggleAllowlist('123', '456', 'it\'s-a-channel', this.checked)"));
