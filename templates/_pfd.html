@@ -32,6 +32,8 @@
     .pfd-read-box { fill: #000000; stroke: #e9ece7; stroke-width: 1.5; }
     .pfd-read-val { fill: #ffffff; font-size: 24px; font-weight: 700; }
     .pfd-lubber { fill: #e0930c; }
+    .pfd-vs-bar { stroke: #e0930c; stroke-width: 2.5; }
+    .pfd-vs-val { fill: #ffffff; font-size: 15px; font-weight: 700; }
     /* Barometric subscale. Cyan is the EFIS convention for a reference the
        pilot sets, and keeps it from reading as another measured value. */
     .pfd-baro-val { fill: #36e3c6; font-size: 17px; font-weight: 700; }
@@ -47,6 +49,7 @@
         .pfd-cap { font-size: 15px; letter-spacing: 0.1em; }
         .pfd-read-val { font-size: 30px; }
         .pfd-baro-val { font-size: 22px; }
+        .pfd-vs-val { font-size: 19px; }
         .pfd-baro-sub { font-size: 15px; }
         .pfd-lost { font-size: 26px; }
     }
@@ -56,12 +59,26 @@
 // `renderPFD(doc)` is safe to call on every poll: it builds on the first call
 // with usable data and only moves things after that.
 (function () {
-    const VW = 640, VH = 400;
+    const VW = 692, VH = 400;
     const TOP = 44, TH = 280, MID = TOP + TH / 2;
     const SX = 16, SW = 90;                         // speed tape
     const HX = 124, HW = 392;                       // horizon
     const HCX = HX + HW / 2, HCY = MID;
     const AX = 524, AW = 100;                       // altitude tape
+    const VX = 632, VSW = 48;                       // vertical speed scale
+    // Vertical speed scale, non-linear like the real one: the first 1000 fpm
+    // each way gets most of the height, so a gentle climb still reads.
+    // Breakpoints in fpm and their distance from the centre line.
+    const VS_STOPS = [[0, 0], [1000, 64], [2000, 96], [6000, 128]];
+    const vsY = function (fpm) {
+        const a = Math.min(Math.abs(fpm), 6000);
+        let d = 0;
+        for (let i = 1; i < VS_STOPS.length; i++) {
+            const lo = VS_STOPS[i - 1], hi = VS_STOPS[i];
+            if (a <= hi[0]) { d = lo[1] + (a - lo[0]) / (hi[0] - lo[0]) * (hi[1] - lo[1]); break; }
+        }
+        return fpm < 0 ? d : -d;
+    };
     const HDX = HX, HDW = HW, HDY = 334, HDH = 44;  // heading tape, under the horizon
     const BANK_R = 112;
 
@@ -87,6 +104,17 @@
             alt += `<line x1="${AX}" y1="${y}" x2="${AX + (major ? 14 : 8)}" y2="${y}" class="pfd-tick"/>`;
             if (major) alt += `<text x="${AX + 19}" y="${y + 5}" class="pfd-tape-lbl" text-anchor="start">${v}</text>`;
         }
+
+        let vsi = '';
+        [500, 1000, 1500, 2000, 4000, 6000].forEach(function (v) {
+            const major = v === 1000 || v === 2000 || v === 6000;
+            [v, -v].forEach(function (s) {
+                const y = MID + vsY(s);
+                vsi += `<line x1="${VX}" y1="${y}" x2="${VX + (major ? 12 : 7)}" y2="${y}" class="pfd-tick"/>`;
+                if (major) vsi += `<text x="${VX + 16}" y="${y + 5}" class="pfd-tape-lbl" text-anchor="start">${v / 1000}</text>`;
+            });
+        });
+        vsi += `<line x1="${VX}" y1="${MID}" x2="${VX + 16}" y2="${MID}" class="pfd-tick"/>`;
 
         // Three turns' worth of compass, so the tape never runs out under a
         // heading that has been unwrapped away from 0..360 (see headingShift).
@@ -133,6 +161,7 @@
   <text x="${SX + SW / 2}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle">IAS KT</text>
   <text id="pfd-mid-cap" x="${HCX}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle"></text>
   <text x="${AX + AW / 2}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle">ALT FT</text>
+  <text x="${VX + VSW / 2}" y="${TOP - 14}" class="pfd-cap" text-anchor="middle">V/S</text>
 
   <g clip-path="url(#pfdClipHzn)">
     <g id="pfd-roll" class="pfd-move">
@@ -167,6 +196,15 @@
   <rect x="${AX}" y="${TOP}" width="${AW}" height="${TH}" rx="4" class="pfd-frame"/>
   <rect x="${AX - 8}" y="${MID - 18}" width="${AW + 8}" height="36" class="pfd-read-box"/>
   <text id="pfd-alt-val" x="${AX - 8 + (AW + 8) / 2}" y="${MID + 9}" class="pfd-read-val" text-anchor="middle">-----</text>
+
+  <rect x="${VX}" y="${TOP}" width="${VSW}" height="${TH}" rx="4" class="pfd-tape-bg"/>
+  ${vsi}
+  <g id="pfd-vs-ptr" class="pfd-move">
+    <line x1="${VX}" y1="${MID}" x2="${VX + VSW}" y2="${MID}" class="pfd-vs-bar"/>
+    <polygon points="${VX + 1},${MID} ${VX + 11},${MID - 6} ${VX + 11},${MID + 6}" class="pfd-roll-ptr"/>
+  </g>
+  <rect x="${VX}" y="${TOP}" width="${VSW}" height="${TH}" rx="4" class="pfd-frame"/>
+  <text id="pfd-vs-val" x="${VX + VSW / 2}" y="${TOP + TH + 22}" class="pfd-vs-val" text-anchor="middle"></text>
 
   <rect x="${HDX}" y="${HDY}" width="${HDW}" height="${HDH}" rx="4" class="pfd-tape-bg"/>
   <g clip-path="url(#pfdClipHdg)"><g id="pfd-hdg" class="pfd-move">${hdg}</g></g>
@@ -245,6 +283,15 @@
         hdgEl.setAttribute('transform', `translate(${shift.x.toFixed(2)} 0)`);
         if (shift.snap) { hdgEl.getBoundingClientRect(); hdgEl.classList.add('pfd-move'); }
 
+        // Vertical speed: the pointer always, the number only once it is more
+        // than level-flight noise. Hidden, not zeroed, when the sample has none.
+        const hasVs = typeof r.vs === 'number' && isFinite(r.vs);
+        const vs = hasVs ? r.vs : 0;
+        el('pfd-vs-ptr').style.display = hasVs ? '' : 'none';
+        el('pfd-vs-ptr').setAttribute('transform', `translate(0 ${vsY(vs).toFixed(2)})`);
+        el('pfd-vs-val').textContent = hasVs && Math.abs(vs) >= 100
+            ? (vs > 0 ? '+' : '−') + Math.round(Math.abs(vs) / 50) * 50 : '';
+
         el('pfd-ias').textContent = Math.round(ias);
         el('pfd-alt-val').textContent = Math.round(altFt);
         el('pfd-hdg-val').textContent = String(Math.round(hdg) % 360).padStart(3, '0') + '°';
@@ -270,6 +317,7 @@
             `${Math.round(ias)} knots, ${Math.round(altFt)} feet, heading ${Math.round(hdg) % 360}, `
             + `pitch ${Math.round(pitch)} degrees, bank ${Math.round(Math.abs(roll))} degrees `
             + `${Math.abs(roll) < 1 ? 'level' : roll > 0 ? 'right' : 'left'}`
+            + `${hasVs ? `, ${Math.abs(Math.round(vs))} feet per minute ${vs < 0 ? 'down' : 'up'}` : ''}`
             + `${baro > 0 ? `, altimeter ${baro.toFixed(2)} inches` : ''}`);
 
         // Ease between readings only once there is a previous one to ease from:
@@ -299,6 +347,7 @@
             ias: numOr(c.ias, numOr(c.speed, 0)),
             altitude: numOr(c.indicatedAltitude, numOr(c.altitude, 0)),
             heading: numOr(c.magneticHeading, numOr(c.heading, 0)),
+            vs: c.verticalSpeed,
             baro: c.altimeterSetting,
             caption: (c.phase || '').replace(/_/g, ' ').toUpperCase(),
             // A stale feed leaves the last attitude on screen, scrimmed and

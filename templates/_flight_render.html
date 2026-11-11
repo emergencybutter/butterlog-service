@@ -1239,7 +1239,7 @@ function renderFlightDoc(d) {
                     : (((s.heading - (s.magvar || 0)) % 360) + 360) % 360;
                 if (typeof renderPFDSample === 'function') renderPFDSample({
                     pitch: s.pitch, roll: s.roll,
-                    ias: s.ias, altitude: s.altitude, baro: s.baro,
+                    ias: s.ias, altitude: s.altitude, baro: s.baro, vs: s.vspeed,
                     heading: magnetic === null ? s.track : magnetic,
                     headingLabel: magnetic === null ? 'GROUND TRACK · TRUE' : 'MAGNETIC HEADING',
                     caption: new Date(s.epoch * 1000).toISOString().slice(11, 19) + 'Z',
