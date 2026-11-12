@@ -450,12 +450,22 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
     if let Some(s) = speed_low {
         // `final_kt` is what was flown at 100-300 ft, not a Vref: slower than it higher up
         // is the speed rising late, not a stall risk. Only a sag near the ground is slow.
-        let near = stats(low(30.0, 300.0).filter_map(|i| smooth(pts, i, |p| p.ias)));
-        let slow = near.map_or(0.0, |n| final_kt - n.min);
+        // A sag: under 300 ft, the speed falling below that speed, by how much it fell from
+        // the most already flown there. Still rising towards it is not one.
+        let (slow, slow_to) = {
+            let (mut best, mut worst) = (f64::NEG_INFINITY, (0.0f64, final_kt));
+            for v in low(30.0, 300.0).filter_map(|i| smooth(pts, i, |p| p.ias)) {
+                if v < final_kt && best - v > worst.0 {
+                    worst = (best - v, v);
+                }
+                best = best.max(v);
+            }
+            worst
+        };
         let (fast, early_slow) = (s.max - final_kt, final_kt - s.min);
         let at = |g: Option<usize>| g.and_then(|i| smooth(pts, i, |p| p.ias));
         if slow > 5.0 {
-            add("final", "slow", Severity::Caution, format!("Speed sagged {:.0} kt below the {:.0} kt you flew on short final, under 300 ft. Slow and low is the stall; keep the speed up until the flare.", slow, final_kt), json!({ "slowKt": r0(slow), "finalKt": r0(final_kt) }));
+            add("final", "slow", Severity::Caution, format!("Speed sagged {:.0} kt under 300 ft, to {:.0} kt. Slow and low is the stall; keep the speed up until the flare.", slow, slow_to), json!({ "slowKt": r0(slow), "minKt": r0(slow_to), "finalKt": r0(final_kt) }));
         } else if early_slow > 5.0 {
             let (a, b) = (at(g500), at(g200));
             let detail = a.zip(b).map_or(String::new(), |(a, b)| format!(": {:.0} kt at 500 ft, {:.0} kt at 200 ft", a, b));
