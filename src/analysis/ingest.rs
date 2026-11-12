@@ -951,13 +951,22 @@ fn timestamp(ms: i64) -> DateTime<Utc> {
 /// document the service's, within [`SAME_ANALYSIS_MS`]. Candidates are `(id, statistics,
 /// service_owned)`.
 fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value, bool)]) -> Option<&'a (i64, Value, bool)> {
-    let (ours, key) = match f.takeoff_roll_ms.or(f.takeoff_ms) {
-        Some(t) => (t, "takeoff_time"),
-        None => (f.first_ms, "start_time"),
-    };
+    let start = |c: &Value| Some(app_time(&c["start_time"])? - f.first_ms);
     candidates
         .iter()
-        .filter_map(|c| Some((c, (app_time(&c.1[key])? - ours).abs())))
+        .filter_map(|c| {
+            let gap = match (f.takeoff_roll_ms.or(f.takeoff_ms), app_time(&c.1["takeoff_time"])) {
+                (Some(ours), Some(theirs)) => theirs - ours,
+                // A flight begun airborne has no roll, and so no `takeoff_time` in its
+                // document (the service's, or the app's): by start. Without this the
+                // service's own was never found again, and each pass of the analysis while
+                // it flew made another (623-717, an H145 begun in the air).
+                (Some(_), None) if f.takeoff_roll_ms.is_none() => start(&c.1)?,
+                (Some(_), None) => return None,
+                (None, _) => start(&c.1)?,
+            };
+            Some((c, gap.abs()))
+        })
         .filter(|(c, gap)| *gap <= if c.2 { SAME_ANALYSIS_MS } else { SAME_FLIGHT_MS })
         .min_by_key(|(_, gap)| *gap)
         .map(|(c, _)| c)
@@ -1262,6 +1271,15 @@ mod tests {
         let owned = vec![(4, json!({ "takeoff_time": "2026-11-01 01:09:47.776" }), true)];
         assert_eq!(same_flight(&flight(Some(t + 20_000), t - 50_000), &owned).unwrap().0, 4);
         assert!(same_flight(&flight(Some(t + 270_000), t + 200_000), &owned).is_none());
+
+        // Begun airborne: a takeoff but no roll, and a document with no takeoff_time. Found
+        // by start, so each pass of the analysis updates it rather than making another.
+        let airborne = FlightSummary { takeoff_roll_ms: None, ..flight(Some(t), t) };
+        let owned = vec![
+            (5, json!({ "takeoff_time": null, "start_time": "2026-11-01 01:09:47.776" }), true),
+            (6, json!({ "takeoff_time": null, "start_time": "2026-11-01 02:00:00.000" }), true),
+        ];
+        assert_eq!(same_flight(&airborne, &owned).unwrap().0, 5);
     }
 
     #[test]
