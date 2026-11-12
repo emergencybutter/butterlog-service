@@ -411,7 +411,7 @@ async fn take_over(
         Some(id) => sqlx::query_as(
             "UPDATE flights \
                 SET app_statistics = CASE WHEN service_owned THEN app_statistics ELSE statistics END, \
-                    statistics = $2, arrival = COALESCE($3, arrival), service_owned = TRUE, \
+                    statistics = $2, arrival = COALESCE($3, arrival), service_owned = TRUE,                     departure = CASE WHEN service_made THEN $8 ELSE departure END, \
                     status = CASE WHEN service_made THEN $4 ELSE status END, \
                     ended_at = CASE WHEN service_made THEN $5 ELSE ended_at END, \
                     end_reason = CASE WHEN service_made THEN $6 ELSE end_reason END, \
@@ -426,6 +426,7 @@ async fn take_over(
         .bind(ended_at)
         .bind(end_reason)
         .bind(timestamp(f.first_ms))
+        .bind(f.departure.to_string())
         .fetch_one(&mut *tx)
         .await?,
         None => sqlx::query_as(
@@ -961,7 +962,9 @@ fn same_flight<'a>(f: &FlightSummary, candidates: &'a [(i64, Value, bool)]) -> O
                 // document (the service's, or the app's): by start. Without this the
                 // service's own was never found again, and each pass of the analysis while
                 // it flew made another (623-717, an H145 begun in the air).
-                (Some(_), None) if f.takeoff_roll_ms.is_none() => start(&c.1)?,
+                // The service's own, analysed again: what it took for begun airborne may
+                // now be a helicopter's liftoff, with a roll. By start, which is the same.
+                (Some(_), None) if f.takeoff_roll_ms.is_none() || c.2 => start(&c.1)?,
                 (Some(_), None) => return None,
                 (None, _) => start(&c.1)?,
             };
@@ -1280,6 +1283,11 @@ mod tests {
             (6, json!({ "takeoff_time": null, "start_time": "2026-11-01 02:00:00.000" }), true),
         ];
         assert_eq!(same_flight(&airborne, &owned).unwrap().0, 5);
+        // Analysed again as a helicopter's liftoff, with a roll now: still by start.
+        assert_eq!(same_flight(&flight(Some(t), t), &owned).unwrap().0, 5);
+        // An old-path flight with no takeoff_time is not one with a roll.
+        let app = vec![(7, json!({ "takeoff_time": null, "start_time": "2026-11-01 01:09:47.776" }), false)];
+        assert!(same_flight(&flight(Some(t), t), &app).is_none());
     }
 
     #[test]

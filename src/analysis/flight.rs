@@ -494,7 +494,13 @@ impl Analyser {
                 } else if !ground {
                     self.phase = Phase::Climb;
                     self.takeoff_ms.get_or_insert(p.t);
-                    self.airborne_start = true;
+                    // Never seen on the ground: begun in the air. Otherwise a lift straight
+                    // up, a helicopter's: its takeoff has no roll, so the roll is the liftoff.
+                    self.airborne_start = self.ground_alt.is_none();
+                    if !self.airborne_start {
+                        self.takeoff_roll_ms.get_or_insert(p.t);
+                        self.event(EventKind::Takeoff, p.t, p.lat, p.lon, None);
+                    }
                 }
             }
             Phase::TaxiOut => {
@@ -1005,6 +1011,9 @@ pub struct FlightStream<S> {
     flights: Vec<StreamFlight<S>>,
     /// Whether the last of `flights` is still being flown.
     flying: bool,
+    /// Where the aircraft last left the ground, while it is still off it and not moved on
+    /// by a teleport.
+    left_ground: Option<Point>,
     /// Samples later than the last point, not yet known to be in a flight or not.
     queue: VecDeque<Sample>,
     /// Those given out last, at the last one's time: a flight starting at that time takes
@@ -1021,6 +1030,7 @@ impl<S: FlightSink> FlightStream<S> {
             last: None,
             flights: Vec::new(),
             flying: false,
+            left_ground: None,
             queue: VecDeque::new(),
             same_time: Vec::new(),
         }
@@ -1049,7 +1059,13 @@ impl<S: FlightSink> FlightStream<S> {
             let plausible = last.gs.max(0.0) * hours * TELEPORT_SPEED_FACTOR + TELEPORT_MARGIN_NM;
             if distance_nm(&last, &p) > plausible {
                 self.flying = false;
+                self.left_ground = None;
+            } else if last.on_ground && !p.on_ground {
+                self.left_ground = Some(last);
             }
+        }
+        if p.on_ground {
+            self.left_ground = None;
         }
         self.last = Some(p);
         if !self.flying && p.gs > MOVING_KT {
@@ -1057,6 +1073,8 @@ impl<S: FlightSink> FlightStream<S> {
             self.flying = true;
             // The samples at its first point's time, given out already.
             let flight = self.flights.last_mut().expect("just pushed");
+            // Lifted off before moving, as a helicopter does: it left the ground, not the air.
+            flight.analyser.ground_alt = self.left_ground.map(|l| l.alt_msl);
             flight.analyser.update(p);
             let progress = flight.progress();
             for s in self.same_time.iter().filter(|s| s.wall_time_ms >= p.t) {
@@ -1487,11 +1505,14 @@ mod tests {
         debounce_ground(&mut points);
         let mut flights = Vec::new();
         for part in split_at_teleports(&points) {
-            let mut rest = part;
-            while let Some(moving) = rest.iter().position(|p| p.gs > MOVING_KT) {
+            let mut from = 0;
+            while let Some(start) = (from..part.len()).find(|&i| part[i].gs > MOVING_KT) {
                 let mut analyser = Analyser::new();
-                let mut used = rest.len();
-                for (i, p) in rest.iter().enumerate().skip(moving) {
+                if !part[start].on_ground {
+                    analyser.ground_alt = part[..start].iter().rev().find(|p| p.on_ground).map(|p| p.alt_msl);
+                }
+                let mut used = part.len();
+                for (i, p) in part.iter().enumerate().skip(start) {
                     analyser.update(*p);
                     if analyser.stopped {
                         used = i + 1;
@@ -1499,7 +1520,7 @@ mod tests {
                     }
                 }
                 flights.extend(analyser.finish(places, &sim_runways));
-                rest = &rest[used..];
+                from = used;
             }
         }
         flights
@@ -1585,6 +1606,54 @@ mod tests {
         touch_and_go.truncate(85);
         touch_and_go.extend(circuit(85).into_iter().skip(10));
         assert_eq!(analyse(&touch_and_go, &places).len(), 1);
+    }
+
+    /// A helicopter's flight from `t0`: idling on the pad, a lift into the hover, then off
+    /// at 100 kt, back to the pad, set down and stopped.
+    fn helicopter(t0: i64) -> Vec<Sample> {
+        let mut out = Vec::new();
+        let mut at = |secs: i64, ground: bool, gs: f64, alt: f64| {
+            let mut s = Sample::empty();
+            s.wall_time_ms = (t0 + secs) * 1_000;
+            s.set(Field::Latitude, 45.0);
+            s.set(Field::Longitude, 45.0);
+            s.set(Field::AltitudeIndicated, alt);
+            s.set(Field::AltitudeMsl, alt);
+            s.set(Field::OnGround, if ground { 1.0 } else { 0.0 });
+            s.set(Field::GroundSpeed, gs);
+            s.set(Field::Ias, gs);
+            s.set(Field::GNormal, 1.0);
+            out.push(s);
+        };
+        // A hop off the pad and back first: no flight.
+        (0..10).for_each(|i| at(i, true, 0.0, 100.0));
+        (10..12).for_each(|i| at(i, false, 0.0, 101.0));
+        (12..30).for_each(|i| at(i, true, 0.0, 100.0));
+        (30..60).for_each(|i| at(i, false, 2.0, 110.0));
+        (60..120).for_each(|i| at(i, false, 100.0, 1100.0));
+        (120..140).for_each(|i| at(i, false, 3.0, 110.0));
+        (140..180).for_each(|i| at(i, true, 0.0, 100.0));
+        out
+    }
+
+    #[test]
+    fn a_helicopter_lifting_into_the_hover_departs_from_its_pad() {
+        let places = places(&[("XX", 45.0, 45.0)]);
+        let samples = helicopter(0);
+        let flights = analyse(&samples, &places);
+        assert_eq!(flights.len(), 1, "{flights:?}");
+        let f = &flights[0];
+        assert_eq!(f.departure, Endpoint::Airport("XX".into()));
+        assert_eq!(f.arrival, Endpoint::Airport("XX".into()));
+        // It took off moving off: the flight starts there.
+        assert_eq!(f.takeoff_ms, Some(60_000));
+        assert_eq!(f.takeoff_roll_ms, Some(60_000));
+        assert!(f.events.iter().any(|e| e.kind == EventKind::Takeoff));
+        assert_eq!(holds_to_the_whole(&samples, &places, 1), 1);
+        // Begun in the hover, nothing on the ground before: still begun in the air.
+        let airborne = analyse(&samples[30..], &places);
+        assert_eq!(airborne[0].departure, Endpoint::Airborne);
+        assert_eq!(airborne[0].takeoff_roll_ms, None);
     }
 
     #[test]
