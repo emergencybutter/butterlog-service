@@ -360,23 +360,39 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
         why
     };
     let bottom = on_final.clone().rev().find(|&i| h(i).is_some_and(|x| x >= STABLE_FLOOR_FT));
-    let (stable_from, broke_on) = match bottom {
+    // Where it was last unstable above the stable stretch, and why.
+    let (stable_from, broke_on, broke_at) = match bottom {
         Some(bottom) if failures(bottom).is_empty() => {
             let mut from = bottom;
-            let mut broke = Vec::new();
+            let (mut broke, mut at) = (Vec::new(), None);
             for i in (fin.start..bottom).rev() {
                 let why = failures(i);
                 if why.is_empty() {
                     from = i;
                 } else if pts[from].t - pts[i].t > 3 {
                     broke = why;
+                    at = Some(i);
                     break;
                 }
             }
-            (h(from), broke)
+            (h(from), broke, at)
         }
-        Some(bottom) => (None, failures(bottom)),
-        None => (None, Vec::new()),
+        Some(bottom) => (None, failures(bottom), Some(bottom)),
+        None => (None, Vec::new(), None),
+    };
+    // The reference is the speed flown at 100-300 ft, not the aircraft's Vref, so "off
+    // speed" higher up only says the speed changed on the way down: say by how much.
+    let off_text = |what: &str| match (what, broke_at) {
+        ("speed", Some(i)) => match (smooth(pts, i, |p| p.ias), h(i)) {
+            (Some(v), Some(ht)) => format!(
+                "speed not steady ({:.0} kt at {:.0} ft, against the {:.0} kt you flew at 100 to 300 ft)",
+                v,
+                (ht / 50.0).round() * 50.0,
+                final_kt
+            ),
+            _ => "speed not steady".into(),
+        },
+        _ => what.to_string(),
     };
 
     out_legs.insert(
@@ -403,7 +419,11 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
             add("final", "stabilised", Severity::Good, format!("Stabilised from {:.0} ft: on speed, on the centreline and on the glidepath, at a steady sink.", from), json!({ "fromFt": r0(from), "gateFt": norms.gate_ft }));
         }
         _ if bottom.is_some() => {
-            let what = if broke_on.is_empty() { String::new() } else { format!(" What was off: {}.", broke_on.join(", ")) };
+            let what = if broke_on.is_empty() {
+                String::new()
+            } else {
+                format!(" What was off: {}.", broke_on.iter().map(|w| off_text(w)).collect::<Vec<_>>().join(", "))
+            };
             let from = stable_from.map_or(format!("not even at {STABLE_FLOOR_FT:.0} ft"), |x| format!("only from {:.0} ft", x));
             add("final", "stabilised", Severity::Caution, format!("Not stabilised by {:.0} ft ({}).{} The rule is simple: not stable at the gate, go around.", norms.gate_ft, from, what), json!({ "fromFt": stable_from.map(r0), "gateFt": norms.gate_ft, "off": broke_on }));
         }
@@ -428,13 +448,22 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
         add("final", "sink", severity, format!("Sink rate reached {:.0} fpm below 1,000 ft. Over 1,000 fpm that low is unstable: correct the path early, with small changes.", -sink), json!({ "sinkFpm": r0(sink) }));
     }
     if let Some(s) = speed_low {
-        let (fast, slow) = (s.max - final_kt, final_kt - s.min);
+        // `final_kt` is what was flown at 100-300 ft, not a Vref: slower than it higher up
+        // is the speed rising late, not a stall risk. Only a sag near the ground is slow.
+        let near = stats(low(30.0, 300.0).filter_map(|i| smooth(pts, i, |p| p.ias)));
+        let slow = near.map_or(0.0, |n| final_kt - n.min);
+        let (fast, early_slow) = (s.max - final_kt, final_kt - s.min);
+        let at = |g: Option<usize>| g.and_then(|i| smooth(pts, i, |p| p.ias));
         if slow > 5.0 {
-            add("final", "slow", Severity::Caution, format!("{:.0} kt below your final approach speed of {:.0} kt below 500 ft. Slow and low is the stall; keep the speed up until the flare.", slow, final_kt), json!({ "slowKt": r0(slow), "finalKt": r0(final_kt) }));
+            add("final", "slow", Severity::Caution, format!("Speed sagged {:.0} kt below the {:.0} kt you flew on short final, under 300 ft. Slow and low is the stall; keep the speed up until the flare.", slow, final_kt), json!({ "slowKt": r0(slow), "finalKt": r0(final_kt) }));
+        } else if early_slow > 5.0 {
+            let (a, b) = (at(g500), at(g200));
+            let detail = a.zip(b).map_or(String::new(), |(a, b)| format!(": {:.0} kt at 500 ft, {:.0} kt at 200 ft", a, b));
+            add("final", "unsteady", Severity::Improve, format!("Speed rose {:.0} kt late on final{}. Settle the approach speed by the gate and hold it to the flare; chasing the path with the nose late on is what speeds you up.", early_slow, detail), json!({ "riseKt": r0(early_slow), "finalKt": r0(final_kt) }));
         }
         if fast > 10.0 {
             add("final", "fast", Severity::Improve, format!("Up to {:.0} kt over your final approach speed below 500 ft. Extra speed floats you down the runway; set the attitude and power early and trim.", fast), json!({ "fastKt": r0(fast), "finalKt": r0(final_kt) }));
-        } else if slow <= 5.0 && s.sd <= 3.0 {
+        } else if early_slow <= 5.0 && s.sd <= 3.0 {
             add("final", "speed", Severity::Good, format!("Speed held within {:.0} kt below 500 ft.", s.max - s.min), json!({ "rangeKt": r0(s.max - s.min) }));
         }
     }
