@@ -449,13 +449,14 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
     }
     if let Some(s) = speed_low {
         // `final_kt` is what was flown at 100-300 ft, not a Vref: slower than it higher up
-        // is the speed rising late, not a stall risk. Only a sag near the ground is slow.
-        // A sag: under 300 ft, the speed falling below that speed, by how much it fell from
-        // the most already flown there. Still rising towards it is not one.
+        // is the speed rising late, not a stall risk. Only a sag near the ground is slow:
+        // under 300 ft, falling more than 5 kt below that speed, by how much it fell from
+        // the most already flown there. Still rising towards it, or coming back down to it
+        // from a peak, is not one.
         let (slow, slow_to) = {
             let (mut best, mut worst) = (f64::NEG_INFINITY, (0.0f64, final_kt));
             for v in low(30.0, 300.0).filter_map(|i| smooth(pts, i, |p| p.ias)) {
-                if v < final_kt && best - v > worst.0 {
+                if v < final_kt - 5.0 && best - v > worst.0 {
                     worst = (best - v, v);
                 }
                 best = best.max(v);
@@ -469,7 +470,7 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
         } else if early_slow > 5.0 {
             let (a, b) = (at(g500), at(g200));
             let detail = a.zip(b).map_or(String::new(), |(a, b)| format!(": {:.0} kt at 500 ft, {:.0} kt at 200 ft", a, b));
-            add("final", "unsteady", Severity::Improve, format!("Speed rose {:.0} kt late on final{}. Settle the approach speed by the gate and hold it to the flare; chasing the path with the nose late on is what speeds you up.", early_slow, detail), json!({ "riseKt": r0(early_slow), "finalKt": r0(final_kt) }));
+            add("final", "unsteady", Severity::Improve, format!("Speed not steady below 500 ft, from {:.0} to {:.0} kt{}. Settle the approach speed by the gate and hold it to the flare; chasing the path with the nose late on is what speeds you up.", s.min, s.max, detail), json!({ "minKt": r0(s.min), "maxKt": r0(s.max), "finalKt": r0(final_kt) }));
         }
         if fast > 10.0 {
             add("final", "fast", Severity::Improve, format!("Up to {:.0} kt over your final approach speed below 500 ft. Extra speed floats you down the runway; set the attitude and power early and trim.", fast), json!({ "fastKt": r0(fast), "finalKt": r0(final_kt) }));
