@@ -121,6 +121,31 @@ pub struct Approach {
     pub width_ft: Option<f64>,
 }
 
+impl Approach {
+    /// Moved sideways so the touchdown at `lat`/`lon` is `offset_percent` of the half-width
+    /// left of the centreline (the landing's, from the sim's own runway when it sent one).
+    /// The public runway data can sit tens of feet off the sim's, and a final flown down the
+    /// sim's centreline would otherwise read as that far off it. Unchanged without a width,
+    /// or when the two disagree by more than the runway is wide.
+    pub(crate) fn aligned_to(self, lat: f64, lon: f64, offset_percent: f64) -> Self {
+        const EARTH_RADIUS_FT: f64 = 20_925_646.3;
+        let Some(width) = self.width_ft else { return self };
+        let (ours, _) = project_onto_runway(lat, lon, self.lat, self.lon, self.course, 0.0);
+        let shift = ours - offset_percent / 100.0 * width / 2.0;
+        if !shift.is_finite() || shift.abs() > width {
+            return self;
+        }
+        // Left of the course, as east and north.
+        let c = self.course.to_radians();
+        let (east, north) = (-c.cos() * shift, c.sin() * shift);
+        Self {
+            lat: self.lat + (north / EARTH_RADIUS_FT).to_degrees(),
+            lon: self.lon + (east / (EARTH_RADIUS_FT * self.lat.to_radians().cos())).to_degrees(),
+            ..self
+        }
+    }
+}
+
 /// The runway end landed on: the end whose centreline the touchdown is nearest, within
 /// 300 ft, its heading within 30° of the touchdown's.
 pub fn runway_landed_on(lat: f64, lon: f64, heading: f64, runways: &[Runway]) -> Option<Approach> {
@@ -425,6 +450,10 @@ pub fn circuits(events: &[Value], pts: &[Pt], runways: &[Runway]) -> Circuits {
         let heading = e.get("heading").and_then(Value::as_f64).or(flown);
         let rwy = heading
             .and_then(|h| runway_landed_on(lat, lon, h, runways))
+            .map(|r| match e.get("offsetPercent").and_then(Value::as_f64) {
+                Some(o) => r.aligned_to(lat, lon, o),
+                None => r,
+            })
             .or_else(|| flown.map(|course| Approach { course, lat, lon, length_ft: None, width_ft: None }));
         let Some(rwy) = rwy else { continue };
         let legs = legs(pts, touchdown, &rwy);
@@ -572,6 +601,30 @@ mod tests {
         // 10 NM out at 90 kt is no downwind (2.5 min is 3.75 NM), nor such a base.
         let far = fly((-10.0, 1.0), &[(180.0, 80), (90.0, 400), (0.0, 40)], 90.0);
         assert_eq!(kinds(&legs(&far, far.len() - 1, &RWY)), [Final]);
+    }
+
+    #[test]
+    fn the_approach_lines_up_with_the_sims_runway() {
+        // Ours runs north up lon 5; the sim's is 60 ft east, and the touchdown 4 ft right
+        // of the sim's centreline: -5% of a 150 ft runway's half-width.
+        let ours = Approach { course: 30.0, lat: 45.0, lon: 5.0, length_ft: Some(5000.0), width_ft: Some(150.0) };
+        let c = 30f64.to_radians();
+        let at = |fwd: f64, right: f64| {
+            let (east, north) = (fwd * c.sin() + right * c.cos(), fwd * c.cos() - right * c.sin());
+            (45.0 + north / 364_000.0, 5.0 + east / (364_000.0 * 45f64.to_radians().cos()))
+        };
+        let (lat, lon) = at(1500.0, 64.0);
+        let moved = ours.aligned_to(lat, lon, -5.0);
+        let (left, along) = project_onto_runway(lat, lon, moved.lat, moved.lon, moved.course, 0.0);
+        assert!((left + 3.75).abs() < 1.0, "{left}");
+        assert!((along - 1500.0).abs() < 10.0, "{along}");
+        // A point on the sim's extended centreline is on the moved one.
+        let (lat, lon) = at(-3000.0, 60.0);
+        let (left, _) = project_onto_runway(lat, lon, moved.lat, moved.lon, moved.course, 0.0);
+        assert!(left.abs() < 1.0, "{left}");
+        // Without a width there is nothing to scale the offset by.
+        let narrow = Approach { width_ft: None, ..ours };
+        assert_eq!(narrow.aligned_to(lat, lon, -5.0).lon, 5.0);
     }
 
     #[test]
