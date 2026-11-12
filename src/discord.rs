@@ -360,6 +360,11 @@ struct FlightSyncRow {
     notes: Option<String>,
 }
 
+/// Whether the flight's departure is `Airborne`: it began in the air.
+fn begun_airborne(statistics: &Value) -> bool {
+    statistics["departure"]["icao"].as_str() == Some("Airborne")
+}
+
 pub async fn sync_flight_discord(
     db: &PgPool,
     r2: &R2Client,
@@ -384,6 +389,11 @@ pub async fn sync_flight_discord(
     };
     let user_id = row.user_id;
     let statistics = row.statistics;
+    // A flight begun in the air (a sim loaded mid-flight, a session resumed without the
+    // stream before it) has no departure to tell, and is not posted.
+    if begun_airborne(&statistics) {
+        return Ok(());
+    }
     let stored_sig = row.discord_screenshot_sig;
     let notes = row.notes;
 
@@ -1339,6 +1349,13 @@ mod tests {
         let linked = post(Some("https://www.flysto.net/logs/y6wg6irz"));
         assert!(linked.contains("[Open this flight on FlySto](https://www.flysto.net/logs/y6wg6irz)"), "{linked}");
         assert!(!post(None).contains("FlySto"));
+    }
+
+    #[test]
+    fn a_flight_begun_airborne_is_not_posted() {
+        assert!(begun_airborne(&serde_json::json!({ "departure": { "icao": "Airborne", "name": "Airborne" } })));
+        assert!(!begun_airborne(&serde_json::json!({ "departure": { "icao": "TKPK", "name": "Bradshaw" } })));
+        assert!(!begun_airborne(&serde_json::json!({})));
     }
 
     #[test]
