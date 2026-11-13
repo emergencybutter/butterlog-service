@@ -14,7 +14,8 @@
 //!   nearly level, on the centreline and on a 3° path), where it was against a 3° path at
 //!   1,000, 500 and 200 ft, its path angle, speed control, sink, late bank and centreline.
 //! - Touchdown: the crab left in it, how far down the runway, how firm, how far off the
-//!   centreline.
+//!   centreline; or, for one the analysis found a crash, the crash, with a remark in
+//!   lighter vein (the one text not plain).
 
 use super::pattern::{angle, Approach, Frame, Leg, LegKind, Pt, Side, FT_PER_NM};
 use serde_json::{json, Value};
@@ -183,9 +184,88 @@ pub(crate) fn max_bank(pts: &[Pt], range: std::ops::RangeInclusive<usize>) -> Op
     pts[range].iter().filter_map(|p| p.roll.map(f64::abs)).reduce(f64::max)
 }
 
-/// The debrief of the landing at `touchdown`, flown into `rwy` along `legs`. `None` without
-/// a final or altitudes to judge it by.
-pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landing: &Value) -> Option<Value> {
+/// Said of a crash after its figures, one per crash, chosen by when it was ([`remark`]).
+const CRASH_REMARKS: &[&str] = &[
+    "Any landing you can walk away from is a good one. This one is still under review.",
+    "Good news: you found the ground. Less good news: it found you first.",
+    "Technically an arrival. The airframe would like a word.",
+    "The runway was a little further on. It's still there, and it misses you.",
+    "Takeoffs and landings are meant to come out even. You're even, just not the usual way.",
+    "The aircraft is now available in a convenient flat-pack format.",
+    "That's one way to make sure nobody forgets the flight.",
+    "The insurers have been notified and have stopped returning our calls.",
+];
+
+/// The remark for a crash at `at` (its timestamp): the same each time its page is drawn,
+/// and spread over [`CRASH_REMARKS`] from one crash to the next.
+fn remark(at: &str) -> (usize, &'static str) {
+    let hash = at.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    let i = (hash % CRASH_REMARKS.len() as u64) as usize;
+    (i, CRASH_REMARKS[i])
+}
+
+/// The crash the landing ended in, from the analysis's `crash` event: what its signs and
+/// its place against the runway say, then a remark. `fpm` is the touchdown's.
+fn crash_finding(crash: &Value, fpm: Option<f64>) -> Finding {
+    let signs = crash.get("signs").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let sign = |kind: &str| signs.iter().find(|s| s.get("kind").and_then(Value::as_str) == Some(kind));
+    let num = |v: Option<&Value>, k: &str| v.and_then(|v| v.get(k)).and_then(Value::as_f64);
+    let impact = sign("impact");
+    let (g, fpm) = (num(impact, "g"), num(impact, "touchdown_fpm").or(fpm).map(f64::abs));
+    let roll = num(sign("attitude"), "roll_deg");
+    let runway = crash.get("runway").filter(|r| r.is_object());
+    let ident = runway.and_then(|r| r.get("ident")).and_then(Value::as_str);
+    let short_ft = num(runway, "along_ft").filter(|a| *a < 0.0).map(f64::abs);
+    let on_runway = runway.and_then(|r| r.get("on_runway")).and_then(Value::as_bool) == Some(true);
+    let place = match (ident, short_ft, on_runway) {
+        (Some(id), _, true) => format!(" on runway {id}"),
+        (Some(id), Some(short), false) => format!(" {short:.0} ft short of runway {id}"),
+        (Some(id), None, false) => format!(" off the side of runway {id}"),
+        (None, ..) => String::new(),
+    };
+    let mut facts = Vec::new();
+    match (fpm, g) {
+        (Some(v), Some(g)) => facts.push(format!("hit at {v:.0} fpm and {g:.1} G")),
+        (Some(v), None) => facts.push(format!("hit at {v:.0} fpm")),
+        _ => {}
+    }
+    if let Some(r) = roll {
+        facts.push(format!("came to rest banked {:.0}°", r.abs()));
+    }
+    if sign("sim_reported").is_some() {
+        facts.push("the sim called it a crash too".into());
+    }
+    let facts = if facts.is_empty() { String::new() } else { format!(": {}", facts.join(", ")) };
+    let at = crash.get("timestamp").and_then(Value::as_str).unwrap_or_default();
+    let (i, quip) = remark(at);
+    Finding {
+        leg: "touchdown",
+        code: "crash",
+        severity: Severity::Caution,
+        text: format!("Crashed{place}{facts}. {quip}"),
+        values: json!({
+            "fpm": fpm.map(r0),
+            "g": g.map(r1),
+            "restRollDeg": roll.map(r0),
+            "runway": ident,
+            "shortFt": short_ft.map(r0),
+            "onRunway": on_runway,
+            "remark": i,
+        }),
+    }
+}
+
+/// The debrief of the landing at `touchdown`, flown into `rwy` along `legs`, and the
+/// analysis's `crash` event if it ended in one. `None` without a final or altitudes to
+/// judge it by.
+pub fn debrief(
+    pts: &[Pt],
+    touchdown: usize,
+    rwy: &Approach,
+    legs: &[Leg],
+    landing: &Value,
+    crash: Option<&Value>,
+) -> Option<Value> {
     let fin = *legs.iter().find(|l| l.kind == LegKind::Final)?;
     let base = legs.iter().find(|l| l.kind == LegKind::Base).copied();
     let down = legs.iter().find(|l| l.kind == LegKind::Downwind).copied();
@@ -516,7 +596,11 @@ pub fn debrief(pts: &[Pt], touchdown: usize, rwy: &Approach, legs: &[Leg], landi
             add("touchdown", "long", Severity::Improve, format!("Touched down {:.0} ft past the threshold{}. Aim for the touchdown zone: cross the threshold on speed and at about 50 ft, and don't hold off with excess speed.", past, of), json!({ "pastFt": r0(past), "runwayFt": rwy.length_ft.map(r0) }));
         }
     }
-    if let Some(v) = fpm {
+    // A crash is said once, as a crash: not as a hard touchdown worth an inspection too.
+    if let Some(crash) = crash {
+        let f = crash_finding(crash, fpm);
+        add(f.leg, f.code, f.severity, f.text, f.values);
+    } else if let Some(v) = fpm {
         if v > 600.0 {
             add("touchdown", "hard", Severity::Caution, format!("A hard touchdown at {:.0} fpm. Consider an inspection; and next time, a stable approach and a progressive flare.", v), json!({ "fpm": r0(v) }));
         } else if v > norms.firm_fpm {
@@ -605,7 +689,7 @@ mod tests {
     fn run(pts: &[Pt], landing: Value) -> Value {
         let touchdown = pts.len() - 1;
         let legs = legs(pts, touchdown, &RWY);
-        debrief(pts, touchdown, &RWY, &legs, &landing).expect("a debrief")
+        debrief(pts, touchdown, &RWY, &legs, &landing, None).expect("a debrief")
     }
 
     fn codes(d: &Value, severity: &str) -> Vec<String> {
@@ -616,6 +700,48 @@ mod tests {
             .filter(|f| f["severity"] == severity)
             .map(|f| f["code"].as_str().unwrap().to_string())
             .collect()
+    }
+
+    /// The analysis's crash event, as the statistics document has it, at `at`.
+    fn crash_event(at: &str) -> Value {
+        json!({
+            "eventType": "crash",
+            "timestamp": at,
+            "signs": [
+                { "kind": "impact", "g": 5.598, "touchdown_fpm": -2152.6 },
+                { "kind": "attitude", "roll_deg": -36.5 },
+            ],
+            "runway": { "airport": "CYFB", "ident": "34", "along_ft": -3265.4, "lateral_ft": 78.8, "on_runway": false },
+        })
+    }
+
+    #[test]
+    fn a_crash_is_called_a_crash_with_a_remark() {
+        let pts = circuit(|_, _, _| {});
+        let touchdown = pts.len() - 1;
+        let legs = legs(&pts, touchdown, &RWY);
+        let landing = json!({ "touchdownFpm": -2152.6 });
+        let crash = crash_event("2026-11-13 02:09:50.051");
+        let d = debrief(&pts, touchdown, &RWY, &legs, &landing, Some(&crash)).unwrap();
+        // Said as a crash, not as a hard touchdown worth an inspection.
+        assert_eq!(codes(&d, "caution"), ["crash"], "{d:#}");
+        let f = d["findings"].as_array().unwrap().iter().find(|f| f["code"] == "crash").unwrap();
+        let text = f["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("Crashed 3265 ft short of runway 34: hit at 2153 fpm and 5.6 G, came to rest banked 36°. "),
+            "{text}"
+        );
+        let (i, quip) = remark("2026-11-13 02:09:50.051");
+        assert!(text.ends_with(quip) && f["values"]["remark"] == i, "{text}");
+        // The same crash keeps its remark; others go round them.
+        assert_eq!(remark("2026-11-13 02:09:50.051"), (i, quip));
+        let seen: std::collections::HashSet<usize> =
+            (0..60).map(|s| remark(&format!("2026-11-13 02:{s:02}:50.051")).0).collect();
+        assert!(seen.len() >= CRASH_REMARKS.len() - 1, "{seen:?}");
+        // Without the analysis's figures, only what there is.
+        let bare = json!({ "eventType": "crash", "timestamp": "x", "signs": [{ "kind": "sim_reported" }], "runway": null });
+        let text = crash_finding(&bare, Some(-300.0)).text;
+        assert!(text.starts_with("Crashed: hit at 300 fpm, the sim called it a crash too. "), "{text}");
     }
 
     #[test]

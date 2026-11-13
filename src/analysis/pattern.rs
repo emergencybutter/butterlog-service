@@ -457,7 +457,11 @@ pub fn circuits(events: &[Value], pts: &[Pt], runways: &[Runway]) -> Circuits {
             .or_else(|| flown.map(|course| Approach { course, lat, lon, length_ft: None, width_ft: None }));
         let Some(rwy) = rwy else { continue };
         let legs = legs(pts, touchdown, &rwy);
-        if let Some(debrief) = super::debrief::debrief(pts, touchdown, &rwy, &legs, e) {
+        // The landing ended in a crash: the analysis put one within a minute of it.
+        let crash = events.iter().find(|c| {
+            c.get("eventType").and_then(Value::as_str) == Some("crash") && event_time(c).is_some_and(|at| (at - t).abs() <= 60)
+        });
+        if let Some(debrief) = super::debrief::debrief(pts, touchdown, &rwy, &legs, e, crash) {
             out.debriefs.push(debrief);
         }
         for leg in legs {

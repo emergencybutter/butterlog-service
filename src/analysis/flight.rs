@@ -46,6 +46,8 @@ pub enum EventKind {
     Parked,
     AutopilotOn,
     AutopilotOff,
+    /// The flight's [`Crash`], when it began.
+    Crash,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -108,6 +110,49 @@ impl Landing {
     }
 }
 
+/// What says a flight crashed. The sims' own crash reports can't be counted on: X-Plane's
+/// `has_crashed` never came on for the ATR that flew into the ground short of CYFB 34 at
+/// 161 kt. So the flight's own telemetry is read as well.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CrashSign {
+    /// The sim reported a crash: MSFS's `Crashed` event, X-Plane's `has_crashed`.
+    SimReported,
+    /// A touchdown harder than landing gear takes: [`CRASH_G`] or [`CRASH_SINK_FPM`].
+    Impact { g: f64, touchdown_fpm: f64 },
+    /// On the ground banked [`CRASH_ROLL_DEG`] or more for [`CRASH_ROLL_MS`]: on a wingtip
+    /// or its side, not its wheels.
+    Attitude { roll_deg: f64 },
+}
+
+/// Where a crash was against the runway nearest it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CrashRunway {
+    pub airport: String,
+    /// The runway end the aircraft was heading along, e.g. "34".
+    pub ident: Option<String>,
+    /// Feet past the end's pavement, negative short of it. Measured from the end of the
+    /// pavement, not a displaced threshold.
+    pub along_ft: f64,
+    /// Feet off the centreline, left positive.
+    pub lateral_ft: f64,
+    /// Within the pavement's length and width.
+    pub on_runway: bool,
+}
+
+/// A crash: when and where its first sign was, and every sign within [`CRASH_SIGNS_MS`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Crash {
+    pub wall_time_ms: i64,
+    pub latitude: f64,
+    pub longitude: f64,
+    /// True.
+    pub heading: f64,
+    pub signs: Vec<CrashSign>,
+    /// `None` with no runway within [`CRASH_RUNWAY_FT`].
+    pub runway: Option<CrashRunway>,
+}
+
 /// A flight's departure or arrival.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
@@ -156,6 +201,8 @@ pub struct FlightSummary {
     pub events: Vec<FlightEvent>,
     /// The first landing.
     pub landing: Option<Landing>,
+    /// The first crash. A crash's touchdown is still the landing above, if it was the first.
+    pub crash: Option<Crash>,
 }
 
 /// How long the app's 300-sample endpoint windows lasted at its ~1 Hz.
@@ -193,6 +240,21 @@ const STOP_AFTER_TOUCHDOWN_MS: i64 = 10_000;
 const TELEPORT_SPEED_FACTOR: f64 = 8.0;
 const TELEPORT_MARGIN_NM: f64 = 3.0;
 const SKIPPED: u8 = flags::PAUSED | flags::REPLAY | flags::SLEW;
+/// Touchdown G, averaged as [`Landing::g`] is, that is a crash. Of the first 50 flights
+/// analysed, the hardest landings on a runway reached 3.5 G; the ATR short of CYFB 5.6
+/// (8.8 in its worst frame).
+pub const CRASH_G: f64 = 5.0;
+/// Sink rate at touchdown, fpm, that is a crash: 25 ft/s, over twice what landing gear is
+/// built for. The hardest landings analysed came down at 890 fpm, the ATR at 2150.
+pub const CRASH_SINK_FPM: f64 = 1_500.0;
+/// Bank on the ground, held [`CRASH_ROLL_MS`], that is a crash: no aircraft on its wheels
+/// leans this far. The ATR came to rest at 36°.
+pub const CRASH_ROLL_DEG: f64 = 20.0;
+pub const CRASH_ROLL_MS: i64 = 2_000;
+/// Signs this soon after a crash's first are the same crash's.
+const CRASH_SIGNS_MS: i64 = 60_000;
+/// How far from a runway's pavement a crash is still placed against it.
+const CRASH_RUNWAY_FT: f64 = 3.0 * 6_076.0;
 
 /// What the analysis reads from one sample.
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +274,8 @@ struct Point {
     autopilot: bool,
     /// The first sample after skipped ones (paused, replay, slew).
     resumed: bool,
+    /// The sim reported a crash with this sample.
+    crashed: bool,
 }
 
 impl Point {
@@ -238,6 +302,7 @@ impl Point {
             fuel: v(Field::FuelLeft) + v(Field::FuelRight),
             autopilot: v(Field::Autopilot) > 0.5,
             resumed: false,
+            crashed: s.events.iter().any(|e| e.kind == butterlog_wire::EventKind::Crashed),
         })
     }
 }
@@ -303,6 +368,12 @@ struct Analyser {
     last_touchdown_ms: Option<i64>,
     /// Landed and stopped: the flight is over, and the next move starts another.
     stopped: bool,
+    /// Touchdowns whose impact is measured once the second after them is in, with the sink
+    /// rate they came down at.
+    impacts: Vec<(Point, f64)>,
+    /// Where the aircraft started leaning [`CRASH_ROLL_DEG`] on the ground, while it does.
+    tilted_since: Option<Point>,
+    crash: Option<Crash>,
 }
 
 impl Analyser {
@@ -336,6 +407,62 @@ impl Analyser {
             landing: None,
             last_touchdown_ms: None,
             stopped: false,
+            impacts: Vec::new(),
+            tilted_since: None,
+            crash: None,
+        }
+    }
+
+    /// A sign of a crash at `at`: the crash's first, or another of the same crash's. The
+    /// crash is dated and placed by its earliest sign: an impact is only known a second
+    /// after its touchdown.
+    fn crash_sign(&mut self, at: &Point, sign: CrashSign) {
+        let Some(crash) = self.crash.as_mut() else {
+            self.crash = Some(Crash {
+                wall_time_ms: at.t,
+                latitude: at.lat,
+                longitude: at.lon,
+                heading: at.heading,
+                signs: vec![sign],
+                runway: None,
+            });
+            return;
+        };
+        let same_kind = |s: &CrashSign| std::mem::discriminant(s) == std::mem::discriminant(&sign);
+        if (at.t - crash.wall_time_ms).abs() > CRASH_SIGNS_MS || crash.signs.iter().any(same_kind) {
+            return;
+        }
+        if at.t < crash.wall_time_ms {
+            (crash.wall_time_ms, crash.latitude, crash.longitude, crash.heading) = (at.t, at.lat, at.lon, at.heading);
+        }
+        crash.signs.push(sign);
+    }
+
+    /// Whether a touchdown was a crash, from the second after it in [`Analyser::recent`].
+    fn measure_impact(&mut self, touchdown: Point, fpm: f64) {
+        let g = peak_average_g(self.recent.make_contiguous(), touchdown.t).unwrap_or(touchdown.g);
+        if g >= CRASH_G || -fpm >= CRASH_SINK_FPM {
+            self.crash_sign(&touchdown, CrashSign::Impact { g, touchdown_fpm: fpm });
+        }
+    }
+
+    /// The crash signs `p` completes: the sim's report, an impact a second on, a lean
+    /// held on the ground.
+    fn watch_for_crash(&mut self, p: &Point) {
+        if p.crashed {
+            self.crash_sign(p, CrashSign::SimReported);
+        }
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            self.impacts.drain(..).partition(|(t, _)| p.t >= t.t + KEEP_AFTER_TOUCHDOWN_MS);
+        self.impacts = waiting;
+        due.into_iter().for_each(|(t, fpm)| self.measure_impact(t, fpm));
+        if p.on_ground && p.roll.abs() >= CRASH_ROLL_DEG {
+            let since = *self.tilted_since.get_or_insert(*p);
+            if p.t - since.t >= CRASH_ROLL_MS {
+                self.crash_sign(&since, CrashSign::Attitude { roll_deg: p.roll });
+            }
+        } else {
+            self.tilted_since = None;
         }
     }
 
@@ -432,6 +559,7 @@ impl Analyser {
         self.pending_toc = None;
         self.pending_tod = None;
         self.event(EventKind::Landing, p.t, p.lat, p.lon, Some(p.heading));
+        self.impacts.push((*p, self.last_vs));
         if self.landing.is_none() {
             self.landing_points = self.recent.iter().copied().collect();
             self.landing = Some(Landing {
@@ -596,6 +724,7 @@ impl Analyser {
                 }
             }
         }
+        self.watch_for_crash(&p);
         self.last_on_ground = ground;
         self.last_vs = p.vs;
     }
@@ -647,6 +776,24 @@ impl Analyser {
             }
             landing.approach_stability = approach_stability(points, t);
         }
+        // The samples ended within a second of a touchdown: measured on what there is.
+        for (touchdown, fpm) in std::mem::take(&mut self.impacts) {
+            self.measure_impact(touchdown, fpm);
+        }
+        if let Some(crash) = self.crash.as_mut() {
+            let ours = places.best_airport(crash.latitude, crash.longitude).map_or(&[][..], |a| places.runways(&a.ident));
+            crash.runway = nearest_runway(crash.latitude, crash.longitude, crash.heading, sim_runways)
+                .or_else(|| nearest_runway(crash.latitude, crash.longitude, crash.heading, ours));
+            let at = self.events.partition_point(|e| e.wall_time_ms <= crash.wall_time_ms);
+            let event = FlightEvent {
+                kind: EventKind::Crash,
+                wall_time_ms: crash.wall_time_ms,
+                latitude: crash.latitude,
+                longitude: crash.longitude,
+                heading: Some(crash.heading),
+            };
+            self.events.insert(at, event);
+        }
         Some(FlightSummary {
             departure,
             arrival,
@@ -659,8 +806,50 @@ impl Analyser {
             fuel_consumed_gal: self.initial_fuel - self.final_fuel,
             events: self.events,
             landing: self.landing,
+            crash: self.crash,
         })
     }
+}
+
+/// Where a crash at `lat`, `lon` was against the runway whose pavement is nearest, within
+/// [`CRASH_RUNWAY_FT`], measured from the end the aircraft was heading along.
+fn nearest_runway(lat: f64, lon: f64, heading: f64, runways: &[Runway]) -> Option<CrashRunway> {
+    let mut best: Option<(f64, CrashRunway)> = None;
+    for rw in runways {
+        let ends = [
+            (&rw.le_ident, rw.le_latitude_deg, rw.le_longitude_deg, rw.le_heading_degt),
+            (&rw.he_ident, rw.he_latitude_deg, rw.he_longitude_deg, rw.he_heading_degt),
+        ];
+        let off_heading = |hdg: f64| {
+            let d = (heading - hdg).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        // The end the aircraft was heading along.
+        let Some((ident, end_lat, end_lon, end_hdg)) = ends
+            .into_iter()
+            .filter_map(|(ident, lat, lon, hdg)| Some((ident, lat?, lon?, hdg?)))
+            .min_by(|a, b| off_heading(a.3).total_cmp(&off_heading(b.3)))
+        else {
+            continue;
+        };
+        let (lateral, along) = project_onto_runway(lat, lon, end_lat, end_lon, end_hdg, 0.0);
+        let length = rw.length_ft.unwrap_or(0) as f64;
+        let half_width = rw.width_ft.unwrap_or(150) as f64 / 2.0;
+        let (beyond_ends, beside) = ((-along).max(along - length).max(0.0), (lateral.abs() - half_width).max(0.0));
+        let distance = beyond_ends.hypot(beside);
+        if distance > CRASH_RUNWAY_FT || best.as_ref().is_some_and(|(d, _)| *d <= distance) {
+            continue;
+        }
+        let place = CrashRunway {
+            airport: rw.airport_ident.clone(),
+            ident: ident.clone(),
+            along_ft: along,
+            lateral_ft: lateral,
+            on_runway: distance == 0.0,
+        };
+        best = Some((distance, place));
+    }
+    best.map(|(_, place)| place)
 }
 
 /// The highest [`G_AVERAGE_MS`] average of G starting in the second after touchdown.
@@ -1191,6 +1380,7 @@ mod tests {
             fuel: 40.0,
             autopilot: false,
             resumed: false,
+            crashed: false,
         }
     }
 
@@ -1569,6 +1759,7 @@ mod tests {
         for name in ["msfs_pattern.blsg.zst", "xplane_pattern.blsg.zst"] {
             let samples = fixture(name);
             assert_eq!(holds_to_the_whole(&samples, &real, 97), 1, "{name}");
+            assert_eq!(analyse(&samples, &real)[0].crash, None, "{name}: no crash");
             // Twice in a row, the second moved away: a teleport, then another flight.
             let mut twice = samples.clone();
             let shift = samples.last().unwrap().wall_time_ms - samples[0].wall_time_ms + 1_000;
@@ -1654,6 +1845,134 @@ mod tests {
         let airborne = analyse(&samples[30..], &places);
         assert_eq!(airborne[0].departure, Endpoint::Airborne);
         assert_eq!(airborne[0].takeoff_roll_ms, None);
+    }
+
+    /// An approach at 1500 ft and `fpm`, touching down at 10 s with `g` over the second
+    /// after, then rolling out for `rollout` seconds banked `roll`.
+    fn touchdown(fpm: f64, g: f64, roll: f64, rollout: i64) -> Analyser {
+        let mut a = Analyser::new();
+        a.phase = Phase::Approach;
+        for i in 0..10 {
+            a.update(flying(i as f64, 1500.0, fpm));
+        }
+        let ground = |secs: f64, g, roll| Point { gs: 60.0, ias: 60.0, g, roll, ..point(secs) };
+        for i in 0..=12 {
+            a.update(ground(10.0 + i as f64 / 10.0, g, 0.0));
+        }
+        for i in 0..=rollout * 10 {
+            a.update(ground(11.3 + i as f64 / 10.0, 1.0, roll));
+        }
+        a
+    }
+
+    fn crash_of(a: Analyser) -> Option<Crash> {
+        a.finish(&places(&[]), &[]).unwrap().crash
+    }
+
+    #[test]
+    fn the_hardest_landings_are_no_crash() {
+        // As hard as the hardest real ones, BIKF's and CYZF's: 3.5 G at 890 fpm, upright.
+        assert_eq!(crash_of(touchdown(-890.0, 3.5, 3.0, 20)), None);
+        // Banked past 20° for less than CRASH_ROLL_MS: a wingtip brushed, no more.
+        assert_eq!(crash_of(touchdown(-300.0, 1.2, 25.0, 1)), None);
+    }
+
+    #[test]
+    fn an_impact_is_a_crash() {
+        let crash = crash_of(touchdown(-2150.0, 1.5, 0.0, 5)).expect("a crash");
+        assert_eq!(crash.wall_time_ms, 10_000, "dated at the touchdown");
+        assert!(
+            matches!(crash.signs[..], [CrashSign::Impact { g, touchdown_fpm }] if (g - 1.5).abs() < 1e-9 && touchdown_fpm == -2150.0),
+            "{:?}",
+            crash.signs
+        );
+        // As hard by G alone.
+        let crash = crash_of(touchdown(-600.0, 5.5, 0.0, 5)).expect("a crash");
+        assert!(matches!(crash.signs[..], [CrashSign::Impact { g, .. }] if (g - 5.5).abs() < 1e-9));
+        // The samples end before the second after it is in: measured on what there is.
+        let mut a = Analyser::new();
+        a.phase = Phase::Approach;
+        a.update(flying(0.0, 1500.0, -2150.0));
+        a.update(Point { g: 6.0, ..point(1.0) });
+        assert!(crash_of(a).is_some());
+    }
+
+    #[test]
+    fn coming_to_rest_on_a_wingtip_is_a_crash() {
+        let crash = crash_of(touchdown(-300.0, 1.2, -36.5, 5)).expect("a crash");
+        assert_eq!(crash.signs, [CrashSign::Attitude { roll_deg: -36.5 }]);
+        assert_eq!(crash.wall_time_ms, 11_300, "dated from when it started leaning");
+        // Both: one crash, dated by the impact, its signs in the order they were known.
+        let crash = crash_of(touchdown(-2150.0, 6.0, -36.5, 5)).expect("a crash");
+        assert_eq!(crash.wall_time_ms, 10_000);
+        assert!(matches!(crash.signs[..], [CrashSign::Impact { .. }, CrashSign::Attitude { .. }]), "{:?}", crash.signs);
+    }
+
+    #[test]
+    fn the_sims_crash_report_is_a_crash() {
+        let mut samples = circuit(0);
+        samples[50].events.push(butterlog_wire::Event::new(butterlog_wire::EventKind::Crashed));
+        let flights = analyse(&samples, &places(&[("XX", 45.0, 45.0)]));
+        let crash = flights[0].crash.as_ref().expect("a crash");
+        assert_eq!(crash.signs, [CrashSign::SimReported]);
+        assert_eq!(crash.wall_time_ms, samples[50].wall_time_ms);
+        assert!(flights[0].events.iter().any(|e| e.kind == EventKind::Crash && e.wall_time_ms == crash.wall_time_ms));
+        // And a circuit flown without one is none.
+        assert_eq!(analyse(&circuit(0), &places(&[("XX", 45.0, 45.0)]))[0].crash, None);
+    }
+
+    #[test]
+    fn a_crash_is_placed_against_the_runway_it_was_heading_for() {
+        // A north-south runway, 5000 by 100 ft: "36" from the south end.
+        let runway = Runway {
+            airport_ident: "X".into(),
+            length_ft: Some(5000),
+            width_ft: Some(100),
+            le_ident: Some("36".into()),
+            le_latitude_deg: Some(45.0),
+            le_longitude_deg: Some(5.0),
+            le_heading_degt: Some(0.0),
+            le_displaced_threshold_ft: Some(500),
+            he_ident: Some("18".into()),
+            he_latitude_deg: Some(45.0 + 5000.0 / 364_000.0),
+            he_longitude_deg: Some(5.0),
+            he_heading_degt: Some(180.0),
+            he_displaced_threshold_ft: None,
+        };
+        let rws = [runway];
+        // 3000 ft short of 36, heading north.
+        let short = nearest_runway(45.0 - 3000.0 / 364_000.0, 5.0, 355.0, &rws).unwrap();
+        assert_eq!(short.ident.as_deref(), Some("36"));
+        // Within the 0.3% that 364,000 ft a degree is off.
+        assert!((short.along_ft + 3000.0).abs() < 20.0, "{}", short.along_ft);
+        assert!(!short.on_runway);
+        // On the pavement before the displaced threshold, heading south: on runway 18.
+        let on = nearest_runway(45.0 + 200.0 / 364_000.0, 5.0, 185.0, &rws).unwrap();
+        assert_eq!(on.ident.as_deref(), Some("18"));
+        assert!(on.on_runway);
+        // 5 NM away: no runway.
+        assert!(nearest_runway(45.0 - 5.0 / 60.0, 5.0, 0.0, &rws).is_none());
+    }
+
+    /// The ATR 72 that flew into the ground short of CYFB 34 at 161 kt, its last minutes
+    /// (session 69f1b156): X-Plane's `has_crashed` never came on.
+    #[test]
+    fn the_atr_short_of_iqaluit_crashed() {
+        let samples = fixture("xplane_crash.blsg.zst");
+        let real = Places::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data")).unwrap();
+        let flights = analyse(&samples, &real);
+        assert_eq!(flights.len(), 1, "{flights:?}");
+        let crash = flights[0].crash.as_ref().expect("a crash");
+        assert!(!crash.signs.contains(&CrashSign::SimReported));
+        let Some(CrashSign::Impact { g, touchdown_fpm }) = crash.signs.first() else { panic!("{:?}", crash.signs) };
+        assert!(*g > 5.0 && *touchdown_fpm < -2000.0, "{g} G at {touchdown_fpm} fpm");
+        assert!(crash.signs.iter().any(|s| matches!(s, CrashSign::Attitude { roll_deg } if *roll_deg < -30.0)), "{:?}", crash.signs);
+        // Against the runway X-Plane drew: about 995 m short of 34, beside its centreline.
+        let rw = crash.runway.as_ref().expect("near a runway");
+        assert_eq!((rw.airport.as_str(), rw.ident.as_deref()), ("CYFB", Some("34")));
+        assert!((rw.along_ft + 995.0 / 0.3048).abs() < 50.0, "{} ft", rw.along_ft);
+        assert!(rw.lateral_ft.abs() < 100.0 && !rw.on_runway, "{rw:?}");
+        assert_eq!(holds_to_the_whole(&samples, &real, 499), 1);
     }
 
     #[test]

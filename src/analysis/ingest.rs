@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Bump when the analysis changes, to analyse sessions again.
-pub const ANALYSER_VERSION: i32 = 14;
+pub const ANALYSER_VERSION: i32 = 15;
 
 /// Old-path flights within this of a flight's takeoff (or start, with no takeoff) are
 /// the same flight.
@@ -1253,6 +1253,7 @@ mod tests {
             fuel_consumed_gal: 1.0,
             events: vec![],
             landing: None,
+            crash: None,
         }
     }
 

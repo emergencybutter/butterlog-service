@@ -286,16 +286,23 @@ fn events(f: &FlightSummary) -> Value {
                 EventKind::Takeoff => "takeoff",
                 EventKind::TopOfClimb => "top_of_climb",
                 EventKind::TopOfDescent => "top_of_descent",
+                EventKind::Crash => "crash",
                 // The first landing is the flight's: its own entry, below.
                 _ => return None,
             };
-            Some(json!({
+            let mut event = json!({
                 "timestamp": app_time(e.wall_time_ms),
                 "eventType": kind,
                 "latitude": e.latitude,
                 "longitude": e.longitude,
                 "heading": e.heading,
-            }))
+            });
+            // What the debrief says of it: its signs, and where it was against the runway.
+            if let Some(crash) = f.crash.as_ref().filter(|_| e.kind == EventKind::Crash) {
+                event["signs"] = serde_json::to_value(&crash.signs).unwrap_or(Value::Null);
+                event["runway"] = serde_json::to_value(&crash.runway).unwrap_or(Value::Null);
+            }
+            Some(event)
         })
         .collect();
     if let Some(l) = &f.landing {
@@ -395,6 +402,9 @@ pub fn document(header: &SessionHeader, f: &FlightSummary, stats: &FlightStats, 
         "events": events(f),
     });
     let doc_mut = doc.as_object_mut().expect("an object");
+    if let Some(crash) = &f.crash {
+        doc_mut.insert("crash".into(), serde_json::to_value(crash).unwrap_or(Value::Null));
+    }
     // The frame the takeoff time is: the feed and the aircraft stats measure distance from it.
     if let Some(at) = stats.takeoff.as_ref().filter(|_| f.takeoff_roll_ms.is_some()) {
         doc_mut.insert("takeoff_snapshot".into(), Value::Object(snapshot(signs, at)));

@@ -241,4 +241,24 @@ mod parity {
         near("top of climb", s.events[1].wall_time_ms as f64, ms("02:00:00.840") as f64, 100.0);
         near("top of descent", s.events[2].wall_time_ms as f64, ms("02:00:13.224") as f64, 1_500.0);
     }
+
+    /// The ATR that flew into the ground short of CYFB 34: its approach debrief calls the
+    /// crash, from the analysis through the statistics document to the page's track.
+    #[test]
+    fn the_atr_crash_is_in_its_debrief() {
+        let fixture = "xplane_crash.blsg.zst";
+        let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
+        let (header, samples) = normalise_segment(&std::fs::read(path).unwrap()).unwrap();
+        let f = summary(fixture);
+        let doc = statistics::statistics(&header, &f, &samples, places());
+        let events = doc["events"].as_array().unwrap();
+        let crash = events.iter().find(|e| e["eventType"] == "crash").expect("a crash event");
+        assert_eq!(crash["runway"]["ident"], "34");
+        let circuits = pattern::circuits(events, &track_points(fixture), places().runways("CYFB"));
+        let [debrief] = &circuits.debriefs[..] else { panic!("{:?}", circuits.debriefs) };
+        let findings = debrief["findings"].as_array().unwrap();
+        let text = findings.iter().find(|f| f["code"] == "crash").expect("a crash finding")["text"].as_str().unwrap();
+        assert!(text.starts_with("Crashed 32"), "{text}");
+        assert!(!findings.iter().any(|f| f["code"] == "hard"), "{findings:?}");
+    }
 }
