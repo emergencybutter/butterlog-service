@@ -208,6 +208,27 @@ fn get_formatted_fields_for_category(snapshot: &Value, category: &str) -> String
         .join("\n")
 }
 
+/// The in-flight post's one block of numbers: the indicated altitude with the
+/// altimeter setting it reads against, the speeds, the wind and the fuel used so far.
+fn in_flight_lines(snapshot: &Value, fuel_consumed: Option<&Value>) -> String {
+    let num = |v: &Value| v.as_f64().or_else(|| v.as_str()?.parse().ok());
+    let mut lines = Vec::new();
+    if let Some(alt) = snapshot.get("AltB").and_then(num) {
+        let baro = snapshot.get("BaroA").and_then(num).filter(|b| *b > 0.0);
+        lines.push(match baro {
+            Some(b) => format!("**Altitude**: {alt:.0} ft ({b:.2} inHg)"),
+            None => format!("**Altitude**: {alt:.0} ft"),
+        });
+    }
+    for (name, value) in telemetry::labeled_values_for_keys(snapshot, &["IAS", "GndSpd", "VSpd", "OAT", "WndSpd", "WndDr"]) {
+        lines.push(format!("**{name}**: {value}"));
+    }
+    if let Some(gal) = fuel_consumed.and_then(num).filter(|g| *g >= 0.0) {
+        lines.push(format!("**Fuel Used**: {gal:.1} Gal"));
+    }
+    lines.join("\n")
+}
+
 fn format_timestamp_to_discord(iso_str: &str) -> String {
     // Timestamps arrive either as RFC3339 or as the app's UTC log format
     // ("%Y-%m-%d %H:%M:%S%.3f", no 'T' and no timezone). Try RFC3339 first, then
@@ -940,30 +961,11 @@ fn assemble_embeds(
     // 6. Dynamic Fields by Phase
     if !is_landed {
         if let Some(curr) = current_snapshot {
-            // Cruising fields
-            let in_flight_stats = get_formatted_fields_for_category(curr, "normal");
+            let in_flight_stats = in_flight_lines(curr, statistics.get("fuel_consumed"));
             if !in_flight_stats.is_empty() {
                 fields.push(LocalField {
                     name: "Currently In Flight".to_string(),
                     value: in_flight_stats,
-                    inline: true,
-                });
-            }
-
-            let instrument_stats = get_formatted_fields_for_category(curr, "instruments");
-            if !instrument_stats.is_empty() {
-                fields.push(LocalField {
-                    name: "Instruments".to_string(),
-                    value: instrument_stats,
-                    inline: true,
-                });
-            }
-
-            let engine_stats = get_formatted_fields_for_category(curr, "engine");
-            if !engine_stats.is_empty() {
-                fields.push(LocalField {
-                    name: "Engine Details".to_string(),
-                    value: engine_stats,
                     inline: true,
                 });
             }
@@ -1262,6 +1264,22 @@ mod tests {
 
         let engine = get_formatted_fields_for_category(&snapshot, "engine");
         assert!(engine.contains("**Engine 1 RPM**: 2400.00 rpm"));
+    }
+
+    #[test]
+    fn the_in_flight_block_is_trimmed() {
+        let snapshot = serde_json::json!({
+            "AltB": 5512.4, "BaroA": 29.92, "AltGPS": 5600.0, "TAS": 130.0, "IAS": 120.0,
+            "NormAc": 1.0, "E1 RPM": 2400.0, "COM1": 121.5, "AfcsOn": 1.0,
+        });
+        let lines = in_flight_lines(&snapshot, Some(&serde_json::json!(4.25)));
+        assert!(lines.contains("**Altitude**: 5512 ft (29.92 inHg)"));
+        assert!(lines.contains("**Indicated Airspeed**: 120.00 kts"));
+        assert!(lines.contains("**Fuel Used**: 4.2 Gal") || lines.contains("**Fuel Used**: 4.3 Gal"));
+        for gone in ["GPS", "True Airspeed", "Normal Acceleration", "RPM", "COM1", "Autopilot"] {
+            assert!(!lines.contains(gone), "{gone} in {lines}");
+        }
+        assert!(!in_flight_lines(&snapshot, Some(&serde_json::json!(-1.0))).contains("Fuel"));
     }
 
     #[test]
