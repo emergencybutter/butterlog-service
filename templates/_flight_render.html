@@ -138,7 +138,9 @@ function renderFlightDoc(d) {
         let badgeHtml = '';
         if (lvs != null) {
             const a = Math.abs(lvs);
-            const [cls, lbl] = a < 150 ? ['butter','Butter'] : a < 250 ? ['smooth','Smooth'] : a < 350 ? ['firm','Firm'] : ['hard','Hard'];
+            // The analysis found a crash: no grade of landing says that.
+            const crashed = events.some(e => (e.eventType||e.event_type) === 'crash');
+            const [cls, lbl] = crashed ? ['crash','Crash'] : a < 150 ? ['butter','Butter'] : a < 250 ? ['smooth','Smooth'] : a < 350 ? ['firm','Firm'] : ['hard','Hard'];
             badgeHtml = `<div class="badge badge-${cls}">${lbl} — ${Math.round(a)} fpm</div>`;
         }
         return `

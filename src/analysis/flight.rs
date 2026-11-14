@@ -163,6 +163,9 @@ pub enum Endpoint {
     Unknown,
     /// No airport anywhere near.
     NotFound,
+    /// The flight ended in a [`Crash`], at no airport: the airport it was near, if any,
+    /// as the arrival would otherwise have been.
+    Crashed(Option<String>),
 }
 
 impl Serialize for Endpoint {
@@ -179,6 +182,7 @@ impl fmt::Display for Endpoint {
             Self::Airborne => f.write_str("Airborne"),
             Self::Unknown => f.write_str("Unknown"),
             Self::NotFound => f.write_str("XXXX"),
+            Self::Crashed(_) => f.write_str("Crashed"),
         }
     }
 }
@@ -752,7 +756,7 @@ impl Analyser {
     fn finish(mut self, places: &Places, sim_runways: &[Runway]) -> Option<FlightSummary> {
         let (first, last) = (self.first_t?, self.last_t);
         let departure = self.departure(places);
-        let arrival = self.arrival(places);
+        let mut arrival = self.arrival(places);
         if let (Some(landing), Endpoint::Airport(ident)) = (self.landing.as_mut(), &arrival) {
             let (lat, lon, heading) = (landing.latitude, landing.longitude, landing.heading);
             if let Some(m) = best_runway_match(lat, lon, heading, sim_runways)
@@ -784,6 +788,13 @@ impl Analyser {
             let ours = places.best_airport(crash.latitude, crash.longitude).map_or(&[][..], |a| places.runways(&a.ident));
             crash.runway = nearest_runway(crash.latitude, crash.longitude, crash.heading, sim_runways)
                 .or_else(|| nearest_runway(crash.latitude, crash.longitude, crash.heading, ours));
+            // Not arrived anywhere: crashed near the airport it would have arrived at, or the
+            // runway it was placed against.
+            let near = match &arrival {
+                Endpoint::Airport(ident) => Some(ident.clone()),
+                _ => crash.runway.as_ref().map(|r| r.airport.clone()),
+            };
+            arrival = Endpoint::Crashed(near);
             let at = self.events.partition_point(|e| e.wall_time_ms <= crash.wall_time_ms);
             let event = FlightEvent {
                 kind: EventKind::Crash,
@@ -1963,6 +1974,9 @@ mod tests {
         let flights = analyse(&samples, &real);
         assert_eq!(flights.len(), 1, "{flights:?}");
         let crash = flights[0].crash.as_ref().expect("a crash");
+        // Arrived nowhere: crashed near Iqaluit, its landing still measured against 34.
+        assert_eq!(flights[0].arrival, Endpoint::Crashed(Some("CYFB".into())));
+        assert_eq!(flights[0].arrival.to_string(), "Crashed");
         assert!(!crash.signs.contains(&CrashSign::SimReported));
         let Some(CrashSign::Impact { g, touchdown_fpm }) = crash.signs.first() else { panic!("{:?}", crash.signs) };
         assert!(*g > 5.0 && *touchdown_fpm < -2000.0, "{g} G at {touchdown_fpm} fpm");

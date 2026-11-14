@@ -56,7 +56,9 @@ window.initFlightStrip = function (H, opts) {
         grade = null;
         if (num(lvs) && chip) {
             const a = Math.abs(lvs);
-            grade = a < 150 ? ['butter', 'Butter'] : a < 250 ? ['smooth', 'Smooth'] : a < 350 ? ['firm', 'Firm'] : ['hard', 'Hard'];
+            // The analysis found a crash: no grade of landing says that.
+            grade = evOf('crash').length ? ['crash', 'Crash']
+                : a < 150 ? ['butter', 'Butter'] : a < 250 ? ['smooth', 'Smooth'] : a < 350 ? ['firm', 'Firm'] : ['hard', 'Hard'];
             chip.className = 'fv-grade g-' + grade[0];
             // Some sims report nonsense load at touchdown (an MSFS flight here
             // logs -0.04 G); leave it out rather than print it.

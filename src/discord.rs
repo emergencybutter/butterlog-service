@@ -846,8 +846,18 @@ fn assemble_embeds(
         description.push_str(&format!("Departed **{}** at {}\n", departure_name, format_timestamp_to_discord(t_time)));
     }
     if let Some(l_time) = landing_time {
-        let arr_name = arrival_name.unwrap_or("Destination");
-        description.push_str(&format!("Landed in **{}** at {}\n", arr_name, format_timestamp_to_discord(l_time)));
+        let when = format_timestamp_to_discord(l_time);
+        if arrival_icao == Some("Crashed") {
+            // A crash site is no airport: near the one it was, if any.
+            let near = statistics.pointer("/arrival/near/name").and_then(|v| v.as_str());
+            match near {
+                Some(name) => description.push_str(&format!("Crashed near **{}** at {}\n", name, when)),
+                None => description.push_str(&format!("Crashed at {}\n", when)),
+            }
+        } else {
+            let arr_name = arrival_name.unwrap_or("Destination");
+            description.push_str(&format!("Landed in **{}** at {}\n", arr_name, when));
+        }
     }
 
     // 3. Embed Color & Autopilot Check
@@ -1302,6 +1312,21 @@ mod tests {
         assert_eq!(get("Flight Info · line 1"), Some("Flying Cessna Skyhawk (C172)"));
         // No more figures than the page has: the max and touchdown stats are gone.
         assert!(lines.iter().all(|(l, _)| !l.starts_with("Landing Stats") && !l.starts_with("Max Stats")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_crash_is_no_arrival_at_an_airport() {
+        let lines = post_lines(&serde_json::json!({
+            "departure": { "icao": "BGSF", "name": "Kangerlussuaq" },
+            "arrival": { "icao": "Crashed", "name": "Crash site", "near": { "icao": "CYFB", "name": "Iqaluit Airport" } },
+            "takeoff_time": "2026-11-12 22:52:58.948",
+            "landing_time": "2026-11-13 02:09:50.051",
+            "airframe_name": "ATR 72-600",
+        }));
+        let get = |label: &str| lines.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str());
+        assert_eq!(get("Title"), Some("Flight BGSF ✈ Crashed"));
+        assert!(lines.iter().any(|(_, v)| v.contains("Crashed near **Iqaluit Airport** at 0209Z")), "{lines:?}");
+        assert!(lines.iter().all(|(_, v)| !v.contains("Landed in")), "{lines:?}");
     }
 
     #[test]

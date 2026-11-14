@@ -13,6 +13,8 @@
     .fv-grade.g-butter, .fv-grade.g-smooth { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
     .fv-grade.g-firm { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
     .fv-grade.g-hard { color: var(--error); background: color-mix(in srgb, var(--error) 14%, transparent); }
+    /* Black in either theme; the border keeps it apart from a dark page. */
+    .fv-grade.g-crash { color: #fff; background: #000; border: 1px solid var(--border-strong); }
 
     .fv-btn { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px;
               border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: transparent;
@@ -129,6 +131,7 @@
     .fv-events span.is-end { transform: translateX(-100%); padding-left: 0; padding-right: 4px; border-left: 0;
                              border-right: 1px dashed color-mix(in srgb, var(--text-muted) 60%, transparent); }
     .fv-events span.g-hard { color: var(--error); font-weight: 600; }
+    .fv-events span.g-crash { color: var(--text); font-weight: 800; }
     .fv-events span.g-firm { color: var(--warn); font-weight: 600; }
     .fv-events span.g-butter, .fv-events span.g-smooth { color: var(--ok); font-weight: 600; }
 

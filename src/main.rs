@@ -841,7 +841,9 @@ fn landing_badge_html(stats: &serde_json::Value) -> Option<String> {
     let vspd = landing.get("VSpd").and_then(|v| v.as_f64())?;
     let gforce_str = landing.get("NormAc").and_then(|v| v.as_f64())
         .map(|g| format!(" / {:.2}G", g)).unwrap_or_default();
-    let (class, label) = landing_rating(vspd);
+    // The analysis found a crash: no grade of landing says that.
+    let crashed = stats.get("crash").is_some_and(|c| c.is_object());
+    let (class, label) = if crashed { ("crash", "Crash") } else { landing_rating(vspd) };
     Some(format!(
         r#"<div class="badge badge-{}">{}<br><span class="badge-detail">{:.0} fpm{}</span></div>"#,
         class, label, vspd.abs(), gforce_str
@@ -1835,6 +1837,16 @@ mod tests {
         assert_eq!(landing_rating(-300.0).1, "Firm");
         assert_eq!(landing_rating(-350.0).1, "Firm");
         assert_eq!(landing_rating(-500.0).1, "Hard");
+    }
+
+    #[test]
+    fn a_crash_is_badged_a_crash_not_a_grade() {
+        let landed = serde_json::json!({ "landing_snapshot": { "VSpd": -2152.6, "NormAc": 5.6 } });
+        assert!(landing_badge_html(&landed).unwrap().contains("badge-hard"));
+        let mut crashed = landed.clone();
+        crashed["crash"] = serde_json::json!({ "signs": [{ "kind": "impact" }] });
+        let badge = landing_badge_html(&crashed).unwrap();
+        assert!(badge.contains("badge-crash") && badge.contains(">Crash<"), "{badge}");
     }
 
     /// The app writes `2026-08-05 06:36:35.351`, not RFC3339. An RFC3339-only

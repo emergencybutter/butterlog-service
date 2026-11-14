@@ -265,6 +265,12 @@ fn simulator(sim: &str) -> (&'static str, &'static str) {
 }
 
 fn endpoint(e: &Endpoint, places: &Places) -> Value {
+    // No airport: a crash site, with the airport it was near for what reads one (the
+    // debrief's runways, the Discord post's wording).
+    if let Endpoint::Crashed(near) = e {
+        let near = near.as_ref().map(|id| endpoint(&Endpoint::Airport(id.clone()), places));
+        return json!({ "icao": e.to_string(), "name": "Crash site", "near": near });
+    }
     let ident = e.to_string();
     let name = match e {
         Endpoint::Airport(id) => places.airport(id).map(|a| a.name.clone()),

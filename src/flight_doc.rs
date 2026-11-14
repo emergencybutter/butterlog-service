@@ -81,7 +81,12 @@ pub async fn track(db: &PgPool, r2: &R2Client, flight_id: i64) -> Result<Option<
 fn add_debriefs(summary: &mut crate::live::LiveSummary, statistics: &Value, track: &Value) -> Vec<Value> {
     let places = crate::analysis::ingest::places();
     let runways = |at: &str| {
-        let icao = statistics.pointer(&format!("/{at}/icao")).and_then(Value::as_str).unwrap_or_default();
+        // A crash site's runways are those of the airport it was near.
+        let icao = statistics
+            .pointer(&format!("/{at}/near/icao"))
+            .or_else(|| statistics.pointer(&format!("/{at}/icao")))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         places.map_or(&[][..], |p| p.runways(icao))
     };
     let simulator = statistics.get("simulator").and_then(Value::as_str).unwrap_or_default();
