@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
         .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
         .route("/api/v0/user/by-discord/:discord_id/current", get(user_current_flight_by_discord_handler))
+        .route("/discord/invite", get(discord_invite_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(
@@ -544,6 +545,12 @@ async fn settings_handler(
         .map(|(id, _, _)| id.clone())
         .collect();
 
+    // Look the pilot's channels up again if a channel was allowlisted since, or an hour
+    // has passed, so the list below is what their next flight will be posted to.
+    if let Err(e) = discord::maybe_update_user_notification_channels(&state.db, &state.discord_http, user_id).await {
+        tracing::error!("Failed to update user notification channels: {}", e);
+    }
+
     // Fetch channels the current user has enabled for notifications
     let enabled_channels: Vec<String> = sqlx::query_scalar(
         "SELECT channel_id FROM discord_notification_channels WHERE user_id = $1"
@@ -612,7 +619,8 @@ async fn settings_handler(
     let nav = nav_for(&state, &headers, "settings", "Settings").await;
     let flysto_connected = flysto::connected(&state.db, user_id).await.unwrap_or(false);
     let flysto_auto = flysto::auto(&state.db, user_id).await.unwrap_or(true);
-    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds, flysto_connected, flysto_auto };
+    let invite_url = discord::invite_url(&state.config.discord_client_id);
+    let page = templates::SettingsPage { nav, admin_guilds, notified_guilds, invite_url, flysto_connected, flysto_auto };
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -624,6 +632,12 @@ async fn settings_handler(
                 .into_response()
         }
     }
+}
+
+/// Add the bot to a Discord server: a short link to share, which Discord's own consent
+/// screen takes from there. Needs no sign-in.
+async fn discord_invite_handler(State(state): State<AppState>) -> Redirect {
+    Redirect::temporary(&discord::invite_url(&state.config.discord_client_id))
 }
 
 /// An anonymous user's flight is only shown to its own token or link (see `anonymous.rs`),

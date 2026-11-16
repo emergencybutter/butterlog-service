@@ -963,16 +963,7 @@ pub async fn add_allowlist_channel_handler(
     crate::discord::validate_discord_channel(&state.discord_http, channel_id_u64).await
         .map_err(AppError::BadRequest)?;
 
-    // Insert into allowlisted_channels
-    sqlx::query(
-        "INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, $2, $3) \
-         ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name"
-    )
-    .bind(&payload.channel_id)
-    .bind(&payload.channel_name)
-    .bind(&payload.guild_id)
-    .execute(&state.db)
-    .await?;
+    crate::discord::allowlist_channel(&state.db, &payload.channel_id, &payload.channel_name, &payload.guild_id).await?;
 
     Ok(StatusCode::CREATED)
 }

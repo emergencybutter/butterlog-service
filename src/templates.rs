@@ -230,6 +230,8 @@ pub struct SettingsPage {
     pub admin_guilds: Vec<AdminGuild>,
     /// Guilds with channels currently receiving this user's notifications.
     pub notified_guilds: Vec<NotifiedGuild>,
+    /// The link that adds the bot to a Discord server.
+    pub invite_url: String,
     /// Whether the pilot's FlySto API token is kept, for uploading flights there.
     pub flysto_connected: bool,    /// Whether ended flights go there by themselves.
     pub flysto_auto: bool,
@@ -530,6 +532,7 @@ mod tests {
                 name: "Voyager Aviation".into(),
                 channels: vec![NotifiedChannel { id: "1".into(), name: "flight-log".into() }],
             }],
+            invite_url: crate::discord::invite_url("123"),
             flysto_connected: false,
             flysto_auto: true,
         };
@@ -596,6 +599,7 @@ mod tests {
                 }],
             }],
             notified_guilds: vec![],
+            invite_url: crate::discord::invite_url("123"),
             flysto_connected: true,
             flysto_auto: true,
         };

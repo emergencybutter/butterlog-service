@@ -2,11 +2,11 @@ use serenity::async_trait;
 use serenity::prelude::*;
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId, RoleId, GuildId, UserId};
-use serenity::model::channel::{Channel, ChannelType, GuildChannel};
-use serenity::model::guild::Member;
+use serenity::model::channel::{Channel, ChannelType, PermissionOverwrite, PermissionOverwriteType};
 use serenity::model::permissions::Permissions;
 use serenity::builder::{CreateMessage, EditMessage, CreateEmbed, CreateEmbedFooter, CreateEmbedAuthor, CreateAttachment};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
@@ -96,6 +96,36 @@ async fn forget_channel(db: &PgPool, channel: &str) {
     }
 }
 
+/// What the bot needs in a channel it posts flights to: to see it, to write in it, to
+/// embed a flight's card, and to attach its screenshots. The invite link asks for exactly
+/// these, and a channel is only allowlisted once the bot holds them there.
+pub const POSTING_PERMISSIONS: Permissions = Permissions::VIEW_CHANNEL
+    .union(Permissions::SEND_MESSAGES)
+    .union(Permissions::EMBED_LINKS)
+    .union(Permissions::ATTACH_FILES);
+
+/// The link that adds the bot to a server, with the permissions it posts with. Only a
+/// server's owner or someone with Manage Server can complete it, and only while the
+/// application is a Public Bot in Discord's developer portal.
+pub fn invite_url(client_id: &str) -> String {
+    let permissions = POSTING_PERMISSIONS.bits().to_string();
+    reqwest::Url::parse_with_params(
+        "https://discord.com/oauth2/authorize",
+        &[("client_id", client_id), ("scope", "bot"), ("permissions", permissions.as_str())],
+    )
+    .expect("the invite URL is well formed")
+    .to_string()
+}
+
+/// Whether flights can be posted in a channel of this kind: a text channel, or an
+/// announcement channel (whose posts members may also follow from other servers).
+pub fn is_postable(kind: ChannelType) -> bool {
+    matches!(kind, ChannelType::Text | ChannelType::News)
+}
+
+/// Whether the bot can post flights in a channel: it must exist, be a text or
+/// announcement channel of a server the bot is in, and grant the bot `POSTING_PERMISSIONS`.
+/// The error says what is wrong, for the admin who ticked the channel.
 pub async fn validate_discord_channel(http: &serenity::http::Http, channel_id: u64) -> Result<(), String> {
     let chan_id = ChannelId::new(channel_id);
     let channel = chan_id.to_channel(http).await
@@ -103,11 +133,11 @@ pub async fn validate_discord_channel(http: &serenity::http::Http, channel_id: u
 
     let guild_channel = match channel {
         Channel::Guild(c) => c,
-        _ => return Err("Not a guild text channel".to_string()),
+        _ => return Err("Not a server channel".to_string()),
     };
 
-    if guild_channel.kind != ChannelType::Text {
-        return Err("Channel is not a text channel".to_string());
+    if !is_postable(guild_channel.kind) {
+        return Err("Flights can only be posted in a text or announcement channel".to_string());
     }
 
     // Fetch the bot's own user info to get its user ID
@@ -121,77 +151,70 @@ pub async fn validate_discord_channel(http: &serenity::http::Http, channel_id: u
     // Fetch guild roles to get permissions
     let roles = http.get_guild_roles(guild_channel.guild_id).await
         .map_err(|e| format!("Failed to fetch guild roles: {}", e))?;
+    let roles: HashMap<RoleId, Permissions> = roles.into_iter().map(|r| (r.id, r.permissions)).collect();
 
-    let roles_map: std::collections::HashMap<_, _> = roles.into_iter().map(|r| (r.id, r)).collect();
-
-    let permissions = calculate_bot_permissions(&guild_channel, &member, &roles_map);
-
-    let required = Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS;
-    if !permissions.contains(required) {
-        return Err("Bot lacks SEND_MESSAGES or EMBED_LINKS permission in this channel".to_string());
-    }
-
-    Ok(())
+    let permissions = channel_permissions(
+        guild_channel.guild_id,
+        bot_user.id,
+        &member.roles,
+        &roles,
+        &guild_channel.permission_overwrites,
+    );
+    missing_for_posting(permissions)
 }
 
-fn calculate_bot_permissions(
-    channel: &GuildChannel,
-    member: &Member,
-    roles: &std::collections::HashMap<serenity::model::id::RoleId, serenity::model::guild::Role>,
-) -> Permissions {
-    // 1. Get @everyone role permissions
-    let everyone_role_id = RoleId::new(channel.guild_id.get());
-    let mut permissions = match roles.get(&everyone_role_id) {
-        Some(role) => role.permissions,
-        None => Permissions::empty(),
-    };
-
-    // 2. Apply member roles permissions
-    for role_id in &member.roles {
-        if let Some(role) = roles.get(role_id) {
-            permissions |= role.permissions;
-        }
+/// Ok when `permissions` cover `POSTING_PERMISSIONS`, else which are missing, by name.
+fn missing_for_posting(permissions: Permissions) -> Result<(), String> {
+    let missing = POSTING_PERMISSIONS - permissions;
+    if missing.is_empty() {
+        return Ok(());
     }
+    Err(format!(
+        "ButterLog can't post in this channel: it lacks {} there. Grant them to its role,          or to it in the channel's permissions, and tick the channel again.",
+        missing.get_permission_names().join(", "),
+    ))
+}
 
-    // If ADMINISTRATOR is set, they have all permissions
+/// A member's permissions across a server: what @everyone grants (the role whose id is
+/// the server's), and each of their roles. Channel overwrites are `channel_permissions`'.
+fn guild_permissions(guild_id: GuildId, member_roles: &[RoleId], roles: &HashMap<RoleId, Permissions>) -> Permissions {
+    let everyone = roles.get(&RoleId::new(guild_id.get())).copied().unwrap_or_else(Permissions::empty);
+    member_roles.iter().filter_map(|r| roles.get(r)).fold(everyone, |all, p| all | *p)
+}
+
+/// A member's permissions in one channel, in Discord's order: the server's, then the
+/// channel's overwrite for @everyone, then its overwrites for the member's roles taken
+/// together, then its overwrite for the member. Administrator overrides every overwrite.
+fn channel_permissions(
+    guild_id: GuildId,
+    user: UserId,
+    member_roles: &[RoleId],
+    roles: &HashMap<RoleId, Permissions>,
+    overwrites: &[PermissionOverwrite],
+) -> Permissions {
+    let mut permissions = guild_permissions(guild_id, member_roles, roles);
     if permissions.administrator() {
         return Permissions::all();
     }
 
-    // 3. Apply channel overwrites for @everyone
-    if let Some(overwrite) = channel.permission_overwrites.iter().find(|o| {
-        match o.kind {
-            serenity::model::channel::PermissionOverwriteType::Role(id) => id.get() == everyone_role_id.get(),
-            _ => false,
-        }
-    }) {
-        permissions = (permissions & !overwrite.deny) | overwrite.allow;
+    let everyone = RoleId::new(guild_id.get());
+    let for_role = |role: RoleId| {
+        overwrites.iter().find(|o| matches!(o.kind, PermissionOverwriteType::Role(id) if id == role))
+    };
+
+    if let Some(o) = for_role(everyone) {
+        permissions = (permissions & !o.deny) | o.allow;
     }
 
-    // 4. Apply channel overwrites for member roles
-    let mut role_allow = Permissions::empty();
-    let mut role_deny = Permissions::empty();
-    for role_id in &member.roles {
-        if let Some(overwrite) = channel.permission_overwrites.iter().find(|o| {
-            match o.kind {
-                serenity::model::channel::PermissionOverwriteType::Role(id) => id.get() == role_id.get(),
-                _ => false,
-            }
-        }) {
-            role_allow |= overwrite.allow;
-            role_deny |= overwrite.deny;
-        }
+    let (mut allow, mut deny) = (Permissions::empty(), Permissions::empty());
+    for o in member_roles.iter().filter_map(|r| for_role(*r)) {
+        allow |= o.allow;
+        deny |= o.deny;
     }
-    permissions = (permissions & !role_deny) | role_allow;
+    permissions = (permissions & !deny) | allow;
 
-    // 5. Apply channel overwrites for the member itself
-    if let Some(overwrite) = channel.permission_overwrites.iter().find(|o| {
-        match o.kind {
-            serenity::model::channel::PermissionOverwriteType::Member(id) => id.get() == member.user.id.get(),
-            _ => false,
-        }
-    }) {
-        permissions = (permissions & !overwrite.deny) | overwrite.allow;
+    if let Some(o) = overwrites.iter().find(|o| matches!(o.kind, PermissionOverwriteType::Member(id) if id == user)) {
+        permissions = (permissions & !o.deny) | o.allow;
     }
 
     permissions
@@ -290,82 +313,79 @@ pub async fn maybe_update_user_notification_channels(
         }
     }
 
-    // 2. Fetch all allowlisted channels to know what guilds we care about
-    let allowlisted: Vec<(String, String)> = sqlx::query_as(
-        "SELECT channel_id, guild_id FROM allowlisted_channels"
-    )
-    .fetch_all(db)
-    .await?;
-
-    // Determine distinct guilds
-    let mut guild_ids = std::collections::HashSet::new();
-    for (_, guild_id) in &allowlisted {
-        guild_ids.insert(guild_id.clone());
-    }
-
-    // 3. For each guild, check if user belongs to it
-    let mut user_guilds = std::collections::HashSet::new();
+    // 2. The servers with an allowlisted channel, and of them, those the pilot is in.
+    let guild_ids: Vec<String> = sqlx::query_scalar("SELECT DISTINCT guild_id FROM allowlisted_channels")
+        .fetch_all(db)
+        .await?;
+    let mut member_of = Vec::new();
     for guild_id_str in guild_ids {
         if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
             let g_id = serenity::model::id::GuildId::new(guild_id_u64);
             let u_id = serenity::model::id::UserId::new(user_discord_id);
             if http.get_member(g_id, u_id).await.is_ok() {
-                user_guilds.insert(guild_id_str);
+                member_of.push(guild_id_str);
             }
         }
     }
 
-    // 4. Collect all allowlisted channel IDs that belong to the user's guilds
-    let mut target_channels = Vec::new();
-    for (channel_id, guild_id) in allowlisted {
-        if user_guilds.contains(&guild_id) {
-            target_channels.push(channel_id);
-        }
-    }
+    store_notification_channels(db, user_id, &member_of, now).await?;
+    Ok(())
+}
 
-    // 5. Update database inside a transaction
+/// Point a pilot's notifications at every allowlisted channel of the servers they are in
+/// (`member_of`, Discord guild ids), and at no other, and note when, so the next hour's
+/// syncs don't ask Discord again.
+pub async fn store_notification_channels(
+    db: &PgPool,
+    user_id: i64,
+    member_of: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
-
-    // Delete channels not in the target list anymore
-    if target_channels.is_empty() {
-        sqlx::query("DELETE FROM discord_notification_channels WHERE user_id = $1")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        sqlx::query(
-            "DELETE FROM discord_notification_channels WHERE user_id = $1 AND NOT (channel_id = ANY($2))"
-        )
-        .bind(user_id)
-        .bind(&target_channels)
-        .execute(&mut *tx)
-        .await?;
-
-        // Insert new ones
-        for channel_id in &target_channels {
-            sqlx::query(
-                "INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2) \
-                 ON CONFLICT (user_id, channel_id) DO NOTHING"
-            )
-            .bind(user_id)
-            .bind(channel_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
-    // Update timestamp
     sqlx::query(
-        "UPDATE users SET discord_notification_channels_updated_at = $1 WHERE id = $2"
+        "DELETE FROM discord_notification_channels n WHERE n.user_id = $1 AND NOT EXISTS            (SELECT 1 FROM allowlisted_channels a WHERE a.channel_id = n.channel_id AND a.guild_id = ANY($2))",
     )
-    .bind(now)
     .bind(user_id)
+    .bind(member_of)
     .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "INSERT INTO discord_notification_channels (user_id, channel_id)          SELECT $1, channel_id FROM allowlisted_channels WHERE guild_id = ANY($2)          ON CONFLICT (user_id, channel_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(member_of)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE users SET discord_notification_channels_updated_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
 
-    tx.commit().await?;
-
-    Ok(())
+/// Allowlist a channel, or rename it, and have every pilot's channels looked up again on
+/// their next flight or settings visit, so the members of its server are posted there
+/// from then on rather than after their hour-long cache runs out.
+pub async fn allowlist_channel(db: &PgPool, channel_id: &str, channel_name: &str, guild_id: &str) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let added = sqlx::query(
+        "INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, $2, $3)          ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name          RETURNING (xmax = 0)",
+    )
+    .bind(channel_id)
+    .bind(channel_name)
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let added: bool = sqlx::Row::get(&added, 0);
+    if added {
+        sqlx::query(
+            "UPDATE users SET discord_notification_channels_updated_at = NULL              WHERE discord_notification_channels_updated_at IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
 }
 
 /// All the flight + user state needed to render and throttle a Discord sync.
@@ -1107,6 +1127,8 @@ pub struct BotGuildInfo {
     pub is_user_admin: bool,
 }
 
+/// Whether a user may choose a server's channels: its owner, or a member holding
+/// Administrator through @everyone or a role.
 pub async fn is_user_admin_in_guild(
     http: &serenity::http::Http,
     guild_id: u64,
@@ -1114,35 +1136,29 @@ pub async fn is_user_admin_in_guild(
 ) -> bool {
     let g_id = GuildId::new(guild_id);
     let u_id = UserId::new(user_id);
-
-    // 1. Check if the user is the owner of the guild
-    if let Ok(guild) = g_id.to_partial_guild(http).await {
-        if guild.owner_id == u_id {
-            return true;
+    // The partial guild carries both the owner and the roles.
+    let Ok(guild) = g_id.to_partial_guild(http).await else { return false };
+    let member_roles = if guild.owner_id == u_id {
+        Vec::new()
+    } else {
+        match http.get_member(g_id, u_id).await {
+            Ok(member) => member.roles,
+            Err(_) => return false,
         }
-    }
+    };
+    let roles: HashMap<RoleId, Permissions> = guild.roles.values().map(|r| (r.id, r.permissions)).collect();
+    may_administer(g_id, guild.owner_id, u_id, &member_roles, &roles)
+}
 
-    // 2. Fetch member and check permissions based on roles
-    if let Ok(member) = http.get_member(g_id, u_id).await {
-        if let Ok(roles) = http.get_guild_roles(g_id).await {
-            let roles_map: std::collections::HashMap<_, _> = roles.into_iter().map(|r| (r.id, r)).collect();
-            let everyone_role_id = RoleId::new(guild_id);
-            let mut permissions = match roles_map.get(&everyone_role_id) {
-                Some(role) => role.permissions,
-                None => Permissions::empty(),
-            };
-
-            for role_id in &member.roles {
-                if let Some(role) = roles_map.get(role_id) {
-                    permissions |= role.permissions;
-                }
-            }
-
-            return permissions.administrator();
-        }
-    }
-
-    false
+/// The rule `is_user_admin_in_guild` applies to what Discord told it.
+fn may_administer(
+    guild_id: GuildId,
+    owner: UserId,
+    user: UserId,
+    member_roles: &[RoleId],
+    roles: &HashMap<RoleId, Permissions>,
+) -> bool {
+    owner == user || guild_permissions(guild_id, member_roles, roles).administrator()
 }
 
 pub async fn get_bot_guilds_and_channels(
@@ -1163,7 +1179,7 @@ pub async fn get_bot_guilds_and_channels(
         let mut channels_list = Vec::new();
         if let Ok(channels) = http.get_channels(guild.id).await {
             for channel in channels {
-                if channel.kind == ChannelType::Text {
+                if is_postable(channel.kind) {
                     channels_list.push((channel.id.to_string(), channel.name.clone()));
                 }
             }
@@ -1405,5 +1421,195 @@ mod tests {
     fn telemetry_skips_null_and_non_numeric() {
         let snapshot = serde_json::json!({ "IAS": null, "TAS": {} });
         assert_eq!(get_formatted_fields_for_category(&snapshot, "normal"), "");
+    }
+
+    // -- Who may choose a server's channels, and whether the bot can post in one --
+
+    const GUILD: u64 = 100;
+    const BOT: u64 = 7;
+
+    fn roles(list: &[(u64, Permissions)]) -> HashMap<RoleId, Permissions> {
+        list.iter().map(|(id, p)| (RoleId::new(*id), *p)).collect()
+    }
+
+    fn role_overwrite(role: u64, allow: Permissions, deny: Permissions) -> PermissionOverwrite {
+        PermissionOverwrite { allow, deny, kind: PermissionOverwriteType::Role(RoleId::new(role)) }
+    }
+
+    fn in_channel(member_roles: &[u64], roles: &HashMap<RoleId, Permissions>, overwrites: &[PermissionOverwrite]) -> Permissions {
+        let member_roles: Vec<RoleId> = member_roles.iter().map(|r| RoleId::new(*r)).collect();
+        channel_permissions(GuildId::new(GUILD), UserId::new(BOT), &member_roles, roles, overwrites)
+    }
+
+    #[test]
+    fn the_invite_asks_for_what_posting_needs() {
+        let url = reqwest::Url::parse(&invite_url("42")).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.host_str(), Some("discord.com"));
+        assert_eq!(query["client_id"], "42");
+        assert_eq!(query["scope"], "bot");
+        // View Channel, Send Messages, Embed Links, Attach Files.
+        assert_eq!(query["permissions"], "52224");
+    }
+
+    #[test]
+    fn the_owner_and_administrators_may_choose_channels_and_no_one_else() {
+        let (guild, owner, user) = (GuildId::new(GUILD), UserId::new(1), UserId::new(2));
+        let server = roles(&[
+            (GUILD, Permissions::SEND_MESSAGES),
+            (10, Permissions::ADMINISTRATOR),
+            (11, Permissions::MANAGE_GUILD | Permissions::MANAGE_CHANNELS),
+        ]);
+        assert!(may_administer(guild, owner, owner, &[], &server));
+        assert!(may_administer(guild, owner, user, &[RoleId::new(10)], &server));
+        assert!(!may_administer(guild, owner, user, &[RoleId::new(11)], &server), "Manage Server is not enough");
+        assert!(!may_administer(guild, owner, user, &[], &server));
+        // @everyone holding Administrator makes everyone an administrator.
+        let open = roles(&[(GUILD, Permissions::ADMINISTRATOR)]);
+        assert!(may_administer(guild, owner, user, &[], &open));
+    }
+
+    #[test]
+    fn the_bot_posts_where_its_roles_let_it() {
+        let server = roles(&[(GUILD, Permissions::empty()), (20, POSTING_PERMISSIONS)]);
+        assert!(missing_for_posting(in_channel(&[20], &server, &[])).is_ok());
+        assert!(missing_for_posting(in_channel(&[], &server, &[])).is_err());
+    }
+
+    #[test]
+    fn a_channel_hidden_from_everyone_hides_it_from_the_bot_too() {
+        let server = roles(&[(GUILD, POSTING_PERMISSIONS), (20, Permissions::empty())]);
+        let hidden = role_overwrite(GUILD, Permissions::empty(), Permissions::VIEW_CHANNEL);
+        let err = missing_for_posting(in_channel(&[20], &server, &[hidden.clone()])).unwrap_err();
+        assert!(err.contains("View Channel"), "{err}");
+        // Until the channel lets the bot's role back in.
+        let let_in = role_overwrite(20, Permissions::VIEW_CHANNEL, Permissions::empty());
+        assert!(missing_for_posting(in_channel(&[20], &server, &[hidden, let_in])).is_ok());
+    }
+
+    #[test]
+    fn a_role_allow_beats_a_role_deny_and_the_member_overwrite_beats_both() {
+        let server = roles(&[(GUILD, POSTING_PERMISSIONS), (20, Permissions::empty()), (21, Permissions::empty())]);
+        let deny = role_overwrite(20, Permissions::empty(), Permissions::ATTACH_FILES);
+        let allow = role_overwrite(21, Permissions::ATTACH_FILES, Permissions::empty());
+        assert!(in_channel(&[20, 21], &server, &[deny.clone(), allow.clone()]).contains(Permissions::ATTACH_FILES));
+        assert!(!in_channel(&[20], &server, &[deny.clone(), allow.clone()]).contains(Permissions::ATTACH_FILES));
+        let member = PermissionOverwrite {
+            allow: Permissions::empty(),
+            deny: Permissions::ATTACH_FILES,
+            kind: PermissionOverwriteType::Member(UserId::new(BOT)),
+        };
+        assert!(!in_channel(&[20, 21], &server, &[deny, allow, member]).contains(Permissions::ATTACH_FILES));
+    }
+
+    #[test]
+    fn administrator_ignores_every_overwrite() {
+        let server = roles(&[(GUILD, Permissions::empty()), (20, Permissions::ADMINISTRATOR)]);
+        let denied = [role_overwrite(GUILD, Permissions::empty(), Permissions::all())];
+        assert!(missing_for_posting(in_channel(&[20], &server, &denied)).is_ok());
+    }
+
+    #[test]
+    fn a_missing_attach_files_is_named() {
+        let err = missing_for_posting(POSTING_PERMISSIONS - Permissions::ATTACH_FILES).unwrap_err();
+        assert!(err.contains("Attach Files") && !err.contains("Send Messages"), "{err}");
+    }
+
+    #[test]
+    fn flights_go_to_text_and_announcement_channels_only() {
+        assert!(is_postable(ChannelType::Text));
+        assert!(is_postable(ChannelType::News));
+        for kind in [ChannelType::Voice, ChannelType::Forum, ChannelType::Category, ChannelType::Stage] {
+            assert!(!is_postable(kind), "{kind:?}");
+        }
+    }
+
+    // -- Which channels a pilot's flights go to, against a real Postgres --
+
+    async fn test_db() -> Option<PgPool> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        Some(db)
+    }
+
+    async fn pilot(db: &PgPool) -> i64 {
+        sqlx::query_scalar("INSERT INTO users (discord_id, username) VALUES ($1, 'pilot') RETURNING id")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn channels_of(db: &PgPool, user: i64) -> Vec<String> {
+        sqlx::query_scalar("SELECT channel_id FROM discord_notification_channels WHERE user_id = $1 ORDER BY channel_id")
+            .bind(user)
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    async fn updated_at(db: &PgPool, user: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+        sqlx::query_scalar("SELECT discord_notification_channels_updated_at FROM users WHERE id = $1")
+            .bind(user)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    fn fresh_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_pilot_is_posted_in_every_chosen_channel_of_their_servers_and_no_other() {
+        let Some(db) = test_db().await else { return };
+        let (theirs, other) = (fresh_id(), fresh_id());
+        let (a, b, elsewhere) = (format!("a-{}", fresh_id()), format!("b-{}", fresh_id()), fresh_id());
+        allowlist_channel(&db, &a, "flight-log", &theirs).await.unwrap();
+        allowlist_channel(&db, &b, "landings", &theirs).await.unwrap();
+        allowlist_channel(&db, &elsewhere, "flight-log", &other).await.unwrap();
+        let user = pilot(&db).await;
+        // A channel left over from a server they have since left.
+        sqlx::query("INSERT INTO discord_notification_channels (user_id, channel_id) VALUES ($1, $2)")
+            .bind(user)
+            .bind(&elsewhere)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        store_notification_channels(&db, user, &[theirs.clone()], chrono::Utc::now()).await.unwrap();
+        assert_eq!(channels_of(&db, user).await, vec![a.clone(), b.clone()]);
+        assert!(updated_at(&db, user).await.is_some());
+
+        // Storing again changes nothing; leaving every server clears them all.
+        store_notification_channels(&db, user, &[theirs], chrono::Utc::now()).await.unwrap();
+        assert_eq!(channels_of(&db, user).await, vec![a, b]);
+        store_notification_channels(&db, user, &[], chrono::Utc::now()).await.unwrap();
+        assert!(channels_of(&db, user).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_newly_chosen_channel_is_looked_up_on_the_pilots_next_flight() {
+        let Some(db) = test_db().await else { return };
+        let user = pilot(&db).await;
+        let (guild, channel) = (fresh_id(), fresh_id());
+        allowlist_channel(&db, &channel, "flight-log", &guild).await.unwrap();
+        store_notification_channels(&db, user, &[], chrono::Utc::now()).await.unwrap();
+        assert!(updated_at(&db, user).await.is_some());
+
+        // Renaming a channel already chosen keeps every pilot's cache.
+        allowlist_channel(&db, &channel, "flight-log-2", &guild).await.unwrap();
+        assert!(updated_at(&db, user).await.is_some());
+        let name: String = sqlx::query_scalar("SELECT channel_name FROM allowlisted_channels WHERE channel_id = $1")
+            .bind(&channel)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(name, "flight-log-2");
+
+        // A new one drops it, so the next flight asks Discord again.
+        allowlist_channel(&db, &fresh_id(), "landings", &guild).await.unwrap();
+        assert!(updated_at(&db, user).await.is_none());
     }
 }

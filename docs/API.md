@@ -507,10 +507,14 @@ Command types, with stability. `pause` is **stable**; the rest are **beta** beca
 
 ### Discord Notification Settings
 
-These endpoints use the web session (the `token` cookie set by the OAuth callback) or a Bearer token.
+How a server adds the bot and chooses its channels, and how a pilot's channels follow from that, is in [discord-servers.md](discord-servers.md).
+
+*   `GET /discord/invite` -- no authentication. Redirects to Discord's page for adding the bot to a server, asking for View Channel, Send Messages, Embed Links and Attach Files.
+
+The endpoints below use the web session (the `token` cookie set by the OAuth callback) or a Bearer token.
 
 *   `GET /api/v0/discord-notification-channels` -- channel IDs currently receiving your flight notifications. Channels are managed automatically from the allowlist and your guild memberships; direct mutation endpoints respond `403`.
-*   `POST /api/v0/admin/allowlist-channel` -- body `{ "channelId": "...", "guildId": "...", "channelName": "..." }`. Allowlists a channel for notifications. Requires the caller to be a Discord administrator of the guild; the bot must be able to post in the channel.
+*   `POST /api/v0/admin/allowlist-channel` -- body `{ "channelId": "...", "guildId": "...", "channelName": "..." }`. Allowlists a text or announcement channel for notifications. Requires the caller to be the guild's owner or hold Administrator there. The bot must hold View Channel, Send Messages, Embed Links and Attach Files in the channel; a `400` names what it lacks. A newly allowlisted channel reaches each member's next flight, rather than after their hour-long membership cache runs out.
 *   `DELETE /api/v0/admin/allowlist-channel/:channel_id` -- removes a channel from the allowlist (admin only).
 
 ---
