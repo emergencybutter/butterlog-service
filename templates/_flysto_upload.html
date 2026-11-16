@@ -32,20 +32,35 @@
         toast(esc(msg) + fix, true);
     };
 
+    // An icon button says what it is doing in its tooltip and label; a text one, in its text.
+    const isIcon = btn => btn.classList.contains('fv-icon');
+    const labelOf = btn => isIcon(btn) ? btn.getAttribute('aria-label') : btn.textContent;
+    function say(btn, text) {
+        if (isIcon(btn)) { btn.title = text; btn.setAttribute('aria-label', text); }
+        else btn.textContent = text;
+    }
+    const OPEN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>';
+
     // The button becomes the link to the flight's log, as the page renders it once there.
     function becomeLink(btn, url) {
         const a = document.createElement('a');
         a.className = btn.className;
         a.href = url; a.target = '_blank'; a.rel = 'noopener';
-        a.title = 'This flight on your FlySto';
-        a.textContent = 'Open on FlySto ↗';
+        if (isIcon(btn)) {
+            a.title = 'Open on FlySto';
+            a.setAttribute('aria-label', 'Open on FlySto');
+            a.innerHTML = OPEN_ICON;
+        } else {
+            a.title = 'This flight on your FlySto';
+            a.textContent = 'Open on FlySto ↗';
+        }
         btn.replaceWith(a);
     }
 
     // Asks where the flight is until FlySto has processed it: about ten seconds, often.
     async function follow(btn, label) {
         btn.disabled = true;
-        btn.textContent = 'Processing on FlySto…';
+        say(btn, 'Processing on FlySto…');
         for (let i = 0; i < 40; i++) {
             await new Promise(r => setTimeout(r, 3000));
             let r;
@@ -61,14 +76,14 @@
             if (where.state === 'none') break;
         }
         btn.disabled = false;
-        btn.textContent = label;
+        say(btn, label);
     }
 
     document.querySelectorAll('[data-flysto-upload]').forEach(btn => {
-        const label = btn.textContent;
+        const label = labelOf(btn);
         btn.addEventListener('click', async () => {
             btn.disabled = true;
-            btn.textContent = 'Uploading…';
+            say(btn, 'Uploading…');
             let r;
             try {
                 r = await fetch(btn.dataset.flystoUpload, {
@@ -77,12 +92,12 @@
                 });
             } catch (e) {
                 toast('Upload failed: the service could not be reached.', true);
-                btn.disabled = false; btn.textContent = label;
+                btn.disabled = false; say(btn, label);
                 return;
             }
             if (!r.ok) {
                 await failed(r);
-                btn.disabled = false; btn.textContent = label;
+                btn.disabled = false; say(btn, label);
                 return;
             }
             const where = await r.json().catch(() => ({}));

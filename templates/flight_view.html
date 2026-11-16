@@ -34,19 +34,19 @@
             <span class="fv-grade" id="fv-grade" hidden></span>
             <div class="view-actions">
                 {% if !export_href.is_empty() %}
-                <a class="fv-btn fv-btn-quiet" href="{{ export_href }}" download title="Export for FlySto (CSV)">Export CSV</a>
+                <a class="fv-icon fv-icon-quiet" href="{{ export_href }}" download title="Export for FlySto (CSV)" aria-label="Export CSV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></a>
                 {% endif %}
                 {% if !upload_href.is_empty() %}
                 {% if flysto_state == "done" %}
-                <a class="fv-btn fv-btn-quiet" href="{{ flysto_url }}" target="_blank" rel="noopener" title="This flight on your FlySto">Open on FlySto ↗</a>
+                <a class="fv-icon fv-icon-quiet" href="{{ flysto_url }}" target="_blank" rel="noopener" title="Open on FlySto" aria-label="Open on FlySto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
                 {% else if flysto_connected %}
-                <button class="fv-btn fv-btn-quiet" type="button" data-flysto-upload="{{ upload_href }}" data-flysto-state="{{ flysto_state }}" title="Send this flight to your FlySto account">Upload to FlySto</button>
+                <button class="fv-icon fv-icon-quiet" type="button" data-flysto-upload="{{ upload_href }}" data-flysto-state="{{ flysto_state }}" title="Upload to FlySto" aria-label="Upload to FlySto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 13v8M8 17l4-4 4 4"/><path d="M20 16.6A5 5 0 0 0 18 7h-1.3A8 8 0 1 0 4 15.3"/></svg></button>
                 {% else %}
-                <a class="fv-btn fv-btn-quiet" href="/content/settings#flysto" title="Connect FlySto in Settings to upload your flights">Upload to FlySto</a>
+                <a class="fv-icon fv-icon-quiet" href="/content/settings#flysto" title="Upload to FlySto: connect it in Settings first" aria-label="Upload to FlySto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 13v8M8 17l4-4 4 4"/><path d="M20 16.6A5 5 0 0 0 18 7h-1.3A8 8 0 1 0 4 15.3"/></svg></a>
                 {% endif %}
                 {% endif %}
                 {% if deletable %}
-                <button class="fv-btn fv-btn-quiet" id="fv-delete-open" type="button" aria-haspopup="dialog" title="Delete this flight">Delete</button>
+                <button class="fv-icon fv-icon-quiet fv-icon-danger" id="fv-delete-open" type="button" aria-haspopup="dialog" title="Delete this flight" aria-label="Delete this flight"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg></button>
                 {% endif %}
                 <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Debrief</button>
             </div>

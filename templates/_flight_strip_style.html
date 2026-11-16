@@ -29,6 +29,13 @@
                border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); cursor: pointer; font-size: 15px; }
     .fv-icon:hover { color: var(--accent-text); }
     .fv-icon svg { width: 16px; height: 16px; }
+    /* The header's secondary actions: icons, so they fit beside the route on a phone. */
+    .fv-icon-quiet { color: var(--text-muted); }
+    .fv-icon-quiet svg { width: 18px; height: 18px; }
+    .fv-icon-danger:hover { color: var(--error); }
+    .fv-icon:disabled { cursor: wait; animation: fv-busy 1.2s ease-in-out infinite; }
+    @keyframes fv-busy { 50% { opacity: 0.35; } }
+    @media (prefers-reduced-motion: reduce) { .fv-icon:disabled { animation: none; opacity: 0.5; } }
     .fv-seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; flex: none; }
     .fv-seg button { border: 0; background: transparent; color: var(--text-2); font-family: var(--font-body);
                      font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; padding: 0 11px; min-height: 32px; cursor: pointer; }
@@ -244,8 +251,10 @@
         .fv-page .topbar { display: none; }
         .fv-page .fv-menu { display: inline-flex; flex: none; }
         .fv-head { top: 0; height: auto; min-height: 60px; }
-        /* Route and info line take the first row; the chips and buttons wrap under. */
-        .fv-id { flex: 1 1 220px; }
+        /* The buttons share the route's row while the route fits beside them, and
+           wrap under it when it doesn't. The info line gives way first: it ellipsizes. */
+        .fv-id { flex: 1 1 0; min-width: auto; }
+        .fv-id .fv-meta { contain: inline-size; }
         .fv-route { white-space: nowrap; }
         .fv-strip { padding: 8px 12px 16px; --mh: 280px; }
         .fv-key { display: none; }
