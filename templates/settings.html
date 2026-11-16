@@ -331,7 +331,7 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
                 <span class="section-title">Notification Channels</span>
             </div>
-            <p class="section-desc">The channels your flights are posted in: those chosen by the admins of each Discord server you are in.</p>
+            <p class="section-desc">The channels chosen by the admins of each Discord server you are in. Switch one off and your flights are no longer posted there; a post already made stays as it is.</p>
             <div class="guilds-container">
                 {% if notified_guilds.is_empty() %}
                 <div class="no-channels-fallback">
@@ -353,7 +353,10 @@
                                 <span class="channel-name">#{{ ch.name }}</span>
                                 <span class="channel-id">ID: {{ ch.id }}</span>
                             </div>
-                            <span class="badge notified-badge">Notified</span>
+                            <label class="switch">
+                                <input type="checkbox" class="channel-posting" data-channel="{{ ch.id }}" aria-label="Post my flights in #{{ ch.name }}" {% if ch.posted %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </label>
                         </div>
                         {% endfor %}
                     </div>
@@ -448,6 +451,25 @@
                 });
                 const flystoOff = document.getElementById('flysto-disconnect');
                 if (flystoOff) flystoOff.addEventListener('click', () => flysto('DELETE'));
+
+                // A pilot opting out of a server's channel, or back in.
+                document.querySelectorAll('input.channel-posting').forEach((box) => {
+                    box.addEventListener('change', async () => {
+                        const on = box.checked;
+                        try {
+                            const r = await fetch(`/api/v0/discord-notification-channels/${encodeURIComponent(box.dataset.channel)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ enabled: on }),
+                            });
+                            if (!r.ok) throw new Error();
+                            showToast(on ? 'Your flights are posted there again' : 'Your flights are no longer posted there', 'success');
+                        } catch (err) {
+                            box.checked = !on;
+                            showToast("Couldn't change it", 'error');
+                        }
+                    });
+                });
 
                 async function toggleAllowlist(channelId, guildId, channelName, checked) {
                     try {

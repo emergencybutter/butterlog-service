@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/v0/discord-notification-channels/:channel_id",
-            delete(handlers::delete_discord_channel_handler),
+            put(handlers::set_discord_channel_handler).delete(handlers::delete_discord_channel_handler),
         )
         .route(
             "/api/v0/admin/allowlist-channel",
@@ -551,14 +551,19 @@ async fn settings_handler(
         tracing::error!("Failed to update user notification channels: {}", e);
     }
 
-    // Fetch channels the current user has enabled for notifications
-    let enabled_channels: Vec<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM discord_notification_channels WHERE user_id = $1"
+    // The chosen channels of the pilot's servers, and whether they opted out of each.
+    let their_channels: std::collections::HashMap<String, bool> = sqlx::query_as(
+        "SELECT n.channel_id, EXISTS (SELECT 1 FROM discord_channel_optouts o \
+                                      WHERE o.user_id = n.user_id AND o.channel_id = n.channel_id) \
+         FROM discord_notification_channels n WHERE n.user_id = $1"
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(channel, opted_out): (String, bool)| (channel, !opted_out))
+    .collect();
 
     // Group allowlisted channels by guild name
     let guild_names: std::collections::HashMap<String, String> = guilds_info
@@ -591,17 +596,18 @@ async fn settings_handler(
         })
         .collect();
 
-    // Group the user's enabled notification channels by guild
+    // Group the pilot's channels by guild
     let mut enabled_by_guild: std::collections::HashMap<String, Vec<templates::NotifiedChannel>> =
         std::collections::HashMap::new();
     for (chan_id, chan_name, guild_id) in &allowlisted_channels {
-        if enabled_channels.contains(chan_id) {
+        if let Some(&posted) = their_channels.get(chan_id) {
             enabled_by_guild
                 .entry(guild_id.clone())
                 .or_default()
                 .push(templates::NotifiedChannel {
                     id: chan_id.clone(),
                     name: chan_name.clone(),
+                    posted,
                 });
         }
     }

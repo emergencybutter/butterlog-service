@@ -260,6 +260,8 @@ pub struct NotifiedGuild {
 pub struct NotifiedChannel {
     pub id: String,
     pub name: String,
+    /// Whether the pilot's flights are posted there, rather than opted out of.
+    pub posted: bool,
 }
 
 #[derive(Template)]
@@ -530,7 +532,10 @@ mod tests {
             }],
             notified_guilds: vec![NotifiedGuild {
                 name: "Voyager Aviation".into(),
-                channels: vec![NotifiedChannel { id: "1".into(), name: "flight-log".into() }],
+                channels: vec![
+                    NotifiedChannel { id: "1".into(), name: "flight-log".into(), posted: true },
+                    NotifiedChannel { id: "3".into(), name: "general".into(), posted: false },
+                ],
             }],
             invite_url: crate::discord::invite_url("123"),
             flysto_connected: false,

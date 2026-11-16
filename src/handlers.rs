@@ -297,14 +297,29 @@ pub async fn get_discord_channels_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = get_user_id_from_session(&state.db, &headers).await?;
 
-    let channels: Vec<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM discord_notification_channels WHERE user_id = $1 ORDER BY id"
-    )
-    .bind(user_id)
-    .fetch_all(&state.db)
-    .await?;
+    let channels = crate::discord::posted_channels(&state.db, user_id).await?;
 
     Ok((StatusCode::OK, Json(channels)))
+}
+
+#[derive(Deserialize)]
+pub struct ChannelPostingRequest {
+    pub enabled: bool,
+}
+
+/// A pilot opting out of one of their servers' chosen channels, or back in.
+pub async fn set_discord_channel_handler(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelPostingRequest>,
+) -> Result<StatusCode, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    if crate::discord::set_channel_posting(&state.db, user_id, &channel_id, payload.enabled).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound("Not a channel your flights can be posted in".to_string()))
+    }
 }
 
 pub async fn add_discord_channel_handler(

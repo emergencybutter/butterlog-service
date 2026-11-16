@@ -33,8 +33,12 @@ the bot out of a server, untick its channels first, then kick it.
 
 There is nothing to sign up for. Sign in to ButterLog with the same Discord account you use in
 the server. Your flights are then posted in every channel chosen in each server you are in.
-**Notification Channels** in settings lists them. There is no per-pilot opt-out yet: to stop
-being posted in a server, leave it, or ask its admins to untick the channel.
+**Notification Channels** in settings lists them.
+
+To stop being posted in one, switch it off there. Your flights are no longer posted in that
+channel, and the switch stays off if you leave the server and join it again, or if its admins
+untick the channel and tick it again. A post already made there stays as it was, and is no
+longer updated. Switch it back on to be posted there again.
 
 ButterLog checks which servers you are in at most once an hour, when a flight of yours is
 posted or when you open settings. A channel newly chosen by an admin is picked up straight
@@ -49,6 +53,7 @@ A flight begun in the air (a sim loaded mid-flight) is never posted.
 | `allowlisted_channels` | The channels admins chose: `channel_id`, `channel_name`, `guild_id`. |
 | `discord_notification_channels` | Per pilot, the chosen channels of the servers they are in. A cache, rebuilt from the table above. |
 | `users.discord_notification_channels_updated_at` | When that cache was rebuilt. Set to NULL for every pilot when a new channel is chosen. |
+| `discord_channel_optouts` | The channels each pilot switched off. Kept apart from the cache, so a rebuild never undoes one. Dropped only when Discord says the channel is gone. |
 | `flight_discord_messages` | The message posted for each flight in each channel, so later syncs edit it rather than post again. |
 
 - `discord::allowlist_channel`: called once the admin check and `validate_discord_channel`
@@ -57,6 +62,9 @@ A flight begun in the air (a sim loaded mid-flight) is never posted.
   settings page. If the cache is under an hour old it does nothing. Otherwise it asks Discord
   which of the allowlisted servers the pilot is a member of, and `store_notification_channels`
   rewrites the cache.
+- `discord::posted_channels`: the cache less the pilot's opt-outs. A flight sync posts and edits
+  only in these. `set_channel_posting` switches one, and refuses a channel not in the
+  pilot's cache.
 - `discord::is_user_admin_in_guild` and `validate_discord_channel` work out permissions the way
   Discord does: server roles first, then the channel's overwrites for @everyone, for roles,
   then for the member. Administrator overrides every overwrite. That logic is in
@@ -95,6 +103,8 @@ Use a throwaway server, a second Discord account, and a ButterLog instance whose
 6. As the second account, open settings. The ticked channel is under Notification Channels at
    once. Fly a short flight: it is posted there, edited in flight, and ends as a landing card
    with its screenshots.
-7. Untick the channel. The second account's next flight is not posted there.
-8. Tick it, delete it in Discord, and fly. The flight's post fails once, and the channel
+7. As the second account, switch the channel off under Notification Channels and fly. The
+   flight is not posted there. Switch it back on: the next flight is.
+8. Untick the channel. The second account's next flight is not posted there.
+9. Tick it, delete it in Discord, and fly. The flight's post fails once, and the channel
    disappears from both admin and pilot settings.

@@ -84,6 +84,10 @@ async fn forget_channel(db: &PgPool, channel: &str) {
             .bind(channel)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM discord_channel_optouts WHERE channel_id = $1")
+            .bind(channel)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM allowlisted_channels WHERE channel_id = $1")
             .bind(channel)
             .execute(&mut *tx)
@@ -170,7 +174,8 @@ fn missing_for_posting(permissions: Permissions) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "ButterLog can't post in this channel: it lacks {} there. Grant them to its role,          or to it in the channel's permissions, and tick the channel again.",
+        "ButterLog can't post in this channel: it lacks {} there. Grant them to its role, \
+         or to it in the channel's permissions, and tick the channel again.",
         missing.get_permission_names().join(", "),
     ))
 }
@@ -343,14 +348,17 @@ pub async fn store_notification_channels(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query(
-        "DELETE FROM discord_notification_channels n WHERE n.user_id = $1 AND NOT EXISTS            (SELECT 1 FROM allowlisted_channels a WHERE a.channel_id = n.channel_id AND a.guild_id = ANY($2))",
+        "DELETE FROM discord_notification_channels n WHERE n.user_id = $1 AND NOT EXISTS \
+           (SELECT 1 FROM allowlisted_channels a WHERE a.channel_id = n.channel_id AND a.guild_id = ANY($2))",
     )
     .bind(user_id)
     .bind(member_of)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO discord_notification_channels (user_id, channel_id)          SELECT $1, channel_id FROM allowlisted_channels WHERE guild_id = ANY($2)          ON CONFLICT (user_id, channel_id) DO NOTHING",
+        "INSERT INTO discord_notification_channels (user_id, channel_id) \
+         SELECT $1, channel_id FROM allowlisted_channels WHERE guild_id = ANY($2) \
+         ON CONFLICT (user_id, channel_id) DO NOTHING",
     )
     .bind(user_id)
     .bind(member_of)
@@ -370,7 +378,9 @@ pub async fn store_notification_channels(
 pub async fn allowlist_channel(db: &PgPool, channel_id: &str, channel_name: &str, guild_id: &str) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     let added = sqlx::query(
-        "INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, $2, $3)          ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name          RETURNING (xmax = 0)",
+        "INSERT INTO allowlisted_channels (channel_id, channel_name, guild_id) VALUES ($1, $2, $3) \
+         ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name \
+         RETURNING (xmax = 0)",
     )
     .bind(channel_id)
     .bind(channel_name)
@@ -380,12 +390,49 @@ pub async fn allowlist_channel(db: &PgPool, channel_id: &str, channel_name: &str
     let added: bool = sqlx::Row::get(&added, 0);
     if added {
         sqlx::query(
-            "UPDATE users SET discord_notification_channels_updated_at = NULL              WHERE discord_notification_channels_updated_at IS NOT NULL",
+            "UPDATE users SET discord_notification_channels_updated_at = NULL \
+             WHERE discord_notification_channels_updated_at IS NOT NULL",
         )
         .execute(&mut *tx)
         .await?;
     }
     tx.commit().await
+}
+
+/// The channels a pilot's flights are posted in: the chosen channels of their servers,
+/// less those they opted out of.
+pub async fn posted_channels(db: &PgPool, user_id: i64) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT n.channel_id FROM discord_notification_channels n \
+         WHERE n.user_id = $1 AND NOT EXISTS \
+           (SELECT 1 FROM discord_channel_optouts o WHERE o.user_id = n.user_id AND o.channel_id = n.channel_id) \
+         ORDER BY n.id",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Have a pilot's flights posted in one of their servers' chosen channels again, or no
+/// longer. False when the channel is not one of theirs, and nothing changes.
+pub async fn set_channel_posting(db: &PgPool, user_id: i64, channel_id: &str, posted: bool) -> Result<bool, sqlx::Error> {
+    let theirs: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM discord_notification_channels WHERE user_id = $1 AND channel_id = $2)",
+    )
+    .bind(user_id)
+    .bind(channel_id)
+    .fetch_one(db)
+    .await?;
+    if !theirs {
+        return Ok(false);
+    }
+    let query = if posted {
+        "DELETE FROM discord_channel_optouts WHERE user_id = $1 AND channel_id = $2"
+    } else {
+        "INSERT INTO discord_channel_optouts (user_id, channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+    };
+    sqlx::query(query).bind(user_id).bind(channel_id).execute(db).await?;
+    Ok(true)
 }
 
 /// All the flight + user state needed to render and throttle a Discord sync.
@@ -461,14 +508,9 @@ pub async fn sync_flight_discord(
     .execute(db)
     .await?;
 
-    // 2. Fetch the target channels registered by this user
-    let channels: Vec<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM discord_notification_channels \
-         WHERE user_id = (SELECT user_id FROM flights WHERE id = $1)"
-    )
-    .bind(flight_id)
-    .fetch_all(db)
-    .await?;
+    // 2. The channels this pilot's flights go to. A channel they opted out of gets no new
+    // post, and a post already made there is left as it was.
+    let channels = posted_channels(db, user_id).await?;
 
     if channels.is_empty() {
         return Ok(());
@@ -1513,6 +1555,7 @@ mod tests {
     fn a_missing_attach_files_is_named() {
         let err = missing_for_posting(POSTING_PERMISSIONS - Permissions::ATTACH_FILES).unwrap_err();
         assert!(err.contains("Attach Files") && !err.contains("Send Messages"), "{err}");
+        assert!(!err.contains("  "), "{err}");
     }
 
     #[test]
@@ -1611,5 +1654,49 @@ mod tests {
         // A new one drops it, so the next flight asks Discord again.
         allowlist_channel(&db, &fresh_id(), "landings", &guild).await.unwrap();
         assert!(updated_at(&db, user).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pilot_opted_out_of_a_channel_is_not_posted_there_until_they_opt_back_in() {
+        let Some(db) = test_db().await else { return };
+        let (guild, other) = (fresh_id(), fresh_id());
+        let (log, landings, elsewhere) = (format!("a-{}", fresh_id()), format!("b-{}", fresh_id()), fresh_id());
+        allowlist_channel(&db, &log, "flight-log", &guild).await.unwrap();
+        allowlist_channel(&db, &landings, "landings", &guild).await.unwrap();
+        allowlist_channel(&db, &elsewhere, "flight-log", &other).await.unwrap();
+        let (user, neighbour) = (pilot(&db).await, pilot(&db).await);
+        for who in [user, neighbour] {
+            store_notification_channels(&db, who, &[guild.clone()], chrono::Utc::now()).await.unwrap();
+        }
+
+        assert!(set_channel_posting(&db, user, &log, false).await.unwrap());
+        assert_eq!(posted_channels(&db, user).await.unwrap(), vec![landings.clone()]);
+        // Only for them.
+        assert_eq!(posted_channels(&db, neighbour).await.unwrap().len(), 2);
+        // The hourly refresh, or leaving the server and joining again, keeps it.
+        store_notification_channels(&db, user, &[], chrono::Utc::now()).await.unwrap();
+        store_notification_channels(&db, user, &[guild.clone()], chrono::Utc::now()).await.unwrap();
+        assert_eq!(posted_channels(&db, user).await.unwrap(), vec![landings.clone()]);
+        // Saying it twice is no error.
+        assert!(set_channel_posting(&db, user, &log, false).await.unwrap());
+
+        // A channel of a server they are not in is not theirs to switch.
+        assert!(!set_channel_posting(&db, user, &elsewhere, false).await.unwrap());
+        assert!(!set_channel_posting(&db, user, &elsewhere, true).await.unwrap());
+
+        assert!(set_channel_posting(&db, user, &log, true).await.unwrap());
+        let mut posted = posted_channels(&db, user).await.unwrap();
+        posted.sort();
+        assert_eq!(posted, vec![log.clone(), landings]);
+
+        // A channel Discord deleted takes its opt-outs with it.
+        set_channel_posting(&db, user, &log, false).await.unwrap();
+        forget_channel(&db, &log).await;
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM discord_channel_optouts WHERE channel_id = $1")
+            .bind(&log)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 }
