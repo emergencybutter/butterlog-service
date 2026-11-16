@@ -7,7 +7,7 @@ member of the server who flies with ButterLog is posted there.
 
 ## For a server's admins
 
-1. **Add the bot.** Open <https://butterlog.flyvoyager.net/discord/invite>, or press
+1. **Add the bot.** Open <https://butterlog.flyvoyager.net/content/discord/invite>, or press
    **Add ButterLog to a server** in ButterLog's settings. Pick the server and authorize.
    Discord only lists servers where you are the owner or have **Manage Server**.
    The bot asks for four permissions, which it needs in every channel it posts to:
@@ -77,7 +77,7 @@ cache. Anything that talks to Discord itself can only be checked by hand.
 Use a throwaway server, a second Discord account, and a ButterLog instance whose
 `DISCORD_BOT_TOKEN` is a test application's.
 
-1. Signed out, open `/discord/invite`. Discord's page names the application and the four
+1. Signed out, open `/content/discord/invite`. Discord's page names the application and the four
    permissions.
 2. Add the bot to the test server as its owner. Open settings: the server is listed under
    Admin Controls with its text and announcement channels, but no voice channel or forum.

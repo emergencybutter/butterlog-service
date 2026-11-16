@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
         .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
         .route("/api/v0/user/by-discord/:discord_id/current", get(user_current_flight_by_discord_handler))
-        .route("/discord/invite", get(discord_invite_handler))
+        .route("/content/discord/invite", get(discord_invite_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(

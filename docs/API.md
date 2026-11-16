@@ -509,7 +509,7 @@ Command types, with stability. `pause` is **stable**; the rest are **beta** beca
 
 How a server adds the bot and chooses its channels, and how a pilot's channels follow from that, is in [discord-servers.md](discord-servers.md).
 
-*   `GET /discord/invite` -- no authentication. Redirects to Discord's page for adding the bot to a server, asking for View Channel, Send Messages, Embed Links and Attach Files.
+*   `GET /content/discord/invite` -- no authentication. Redirects to Discord's page for adding the bot to a server, asking for View Channel, Send Messages, Embed Links and Attach Files.
 
 The endpoints below use the web session (the `token` cookie set by the OAuth callback) or a Bearer token.
 
