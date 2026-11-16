@@ -5,6 +5,10 @@ is edited as the flight goes, and ends as a landing card with the debrief and sc
 server can have it: its admins add the bot and choose the channels, and from then on every
 member of the server who flies with ButterLog is posted there.
 
+The two sections for admins and pilots are published on the website as
+<https://butterlog.flyvoyager.net/discord.html> (`butterlog-website/discord.html`). Change both
+together.
+
 ## For a server's admins
 
 1. **Add the bot.** Open <https://butterlog.flyvoyager.net/content/discord/invite>, or press
