@@ -29,6 +29,7 @@ mod export;
 mod flysto;
 mod me;
 mod anonymous;
+mod erase;
 mod normalise;
 mod analysis;
 
@@ -158,7 +159,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v0/flights", post(handlers::create_flight_bearer_handler))
         .route(
             "/api/v0/flights/:id",
-            put(handlers::update_flight_bearer_handler).get(handlers::get_flight_bearer_handler),
+            put(handlers::update_flight_bearer_handler)
+                .get(handlers::get_flight_bearer_handler)
+                .delete(handlers::delete_flight_handler),
         )
         .route(
             "/api/v0/flights/:id/notes",
@@ -687,6 +690,7 @@ async fn flight_detail_page(
             .fetch_optional(&state.db)
             .await?;
     let owner = live.as_ref().map(|l| l.2);
+    let over = live.as_ref().is_some_and(|l| l.0 != "active");
     if let Some((status, track_points, owner_id)) = live {
         if status != "ended" && track_points > 0 {
             let viewer = handlers::get_user_id_from_session(&state.db, &headers)
@@ -733,6 +737,7 @@ async fn flight_detail_page(
             flysto_url,
             simulator: doc["simulator"].as_str().unwrap_or_default().to_string(),
             json_escaped: script_json(&doc.to_string()),
+            deletable: is_owner && over,
         };
         return Ok(Html(page.render()?).into_response());
     }
@@ -1748,6 +1753,7 @@ async fn flight_share_detail_handler(
         flysto_url: String::new(),
         simulator: simulator.unwrap_or_default(),
         json_escaped: script_json(&json_str),
+        deletable: false,
     };
 
     let mut response = Html(page.render()?).into_response();
@@ -1943,7 +1949,7 @@ mod tests {
         use axum::routing::{delete, get, post, put};
         let _router: axum::Router = axum::Router::new()
             .route("/api/v0/flights", post(|| async {}))
-            .route("/api/v0/flights/:id", put(|| async {}).get(|| async {}))
+            .route("/api/v0/flights/:id", put(|| async {}).get(|| async {}).delete(|| async {}))
             .route("/api/v0/flights/:id/notes", put(|| async {}))
             .route("/api/v0/flights/:id/screenshots", post(|| async {}))
             .route("/api/v0/flights/:id/screenshots/:hash", delete(|| async {}))

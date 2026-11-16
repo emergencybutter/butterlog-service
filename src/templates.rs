@@ -283,6 +283,8 @@ pub struct FlightViewPage {
     pub simulator: String,
     /// The flight's document as JSON, with no `<` left to close the script it is in.
     pub json_escaped: String,
+    /// Whether the viewer may delete it: its pilot, once it is over.
+    pub deletable: bool,
 }
 
 #[cfg(test)]
@@ -350,6 +352,7 @@ mod tests {
             flysto_url: String::new(),
             simulator: r#"" ; alert(1); //"#.into(),
             json_escaped: "{}".into(),
+            deletable: false,
         }
         .render()
         .unwrap();
@@ -371,6 +374,7 @@ mod tests {
             flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
+            deletable: false,
         }
         .render()
         .unwrap();
@@ -582,6 +586,7 @@ mod tests {
             flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
+            deletable: true,
         }
         .render()
         .unwrap();
@@ -632,11 +637,14 @@ mod tests {
             flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: r#"{"summary":{"x":"</script>"}}"#.into(),
+            deletable: true,
         };
         let html = owner.render().unwrap();
         assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
         assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"</script>"}};"#));
         assert!(!html.contains("Delete share"));
+        // Its pilot may delete it, once they confirm.
+        assert!(html.contains(r#"id="fv-delete-open""#) && html.contains(r#"id="fv-delete""#));
         assert!(html.contains(r#"data-flysto-upload="/content/flights/7/upload/flysto""#));
         // Already on FlySto: the page links its log rather than offering it again.
         let on_flysto = FlightViewPage {
@@ -658,9 +666,11 @@ mod tests {
             flysto_url: String::new(),
             simulator: "MSFS".into(),
             json_escaped: "{}".into(),
+            deletable: false,
         };
         let html = visitor.render().unwrap();
         assert!(!html.contains("Delete Share"));
         assert!(!html.contains("flysto.csv"));
+        assert!(!html.contains("fv-delete"));
     }
 }

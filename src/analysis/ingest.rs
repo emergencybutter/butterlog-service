@@ -508,8 +508,23 @@ async fn link(
     .bind(timestamp(f.last_ms))
     .fetch_all(&mut *tx)
     .await?;
-    let candidates: Vec<(i64, Value, bool)> = rows.iter().map(|r| (r.0, r.1.clone(), r.2)).collect();
+    // And those they deleted, matched the same way: one of these is left deleted, never
+    // made again (`erase.rs`).
+    let deleted: Vec<(i64, Value, bool)> = sqlx::query_as(
+        "SELECT flight_id, statistics, service_owned FROM deleted_flights \
+          WHERE user_id = $1 AND created_at BETWEEN $2 - INTERVAL '1 day' AND $3 + INTERVAL '1 day'",
+    )
+    .bind(user_id)
+    .bind(timestamp(f.first_ms))
+    .bind(timestamp(f.last_ms))
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut candidates: Vec<(i64, Value, bool)> = rows.iter().map(|r| (r.0, r.1.clone(), r.2)).collect();
+    candidates.extend(deleted.iter().cloned());
     let linked = same_flight(f, &candidates).map(|c| c.0);
+    if linked.is_some_and(|id| deleted.iter().any(|d| d.0 == id)) {
+        return Ok((None, None));
+    }
     // The app's document: its own, kept aside on a flight the service owns.
     let app_doc = linked
         .and_then(|id| rows.iter().find(|r| r.0 == id))
@@ -1673,6 +1688,19 @@ mod tests {
         analyse_session(&db, &segments, session, user).await.unwrap();
         let kept = flights_of(user).await.unwrap();
         assert_eq!(kept[0].4.as_ref().unwrap()["landing_score"], json!(-142.24));
+
+        // Deleted by its pilot: analysed again, it is not made again.
+        struct NoObjects;
+        impl crate::anonymous::ObjectStore for NoObjects {
+            async fn delete_public(&self, _: &str) -> Result<(), String> { Ok(()) }
+            async fn delete_segment(&self, _: &str) -> Result<(), String> { Ok(()) }
+        }
+        let (user, session, _) = fly(false).await;
+        let id = flights_of(user).await.unwrap()[0].0;
+        crate::erase::erase(&db, &NoObjects, id, true).await.unwrap();
+        analyse_session(&db, &segments, session, user).await.unwrap();
+        assert!(flights_of(user).await.unwrap().is_empty());
+        assert_eq!(linked(session).await.unwrap().0, None);
     }
 
     fn parked(t: i64, fuel_flow: f64) -> Sample {

@@ -399,6 +399,26 @@ pub async fn allowlist_channel(db: &PgPool, channel_id: &str, channel_name: &str
     tx.commit().await
 }
 
+/// Deletes a flight's posts from Discord, before the flight itself goes. A post that can't
+/// be deleted (already gone, the bot kicked) is logged and left: the flight goes anyway.
+pub async fn delete_flight_posts(db: &PgPool, http: &serenity::http::Http, flight_id: i64) -> Result<(), sqlx::Error> {
+    let posts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT discord_channel_id, discord_message_id FROM flight_discord_messages \
+          WHERE flight_id = $1 AND discord_message_id <> 'pending'",
+    )
+    .bind(flight_id)
+    .fetch_all(db)
+    .await?;
+    for (channel, message) in posts {
+        let (Ok(c), Ok(m)) = (channel.parse::<u64>(), message.parse::<u64>()) else { continue };
+        tracing::info!("[Outgoing Request] Discord DELETE message {m} in channel {c}");
+        if let Err(e) = ChannelId::new(c).delete_message(http, MessageId::new(m)).await {
+            tracing::warn!(flight_id, "could not delete Discord message {m} in channel {c}: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// The channels a pilot's flights are posted in: the chosen channels of their servers,
 /// less those they opted out of.
 pub async fn posted_channels(db: &PgPool, user_id: i64) -> Result<Vec<String>, sqlx::Error> {

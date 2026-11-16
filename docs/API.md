@@ -102,6 +102,19 @@ Retrieves a specific flight's data.
     *   `200 OK`: Returns the `Flight` object.
     *   `404 Not Found`: Flight ID does not exist for this user.
 
+#### Delete a Flight
+`DELETE /flights/:id`
+
+Deletes one of the caller's flights, for good: its posts in Discord, its screenshots and archived track in R2, then the flight with its track points. The flight page's **Delete** button calls it once its pilot confirms. A copy uploaded to FlySto stays there. The flight's telemetry sessions are kept, but analysing them again never makes the flight again: a tombstone in `deleted_flights` is matched like a flight, by takeoff or start time.
+
+*   **Path Parameters:**
+    *   `id` (number): The database ID of the flight.
+*   **Response:**
+    *   `204 No Content`: Deleted.
+    *   `404 Not Found`: No such flight, or not the caller's.
+    *   `409 Conflict`: The flight is still flying. Delete it once it has ended.
+    *   `500`: An object in R2 couldn't be deleted. Nothing else is deleted, and it can be tried again.
+
 #### Update Flight Notes
 `PUT /flights/:id/notes`
 

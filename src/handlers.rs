@@ -302,6 +302,31 @@ pub async fn get_discord_channels_handler(
     Ok((StatusCode::OK, Json(channels)))
 }
 
+/// A pilot deleting one of their flights, over: its Discord posts, its objects in R2, then
+/// it (`erase.rs`). `404` for one not theirs, `409` for one still flying.
+pub async fn delete_flight_handler(
+    State(state): State<AppState>,
+    Path(flight_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let user_id = get_user_id_from_session(&state.db, &headers).await?;
+    match crate::erase::may_delete(&state.db, user_id, flight_id).await? {
+        Ok(()) => {}
+        Err(crate::erase::Refusal::NotTheirs) => return Err(AppError::NotFound("Flight not found".to_string())),
+        Err(crate::erase::Refusal::Flying) => {
+            return Err(AppError::Conflict("This flight is still flying. Delete it once it has ended.".to_string()))
+        }
+    }
+    crate::discord::delete_flight_posts(&state.db, &state.discord_http, flight_id).await?;
+    let objects = crate::anonymous::R2Objects {
+        r2: state.r2.clone(),
+        telemetry_bucket: state.config.r2_telemetry_bucket.clone(),
+    };
+    crate::erase::erase(&state.db, &objects, flight_id, true).await?;
+    tracing::info!(user_id, flight_id, "flight deleted by its pilot");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 pub struct ChannelPostingRequest {
     pub enabled: bool,

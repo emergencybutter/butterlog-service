@@ -45,6 +45,9 @@
                 <a class="fv-btn fv-btn-quiet" href="/content/settings#flysto" title="Connect FlySto in Settings to upload your flights">Upload to FlySto</a>
                 {% endif %}
                 {% endif %}
+                {% if deletable %}
+                <button class="fv-btn fv-btn-quiet" id="fv-delete-open" type="button" aria-haspopup="dialog" title="Delete this flight">Delete</button>
+                {% endif %}
                 <button class="fv-btn" id="fv-details-open" type="button" aria-haspopup="dialog">Debrief</button>
             </div>
         </div>
@@ -88,5 +91,67 @@ if (location.hash === '#replay') {
 }
 </script>
 {% if flysto_connected %}{% include "_flysto_upload.html" %}{% endif %}
+{% if deletable %}
+<dialog class="fv-confirm" id="fv-delete" aria-labelledby="fv-delete-title" aria-describedby="fv-delete-what">
+    <form method="dialog">
+        <h2 class="fv-confirm-title" id="fv-delete-title">Delete this flight?</h2>
+        <p id="fv-delete-what"><strong id="fv-delete-route">This flight</strong> will be deleted for good: its page, its track and debrief, its screenshots, and its posts in Discord. This can't be undone.</p>
+        {% if flysto_state == "done" %}
+        <p>Its copy on FlySto stays. Delete it there if you want it gone too.</p>
+        {% endif %}
+        <p class="fv-confirm-error" id="fv-delete-error" role="alert" hidden></p>
+        <div class="fv-confirm-actions">
+            <button class="fv-btn" value="cancel" autofocus>Cancel</button>
+            <button class="fv-btn fv-btn-danger" type="button" id="fv-delete-confirm">Delete flight</button>
+        </div>
+    </form>
+</dialog>
+<style>
+    .fv-confirm { margin: auto; width: min(440px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--border-strong);
+                  border-radius: var(--radius); background: var(--surface); color: var(--text); }
+    .fv-confirm::backdrop { background: rgba(0,0,0,0.55); }
+    .fv-confirm-title { margin: 0 0 10px; font-size: 1.05rem; }
+    .fv-confirm p { margin: 0 0 10px; color: var(--text-2); line-height: 1.5; }
+    .fv-confirm strong { color: var(--text); }
+    .fv-confirm .fv-confirm-error { color: var(--error); }
+    .fv-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .fv-btn.fv-btn-danger { background: var(--error); border-color: var(--error); color: var(--bg); font-weight: 600; }
+    .fv-btn.fv-btn-danger:hover { color: var(--bg); border-color: var(--text); }
+    .fv-btn.fv-btn-danger:disabled { opacity: 0.6; cursor: wait; }
+</style>
+<script>
+// Deleting the flight, once its pilot confirms.
+(() => {
+    const dlg = document.getElementById('fv-delete');
+    const confirmBtn = document.getElementById('fv-delete-confirm');
+    const error = document.getElementById('fv-delete-error');
+    document.getElementById('fv-delete-open').addEventListener('click', () => {
+        // The header's route, once the page has filled it in.
+        const route = document.getElementById('view-route').textContent.trim();
+        document.getElementById('fv-delete-route').textContent = route && route !== 'Flight' ? route : 'This flight';
+        error.hidden = true;
+        if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+    });
+    dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+    confirmBtn.addEventListener('click', async () => {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Deleting…';
+        try {
+            const r = await fetch(`/api/v0/flights/${encodeURIComponent(SHARE_DATA.remoteFlightId)}`, { method: 'DELETE' });
+            if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                throw new Error(data.error || "The flight couldn't be deleted.");
+            }
+            location.replace('/content');
+        } catch (e) {
+            error.textContent = e.message || "The flight couldn't be deleted.";
+            error.hidden = false;
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Delete flight';
+        }
+    });
+})();
+</script>
+{% endif %}
 </body>
 </html>

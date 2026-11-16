@@ -284,10 +284,8 @@ pub struct Swept {
     pub users: u64,
 }
 
-/// The R2 key of a screenshot, as `delete_screenshot_core` derives it.
-
-/// Deletes what anonymous users have kept past retention: flights with their screenshots
-/// and shares, sessions with their segments, then accounts left with nothing and unused.
+/// Deletes what anonymous users have kept past retention: flights with their screenshots,
+/// archived tracks and shares (`erase::erase`), sessions with their segments, then accounts left with nothing and unused.
 /// Objects go first, so a failure leaves the row for the next sweep, never an orphan.
 pub async fn sweep(db: &PgPool, store: &impl ObjectStore) -> Result<Swept, AppError> {
     let mut swept = Swept::default();
@@ -302,42 +300,13 @@ pub async fn sweep(db: &PgPool, store: &impl ObjectStore) -> Result<Swept, AppEr
     .bind(SWEEP_BATCH)
     .fetch_all(db)
     .await?;
-    'flights: for flight_id in flights {
-        let screenshots: Vec<(String, String, Option<uuid::Uuid>)> =
-            sqlx::query_as("SELECT hash, url, session_id FROM screenshots WHERE flight_id = $1")
-                .bind(flight_id)
-                .fetch_all(db)
-                .await?;
-        let shares: Vec<String> =
-            sqlx::query_scalar(
-                "SELECT r2_key FROM flight_shares                   WHERE remote_flight_id = $1 OR id = (SELECT share_id FROM flights WHERE id = $1)",
-            )
-                .bind(flight_id)
-                .fetch_all(db)
-                .await?;
-        let keys = screenshots
-            .iter()
-            .map(|(hash, url, session)| crate::handlers::screenshot_key(Some(flight_id), *session, hash, url))
-            .chain(shares);
-        for key in keys {
-            if let Err(e) = store.delete_public(&key).await {
-                tracing::error!(flight_id, key, "anonymous sweep could not delete object: {e}");
-                continue 'flights;
-            }
+    for flight_id in flights {
+        match crate::erase::erase(db, store, flight_id, false).await {
+            Ok(()) => swept.flights += 1,
+            // Its row stays for the next sweep.
+            Err(AppError::Storage(e)) => tracing::error!(flight_id, "anonymous sweep could not delete object: {e}"),
+            Err(e) => return Err(e),
         }
-        let mut tx = db.begin().await?;
-        sqlx::query(
-            "DELETE FROM flight_shares               WHERE remote_flight_id = $1 OR id = (SELECT share_id FROM flights WHERE id = $1)",
-        )
-            .bind(flight_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM flights WHERE id = $1")
-            .bind(flight_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        swept.flights += 1;
     }
 
     let sessions: Vec<(Uuid, Option<String>)> = sqlx::query_as(
