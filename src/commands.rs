@@ -388,10 +388,20 @@ pub async fn ack_command_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Which command types the connected sim can currently service, as last
-/// reported by the app in `statistics.capabilities.commands`. The live page
-/// renders only these, so an X-Plane pilot and an MSFS pilot see different
-/// control strips and a pilot with remote control off sees none.
+/// Every command type `validate` accepts.
+pub const KINDS: &[&str] = &[
+    "pause",
+    "set_heading_bug",
+    "ap_heading_mode",
+    "ap_nav_mode",
+    "set_vertical_speed",
+    "set_altitude",
+];
+
+/// Which command types the live page offers. Apps before 0.4.0 reported them in
+/// `statistics.capabilities.commands`, and that list is still honoured. Flights the
+/// service makes from telemetry carry none, and the app takes every command
+/// whenever it is signed in (which it must be to send telemetry), so they get all.
 pub fn advertised_commands(statistics: &serde_json::Value) -> Vec<String> {
     statistics
         .get("capabilities")
@@ -403,7 +413,7 @@ pub fn advertised_commands(statistics: &serde_json::Value) -> Vec<String> {
                 .map(|s| s.to_string())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| KINDS.iter().map(|k| k.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -463,9 +473,14 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_default_to_none_when_unreported() {
-        assert!(advertised_commands(&json!({})).is_empty());
-        assert!(advertised_commands(&json!({"capabilities": {}})).is_empty());
+    fn unreported_capabilities_offer_every_command() {
+        let all: Vec<String> = KINDS.iter().map(|k| k.to_string()).collect();
+        assert_eq!(advertised_commands(&json!({})), all);
+        assert_eq!(advertised_commands(&json!({"capabilities": {}})), all);
+        for kind in KINDS {
+            assert!(!matches!(validate(kind, &json!({})), Err(e) if e.starts_with("unknown")), "{kind}");
+        }
+        assert!(advertised_commands(&json!({"capabilities": {"commands": []}})).is_empty());
         assert_eq!(
             advertised_commands(&json!({"capabilities": {"commands": ["pause"]}})),
             vec!["pause".to_string()]

@@ -272,7 +272,7 @@
         if (available.length === 0 || doc.status === 'ended') {
             mount.innerHTML = available.length === 0 && doc.status !== 'ended'
                 ? `<div class="ctl-card"><div class="section-title">Sim controls</div>
-                   <div class="ctl-note">Enable “Allow remote commands” in ButterLog’s settings to control this flight from here.</div></div>`
+                   <div class="ctl-note">This flight’s ButterLog app offers no sim controls. Update ButterLog and keep it signed in to control this flight from here.</div></div>`
                 : '';
             return;
         }

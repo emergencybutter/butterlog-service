@@ -401,9 +401,10 @@ monitor loop rather than applied inline.
 
 Remote control of a running simulator deserves more caution than the rest of this design.
 
-* **Opt-in, off by default.** App config `allow_remote_commands`, default **off**, with a
-  separate `allow_beta_commands` sub-toggle also default off. Nobody gets their sim poked
-  because they logged in.
+* **On when signed in.** The `allow_remote_commands` and `allow_beta_commands` switches
+  were removed (app commit 7515160, 2026-09-02): a signed-in app takes every command, and
+  only the flight's owner can send one. Flights made from telemetry carry no
+  `capabilities.commands`, so the service offers the full set.
 * **Owner only.** Both the issue and the poll are authenticated and checked against
   `flights.user_id`. There is no delegation in v1 — see §11.
 * **TTL, default 30 s, max 120 s.** A command issued while the app was offline must not fire

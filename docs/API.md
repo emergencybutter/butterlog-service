@@ -488,7 +488,7 @@ Every finished flight, oldest ending first, paged by cursor. Meant for a service
 
 ### Sim Commands
 
-Commands sent from the web to a running simulator. **Owner-only in both directions** — this is the one non-public part of the live-flight feature. The desktop app also has to opt in (`Allow remote commands`, off by default) before it will poll at all.
+Commands sent from the web to a running simulator. **Owner-only in both directions** — this is the one non-public part of the live-flight feature. The desktop app polls for them whenever it is signed in and a flight is being flown; there is no separate switch.
 
 Command types, with stability. `pause` is **stable**; the rest are **beta** because they drive the aircraft's *default* autopilot, and study-level add-ons implement their own and ignore the stock events — the command is delivered, reported applied, and nothing moves.
 
