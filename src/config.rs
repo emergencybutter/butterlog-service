@@ -69,7 +69,7 @@ impl Config {
         let r2_telemetry_bucket = env::var("R2_TELEMETRY_BUCKET").ok().filter(|b| !b.is_empty());
 
         let public_base_url = env::var("PUBLIC_BASE_URL")
-            .unwrap_or_else(|_| "https://butterlog.flyvoyager.net".to_string())
+            .unwrap_or_else(|_| "https://log.butr.cc".to_string())
             .trim_end_matches('/')
             .to_string();
 

@@ -89,7 +89,7 @@ pub async fn me(db: &PgPool, base: &str, user_id: i64) -> Result<Me, AppError> {
         avatar_url: avatar
             .filter(|a| !a.is_empty())
             .map(|a| format!("https://cdn.discordapp.com/avatars/{discord_id}/{a}.png?size=64")),
-        flights_url: format!("{base}/content"),
+        flights_url: format!("{base}/"),
         settings_url: format!("{base}/content/settings"),
         flysto_connected: flysto,
         flysto_auto,

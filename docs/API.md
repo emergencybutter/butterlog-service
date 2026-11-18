@@ -5,21 +5,21 @@ This document describes the Web API for Butterlog, designed for consumption by b
 ## Base URL
 
 You can assume this base url is proxied to the webservice:
-`https://butterlog.flyvoyager.net/api/v0`
+`https://log.butr.cc/api/v0`
 
 ## Authentication
 
-In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://butterlog.flyvoyager.net/api/v0/auth/login` (append `?port=<port>` to have the callback redirect to a loopback listener at `http://127.0.0.1:<port>?token=<token>`). The user follows the Discord OAuth flow and the client receives an authentication token.
+In a client app, the user will click on "login with discord" or equivalent and the client will launch the browser to `https://log.butr.cc/api/v0/auth/login` (append `?port=<port>` to have the callback redirect to a loopback listener at `http://127.0.0.1:<port>?token=<token>`). The user follows the Discord OAuth flow and the client receives an authentication token.
 
 Each login issues a fresh token; previously issued tokens stay valid, so a web login does not invalidate a desktop app's saved token. Tokens idle for 180 days are pruned. Only a SHA-256 hash of the token is stored server-side.
 
-**Preferred: header authentication.** Send the token in the `Authorization` header and use the base url `https://butterlog.flyvoyager.net/api/v0`:
+**Preferred: header authentication.** Send the token in the `Authorization` header and use the base url `https://log.butr.cc/api/v0`:
 
 ```
 Authorization: Bearer <token>
 ```
 
-**Legacy: path-token authentication (deprecated).** Old clients embed the token in the URL and use the base url `https://butterlog.flyvoyager.net/api/v0/users/:webhookToken`. These routes keep working, but tokens in URLs end up in proxy/infrastructure logs -- new integrations should use the header form.
+**Legacy: path-token authentication (deprecated).** Old clients embed the token in the URL and use the base url `https://log.butr.cc/api/v0/users/:webhookToken`. These routes keep working, but tokens in URLs end up in proxy/infrastructure logs -- new integrations should use the header form.
 
 The authenticated endpoints below exist under both base urls with identical request/response shapes. Endpoints marked **public** require no authentication and exist only under `/api/v0`.
 
@@ -31,7 +31,7 @@ A user who hasn't signed in with Discord gets an anonymous account (`docs/sim-na
 `POST /anonymous`
 
 *   **Response:**
-    *   `201 Created`: `{ "userId", "token", "linkSecret", "username", "retentionDays" }`. `token` is the Bearer for everything else. `linkSecret` only reads: the link is `https://butterlog.flyvoyager.net/content/l/<linkSecret>`. Keep both; the service stores only their hashes.
+    *   `201 Created`: `{ "userId", "token", "linkSecret", "username", "retentionDays" }`. `token` is the Bearer for everything else. `linkSecret` only reads: the link is `https://log.butr.cc/content/l/<linkSecret>`. Keep both; the service stores only their hashes.
     *   `429 Too Many Requests`: more than 5 accounts from one address in the last hour, or 500 in all.
 
 #### Replace the Link
@@ -535,8 +535,7 @@ The endpoints below use the web session (the `token` cookie set by the OAuth cal
 
 ### Web Pages (HTML, public)
 
-*   `/` -- landing page with Discord login.
-*   `/content` -- latest flights from every pilot.
+*   `/` -- latest flights from every pilot (also at `/content`).
 *   `/content/flight/user/:user_id` -- one pilot's flights.
 *   `/content/flights/:id` -- flight detail page. While the flight is in progress and streaming a track, this serves the **live** variant instead: the same detail, polled from `/api/v0/flights/:id/live`, with a LIVE badge and (for the pilot) the sim control strip.
 *   `/content/flights/:id` -- a flight's page (track, 3D view, maps, charts, screenshots); live while it flies.

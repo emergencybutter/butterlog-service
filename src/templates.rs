@@ -27,7 +27,7 @@ impl Nav {
             active: active.to_string(),
             section: section.to_string(),
             signed_in: false,
-            flights_href: "/content".to_string(),
+            flights_href: "/".to_string(),
             aircraft_href: "/content/stats".to_string(),
             avatar_url: String::new(),
             display_name: String::new(),
@@ -46,10 +46,6 @@ impl Nav {
         }
     }
 }
-
-#[derive(Template)]
-#[template(path = "home.html")]
-pub struct HomePage;
 
 /// The telemetry comparison: the pilot's flights as the service analysed them, beside the
 /// app's (see `analysis::compare`).
@@ -303,7 +299,6 @@ mod tests {
 
     #[test]
     fn static_pages_render() {
-        assert!(HomePage.render().unwrap().contains("ButterLog Backend"));
         assert!(MapPage { nav: nav("map") }.render().unwrap().contains("ButterLog Live Traffic Map"));
     }
 
@@ -456,12 +451,12 @@ mod tests {
         assert!(html.contains(r#"href="/content/aircraft""#));
         // One Flights entry, with the Mine / Everyone switch on this list's tab.
         assert!(html.contains("<span>Flights</span>") && !html.contains("Community"));
-        assert!(html.contains(r#"<a href="/content" class="is-on">Everyone</a>"#));
+        assert!(html.contains(r#"<a href="/" class="is-on">Everyone</a>"#));
         assert!(html.contains(r#"<a href="/content/flight/user/7" class="">Mine</a>"#));
         // Signed out: no "mine" to switch to, and the rail opens everyone's.
         let html = FlightsPage { nav: Nav::anonymous("flights", "Flights"), ..page }.render().unwrap();
         assert!(!html.contains(">Mine</a>"));
-        assert!(html.contains(r#"href="/content""#) && html.contains(r#"href="/content/stats""#));
+        assert!(html.contains(r#"href="/""#) && html.contains(r#"href="/content/stats""#));
     }
 
     #[test]

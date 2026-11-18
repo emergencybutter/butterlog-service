@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the router with trace logging
     let app = Router::new()
-        .route("/", get(home_handler))
+        .route("/", get(content_handler))
         .route("/content", get(content_handler))
         .route("/content/logo.png", get(logo_handler))
         .route("/content/flight/user/:user_id", get(content_user_handler))
@@ -370,10 +370,6 @@ async fn log_requests(
     response
 }
 
-async fn home_handler() -> Result<Response, AppError> {
-    Ok(Html(templates::HomePage.render()?).into_response())
-}
-
 /// OAuth `state` is "{nonce}" or "{nonce}.{port}" — the nonce ties the callback
 /// to the browser that started the flow (CSRF protection); the optional port is
 /// the desktop app's loopback listener.
@@ -472,7 +468,7 @@ async fn callback_handler(
             let redirect_url = format!("http://127.0.0.1:{}?token={}", p, api_token);
             Redirect::temporary(&redirect_url).into_response()
         }
-        None => Redirect::temporary("/content").into_response(),
+        None => Redirect::temporary("/").into_response(),
     };
     response.headers_mut().insert(
         axum::http::header::SET_COOKIE,

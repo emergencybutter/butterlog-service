@@ -5,7 +5,7 @@
 # `docker compose up -d`. There is NO on-box build (no `build:` here).
 #
 # vya2net is an external docker network shared with postgres18 (the DB) and
-# nginx (which proxies butterlog.flyvoyager.net -> butterlog-service:8080).
+# nginx (which proxies log.butr.cc -> butterlog-service:8080).
 # See tools/deploy-service.md for the full runbook.
 services:
   butterlog-service:
