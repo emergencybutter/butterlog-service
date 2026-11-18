@@ -870,7 +870,7 @@ async fn upload_flight_share_core(
         spawn_discord_sync(&state, flight_id);
     }
 
-    let share_url = format!("{}/content/flights/share/{}", state.config.public_base_url, share_id);
+    let share_url = format!("{}/flights/share/{}", state.config.public_base_url, share_id);
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "url": share_url, "id": share_id }))))
 }
 

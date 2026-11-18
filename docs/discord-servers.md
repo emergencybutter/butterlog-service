@@ -11,12 +11,12 @@ together.
 
 ## For a server's admins
 
-1. **Add the bot.** Open <https://log.butr.cc/content/discord/invite>, or press
+1. **Add the bot.** Open <https://log.butr.cc/discord/invite>, or press
    **Add ButterLog to a server** in ButterLog's settings. Pick the server and authorize.
    Discord only lists servers where you are the owner or have **Manage Server**.
    The bot asks for four permissions, which it needs in every channel it posts to:
    **View Channel**, **Send Messages**, **Embed Links** and **Attach Files** (for screenshots).
-2. **Choose the channels.** Sign in at <https://log.butr.cc/content/settings> with
+2. **Choose the channels.** Sign in at <https://log.butr.cc/settings> with
    Discord. Under **Admin Controls**, each server the bot is in lists its text and announcement
    channels. Tick one to post flights there. Untick it to stop.
    Choosing channels takes more than Manage Server: you must be the server's **owner** or hold
@@ -89,7 +89,7 @@ cache. Anything that talks to Discord itself can only be checked by hand.
 Use a throwaway server, a second Discord account, and a ButterLog instance whose
 `DISCORD_BOT_TOKEN` is a test application's.
 
-1. Signed out, open `/content/discord/invite`. Discord's page names the application and the four
+1. Signed out, open `/discord/invite`. Discord's page names the application and the four
    permissions.
 2. Add the bot to the test server as its owner. Open settings: the server is listed under
    Admin Controls with its text and announcement channels, but no voice channel or forum.

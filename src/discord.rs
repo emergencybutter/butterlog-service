@@ -591,7 +591,7 @@ pub async fn sync_flight_discord(
     // url so Discord merges the screenshot images into the primary embed's
     // gallery instead of rendering them as a separate trailing block: the
     // flight's page, which shows all of it.
-    let gallery_url = format!("{}/content/flights/{}", base_url, flight_id);
+    let gallery_url = format!("{}/flights/{}", base_url, flight_id);
     // Where it is on FlySto, once processed there (`flysto.rs`).
     let flysto = crate::flysto::pointer(db, flight_id).await?;
     let flysto_url = Some(flysto.url()).filter(|u| !u.is_empty());
@@ -1427,7 +1427,7 @@ mod tests {
             ],
         };
         let user = DiscordUserInfo { discord_id: "0".into(), username: "pilot".into(), global_name: None, avatar: None };
-        let (embeds, _) = assemble_embeds(&statistics, &user, "", "https://b/content/flights/1", None, None, &landed).unwrap();
+        let (embeds, _) = assemble_embeds(&statistics, &user, "", "https://b/flights/1", None, None, &landed).unwrap();
         let embed = serde_json::to_value(&embeds[0]).unwrap();
         let fields = embed["fields"].as_array().unwrap();
         let field = |name: &str| fields.iter().find(|f| f["name"] == name).and_then(|f| f["value"].as_str()).unwrap_or_default().to_string();

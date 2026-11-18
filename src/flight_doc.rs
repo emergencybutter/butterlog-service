@@ -227,8 +227,8 @@ pub async fn covering_handler(
     let base = &state.config.public_base_url;
     Ok(Json(json!({
         "id": id,
-        "url": format!("{base}/content/flights/{id}"),
-        "export_url": format!("{base}/content/flights/{id}/export/flysto.csv"),
+        "url": format!("{base}/flights/{id}"),
+        "export_url": format!("{base}/flights/{id}/export/flysto.csv"),
     }))
     .into_response())
 }

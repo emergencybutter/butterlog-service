@@ -51,8 +51,8 @@ type Row = (i64, String, Option<String>, Option<String>, Option<DateTime<Utc>>);
 fn flight(base: &str, (id, departure, arrival, aircraft, ended_at): Row) -> FlightRef {
     FlightRef {
         id,
-        url: format!("{base}/content/flights/{id}"),
-        debrief_url: format!("{base}/content/flights/{id}#debrief"),
+        url: format!("{base}/flights/{id}"),
+        debrief_url: format!("{base}/flights/{id}#debrief"),
         departure,
         arrival,
         aircraft,
@@ -90,7 +90,7 @@ pub async fn me(db: &PgPool, base: &str, user_id: i64) -> Result<Me, AppError> {
             .filter(|a| !a.is_empty())
             .map(|a| format!("https://cdn.discordapp.com/avatars/{discord_id}/{a}.png?size=64")),
         flights_url: format!("{base}/"),
-        settings_url: format!("{base}/content/settings"),
+        settings_url: format!("{base}/settings"),
         flysto_connected: flysto,
         flysto_auto,
         live,
@@ -155,7 +155,7 @@ mod tests {
         let got = me(&db, "https://b", user).await.unwrap();
         let last = got.last_ended.unwrap();
         assert_eq!((last.id, last.departure.as_str()), (newer, "KPAE"));
-        assert_eq!(last.debrief_url, format!("https://b/content/flights/{newer}#debrief"));
+        assert_eq!(last.debrief_url, format!("https://b/flights/{newer}#debrief"));
         assert_eq!(last.aircraft.as_deref(), Some("Cessna 172"));
         assert_eq!(got.live.unwrap().id, live);
     }

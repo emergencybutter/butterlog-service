@@ -1,4 +1,4 @@
-//! The comparison page's data (`/content/telemetry`): a pilot's telemetry flights, each
+//! The comparison page's data (`/telemetry`): a pilot's telemetry flights, each
 //! measure as the service and the app saw it, and whether the difference is beyond what
 //! the parity check allows (the tolerances of the fixture tests in `analysis/mod.rs`).
 //! Below each, the Discord post each side's statistics document makes (rollout phase 5's
@@ -441,7 +441,7 @@ mod tests {
             }],
         };
         let html = page.render().unwrap();
-        assert!(html.contains("CYZF → CYZF") && html.contains("/content/flights/548"));
+        assert!(html.contains("CYZF → CYZF") && html.contains("/flights/548"));
         assert!(html.contains("C172SP &lt;G1000&gt;"), "escaped");
         assert!(html.contains("-212.40 fpm"));
         assert!(html.contains("112.4 nm"));

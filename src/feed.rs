@@ -7,7 +7,7 @@
 //! one that was down for a day picks up where it stopped.
 //!
 //! Public, like the live map and the flight history pages: nothing here is not
-//! already on `/content`. The Discord id rides along because it is how a
+//! already on the flights list (`/`). The Discord id rides along because it is how a
 //! consumer that signs its users in with Discord knows whose flight it is.
 
 use axum::{

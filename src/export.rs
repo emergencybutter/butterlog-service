@@ -165,7 +165,7 @@ pub async fn owned_csv(state: &AppState, flight_id: i64, viewer: Option<i64>) ->
         .map_err(|e| AppError::Storage(e.to_string()))
 }
 
-/// `GET /content/flights/:id/export/flysto.csv`, the signed-in owner's only.
+/// `GET /flights/:id/export/flysto.csv`, the signed-in owner's only.
 pub async fn flysto_handler(
     State(state): State<AppState>,
     Path(flight_id): Path<i64>,

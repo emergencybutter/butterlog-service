@@ -151,7 +151,7 @@ pub async fn delete_token(State(state): State<AppState>, headers: HeaderMap) -> 
     Ok(Json(json!({ "connected": false })))
 }
 
-/// `POST /content/flights/:id/upload/flysto`: the flight's owner sends it to their
+/// `POST /flights/:id/upload/flysto`: the flight's owner sends it to their
 /// FlySto, as the CSV the Export button saves.
 pub async fn upload_handler(
     State(state): State<AppState>,
@@ -327,7 +327,7 @@ async fn where_it_is(state: &AppState, flight_id: i64, token: &str) -> Result<Va
     Ok(Pointer::of(processed, &logs).json())
 }
 
-/// `GET /content/flights/:id/upload/flysto`: where the owner's flight is on FlySto, which
+/// `GET /flights/:id/upload/flysto`: where the owner's flight is on FlySto, which
 /// the page asks until FlySto has processed it.
 pub async fn status_handler(
     State(state): State<AppState>,

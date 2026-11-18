@@ -31,7 +31,7 @@ A user who hasn't signed in with Discord gets an anonymous account (`docs/sim-na
 `POST /anonymous`
 
 *   **Response:**
-    *   `201 Created`: `{ "userId", "token", "linkSecret", "username", "retentionDays" }`. `token` is the Bearer for everything else. `linkSecret` only reads: the link is `https://log.butr.cc/content/l/<linkSecret>`. Keep both; the service stores only their hashes.
+    *   `201 Created`: `{ "userId", "token", "linkSecret", "username", "retentionDays" }`. `token` is the Bearer for everything else. `linkSecret` only reads: the link is `https://log.butr.cc/l/<linkSecret>`. Keep both; the service stores only their hashes.
     *   `429 Too Many Requests`: more than 5 accounts from one address in the last hour, or 500 in all.
 
 #### Replace the Link
@@ -51,7 +51,7 @@ Called with the new Discord token as Bearer, once the user has signed in.
     *   `404 Not Found`: no anonymous account for that token, including one already claimed.
 
 #### The Link (web)
-`GET /content/l/:linkSecret`
+`GET /l/:linkSecret`
 
 Sets a `link` cookie and redirects to the pilot's flight list, so the flight pages and live updates behind it can be read. Pages of anonymous pilots carry `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`.
 
@@ -258,7 +258,7 @@ Removes a screenshot from a flight (database record and stored object).
 
 ### Flight Pages and Shares
 
-There are no shares any more: every flight's page, `/content/flights/:id`, shows all of it (track, 3D view, maps, graphs, summary, screenshots) to everyone, as its other details always were (an anonymous pilot's only through their link). The track comes from the flight's points while it has them; a week after it ends they are saved to R2 (`flights.track_key`) and pruned, and the page reads the saved copy; a flight pruned before that existed reads the share an app once uploaded of it.
+There are no shares any more: every flight's page, `/flights/:id`, shows all of it (track, 3D view, maps, graphs, summary, screenshots) to everyone, as its other details always were (an anonymous pilot's only through their link). The track comes from the flight's points while it has them; a week after it ends they are saved to R2 (`flights.track_key`) and pruned, and the page reads the saved copy; a flight pruned before that existed reads the share an app once uploaded of it.
 
 #### Find the Flight the Service Made
 `GET /flights/covering?from=<epoch s>&to=<epoch s>`
@@ -277,7 +277,7 @@ The app has no id for a flight the service made from its telemetry; it finds it 
     *   `201 Created`: Returns `{ "url": "<share link>", "id": "<share uuid>" }`.
     *   `400 Bad Request`: Empty body, invalid gzip/JSON, or decompressed size over the limit.
 
-`/content/flights/share/:share_id` redirects (308) to its flight's page; a share that never found its flight still renders what it was uploaded with.
+`/flights/share/:share_id` redirects (308) to its flight's page; a share that never found its flight still renders what it was uploaded with.
 
 #### Delete a Share
 `DELETE /flights/share/:share_id`
@@ -294,20 +294,20 @@ Deletes a share you own (database record and stored object).
 Returns the decompressed share JSON. No authentication; served with `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=86400`.
 
 #### Export for FlySto
-`GET /content/flights/:id/export/flysto.csv`
+`GET /flights/:id/export/flysto.csv`
 
 The flight as a Garmin G1000 CSV, the format FlySto and CloudAhoy import, one row a second from its telemetry; channels the telemetry lacks are empty. The signed-in pilot's only (session cookie, or `Authorization: Bearer` from the app), linked from the flight page when the flight was found in telemetry.
 
 *   **Response:** `200 OK` with `Content-Type: text/csv` as an attachment; `404 Not Found` for someone else's flight, or one with no telemetry.
 
 #### Upload to FlySto
-`POST /content/flights/:id/upload/flysto`
+`POST /flights/:id/upload/flysto`
 
 Sends the flight's CSV (as the export above), zipped, to the pilot's FlySto account: `POST https://www.flysto.net/public-api/log-upload?id=butterlog-<id>` with `Content-Type: application/zip` and the pilot's FlySto API token as `Authorization: Bearer` (FlySto's API: `https://www.flysto.net/public-api/swagger`). The signed-in pilot's own flights only. The flight page posts it with `Content-Type: application/json`.
 
 *   **Response:** `200 OK` `{ "uploaded": true, "duplicate": false, "fileId": "<FlySto's>" }`, `duplicate` true when FlySto already had the log (its 409); `409 Conflict` when the pilot hasn't connected FlySto; `404 Not Found` for someone else's flight or one with no telemetry; `502 Bad Gateway` with FlySto's reason when it refuses (an expired token says to update it in Settings).
 
-The upload answers, and `GET /content/flights/:id/upload/flysto` (the owner's) says, where the flight is on FlySto: `{ "state": "none" | "processing" | "done" | "empty", "url": "<its FlySto log>" }`. Each upload's FlySto `fileId` is kept in `flysto_uploads`; while it is `processing`, the GET asks FlySto (`GET /public-api/log-files/{fileId}`: `{"processed": ..., "logs": [...]}`, about ten seconds after an upload) and keeps the logs it made, the first linked as `https://www.flysto.net/logs/<id>`. `empty`: FlySto found no flight in the file. A file deleted on FlySto (its 404) is forgotten, back to `none`. The flight page links a `done` flight's log in place of the upload.
+The upload answers, and `GET /flights/:id/upload/flysto` (the owner's) says, where the flight is on FlySto: `{ "state": "none" | "processing" | "done" | "empty", "url": "<its FlySto log>" }`. Each upload's FlySto `fileId` is kept in `flysto_uploads`; while it is `processing`, the GET asks FlySto (`GET /public-api/log-files/{fileId}`: `{"processed": ..., "logs": [...]}`, about ten seconds after an upload) and keeps the logs it made, the first linked as `https://www.flysto.net/logs/<id>`. `empty`: FlySto found no flight in the file. A file deleted on FlySto (its 404) is forgotten, back to `none`. The flight page links a `done` flight's log in place of the upload.
 
 For a pilot who connected FlySto, flights go by themselves: each minute the service uploads those ended since the pilot connected (`users.flysto_since`), within two days, once their telemetry span is recorded. That is as soon as the flight is over, since an open session's analysis records the flights it finds over, not only the analysis at the session's end. A refused upload is tried again 10, 20, 30… minutes later, 5 times at most (`flysto_auto_attempts`). The same pass asks FlySto where the files it is processing went; once processed, the flight's Discord post is synced, with a **FlySto** field linking its log.
 
@@ -522,7 +522,7 @@ Command types, with stability. `pause` is **stable**; the rest are **beta** beca
 
 How a server adds the bot and chooses its channels, and how a pilot's channels follow from that, is in [discord-servers.md](discord-servers.md).
 
-*   `GET /content/discord/invite` -- no authentication. Redirects to Discord's page for adding the bot to a server, asking for View Channel, Send Messages, Embed Links and Attach Files.
+*   `GET /discord/invite` -- no authentication. Redirects to Discord's page for adding the bot to a server, asking for View Channel, Send Messages, Embed Links and Attach Files.
 
 The endpoints below use the web session (the `token` cookie set by the OAuth callback) or a Bearer token.
 
@@ -535,12 +535,12 @@ The endpoints below use the web session (the `token` cookie set by the OAuth cal
 
 ### Web Pages (HTML, public)
 
-*   `/` -- latest flights from every pilot (also at `/content`).
-*   `/content/flight/user/:user_id` -- one pilot's flights.
-*   `/content/flights/:id` -- flight detail page. While the flight is in progress and streaming a track, this serves the **live** variant instead: the same detail, polled from `/api/v0/flights/:id/live`, with a LIVE badge and (for the pilot) the sim control strip.
-*   `/content/flights/:id` -- a flight's page (track, 3D view, maps, charts, screenshots); live while it flies.
-*   `/content/flights/share/:share_id` -- redirects to its flight's page.
-*   `/content/settings` -- Discord notification settings (requires login).
+*   `/` -- latest flights from every pilot. Old `/content/...` addresses redirect to the paths here.
+*   `/pilots/:user_id` -- one pilot's flights.
+*   `/flights/:id` -- flight detail page. While the flight is in progress and streaming a track, this serves the **live** variant instead: the same detail, polled from `/api/v0/flights/:id/live`, with a LIVE badge and (for the pilot) the sim control strip.
+*   `/flights/:id` -- a flight's page (track, 3D view, maps, charts, screenshots); live while it flies.
+*   `/flights/share/:share_id` -- redirects to its flight's page.
+*   `/settings` -- Discord notification settings (requires login).
 *   `/map` -- live traffic map.
 
 ---

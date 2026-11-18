@@ -43,7 +43,7 @@ pub struct AnonymousAccount {
     pub user_id: i64,
     /// API token: the Bearer for every write.
     pub token: String,
-    /// Read-only secret; the link is `/content/l/<linkSecret>`.
+    /// Read-only secret; the link is `/l/<linkSecret>`.
     pub link_secret: String,
     pub username: String,
     pub retention_days: i32,
@@ -410,7 +410,7 @@ pub async fn claim_handler(
     claim(&state.db, user_id, &body.anonymous_token).await.map(Json)
 }
 
-/// `/content/l/<secret>`: remembers the link in a cookie and opens the user's flights, so every
+/// `/l/<secret>`: remembers the link in a cookie and opens the user's flights, so every
 /// page and live update after it can be read without the secret in the URL.
 pub async fn link_handler(
     State(state): State<AppState>,
@@ -428,7 +428,7 @@ pub async fn link_handler(
         "{LINK_COOKIE}={secret}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
         RETENTION_DAYS as i64 * 86_400
     );
-    let mut response = Redirect::to(&format!("/content/flight/user/{user_id}")).into_response();
+    let mut response = Redirect::to(&format!("/pilots/{user_id}")).into_response();
     let headers = response.headers_mut();
     for (name, value) in private {
         headers.insert(name, value);

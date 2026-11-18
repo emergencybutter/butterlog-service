@@ -28,7 +28,7 @@
     const failed = async r => {
         const data = await r.json().catch(() => ({}));
         const msg = data.error || ('FlySto request failed (' + r.status + ')');
-        const fix = /Settings/.test(msg) ? ' <a href="/content/settings#flysto">Open Settings</a>' : '';
+        const fix = /Settings/.test(msg) ? ' <a href="/settings#flysto">Open Settings</a>' : '';
         toast(esc(msg) + fix, true);
     };
 

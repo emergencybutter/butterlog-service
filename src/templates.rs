@@ -4,7 +4,7 @@
 
 use askama::Template;
 
-/// Navigation state for the `/content` application chrome. Every page rendered
+/// Navigation state for the web pages' application chrome. Every page rendered
 /// inside the shell carries one, and `_app_shell.html` reads it directly.
 pub struct Nav {
     /// `flights` | `aircraft` | `map` | `settings`. Drives the active mark.
@@ -28,7 +28,7 @@ impl Nav {
             section: section.to_string(),
             signed_in: false,
             flights_href: "/".to_string(),
-            aircraft_href: "/content/stats".to_string(),
+            aircraft_href: "/aircraft".to_string(),
             avatar_url: String::new(),
             display_name: String::new(),
         }
@@ -39,8 +39,8 @@ impl Nav {
             active: active.to_string(),
             section: section.to_string(),
             signed_in: true,
-            flights_href: format!("/content/flight/user/{}", user_id),
-            aircraft_href: "/content/aircraft".to_string(),
+            flights_href: format!("/pilots/{}", user_id),
+            aircraft_href: "/my/aircraft".to_string(),
             avatar_url: avatar,
             display_name: name,
         }
@@ -395,8 +395,8 @@ mod tests {
             urls_json: r#"["https://cdn.example/s/1.webp"]"#.into(),
             touchdown_stats: vec![StatItem { label: "Vertical Speed".into(), value: "-121.00 fpm".into() }],
             peak_stats: vec![StatItem { label: "Indicated Airspeed".into(), value: "142.00 kts".into() }],
-            export_href: "/content/flights/7/export/flysto.csv".into(),
-            upload_href: "/content/flights/7/upload/flysto".into(),
+            export_href: "/flights/7/export/flysto.csv".into(),
+            upload_href: "/flights/7/upload/flysto".into(),
             flysto_connected: true,
             flysto_state: "none".into(),
             flysto_url: String::new(),
@@ -414,7 +414,7 @@ mod tests {
         // Stats cards and the export render.
         assert!(html.contains("Vertical Speed") && html.contains("-121.00 fpm"));
         assert!(html.contains("142.00 kts"));
-        assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
+        assert!(html.contains(r#"href="/flights/7/export/flysto.csv""#));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
             subtitle: "Flown by every pilot".into(),
             scope: "everyone".into(),
             flights: vec![FlightCard {
-                href: "/content/flights/9".into(),
+                href: "/flights/9".into(),
                 avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
                 pilot: "Pilot".into(),
                 dep: "EGLL".into(),
@@ -440,23 +440,23 @@ mod tests {
             }],
         };
         let html = page.render().unwrap();
-        assert!(html.contains(r#"href="/content/flight/user/7""#));
+        assert!(html.contains(r#"href="/pilots/7""#));
         assert!(html.contains("ONGOING"));
         // Deduced type and airline render on the card.
         assert!(html.contains("British Airways"));
         // Every flight leads to its page.
-        assert!(html.contains(r#"<a class="row" href="/content/flights/9">"#));
+        assert!(html.contains(r#"<a class="row" href="/flights/9">"#));
         // The rail is the navigation now, and it knows whose session this is.
-        assert!(html.contains(r#"href="/content/flight/user/7""#));
-        assert!(html.contains(r#"href="/content/aircraft""#));
+        assert!(html.contains(r#"href="/pilots/7""#));
+        assert!(html.contains(r#"href="/my/aircraft""#));
         // One Flights entry, with the Mine / Everyone switch on this list's tab.
         assert!(html.contains("<span>Flights</span>") && !html.contains("Community"));
         assert!(html.contains(r#"<a href="/" class="is-on">Everyone</a>"#));
-        assert!(html.contains(r#"<a href="/content/flight/user/7" class="">Mine</a>"#));
+        assert!(html.contains(r#"<a href="/pilots/7" class="">Mine</a>"#));
         // Signed out: no "mine" to switch to, and the rail opens everyone's.
         let html = FlightsPage { nav: Nav::anonymous("flights", "Flights"), ..page }.render().unwrap();
         assert!(!html.contains(">Mine</a>"));
-        assert!(html.contains(r#"href="/""#) && html.contains(r#"href="/content/stats""#));
+        assert!(html.contains(r#"href="/""#) && html.contains(r#"href="/aircraft""#));
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
     fn dump_shell_pages() {
         let out = std::env::var("SHELL_DUMP_DIR").expect("SHELL_DUMP_DIR");
         let mk = |dep: &str, arr: &str, ac: &str, icao: &str, air: &str, sim: &str, d: &str, badge: &str, shots: Vec<String>| FlightCard {
-            href: "/content/flights/9".into(),
+            href: "/flights/9".into(),
             avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
             pilot: "IronClaw737".into(),
             dep: dep.into(), arr: arr.into(), airframe: ac.into(),
@@ -508,14 +508,14 @@ mod tests {
             value: format!("{} flights", 40 - i * 6),
             sub: format!("{:.1} h · {} nm", 61.0 - i as f64 * 8.0, 4200 - i * 500),
             pct: (100 - (i - 1) * 18) as u32,
-            href: format!("/content/aircraft/{}", ["A20N", "C185", "B738", "A306", "C68A"][i - 1]),
+            href: format!("/my/aircraft/{}", ["A20N", "C185", "B738", "A306", "C68A"][i - 1]),
             // Not every type has a screenshot.
             shot: if i == 3 { String::new() } else { shot.clone() },
         }).collect::<Vec<_>>();
         let stats = StatsPage {
             nav: nav("aircraft"), mine: true,
-            scope_all_href: "/content/stats".into(),
-            scope_mine_href: "/content/aircraft".into(),
+            scope_all_href: "/aircraft".into(),
+            scope_mine_href: "/my/aircraft".into(),
             by_flights: rows(5), by_time: rows(5), by_distance: rows(5),
         };
         std::fs::write(format!("{}/shell_aircraft.html", out), stats.render().unwrap()).unwrap();
@@ -549,7 +549,7 @@ mod tests {
 
         let shot = |dep: &str, arr: &str, who: &str, d: &str| TypeShot {
             url: "https://placehold.co/640x400/1e2220/8a938c?text=+".into(),
-            flight_href: "/content/flights/share/abc".into(),
+            flight_href: "/flights/share/abc".into(),
             dep: dep.into(), arr: arr.into(), pilot: who.into(), date_str: d.into(),
         };
         let shots = vec![
@@ -565,8 +565,8 @@ mod tests {
             icao: "A20N".into(),
             name: "Airbus A320 Neo".into(),
             mine: true,
-            scope_all_href: "/content/stats/A20N".into(),
-            scope_mine_href: "/content/aircraft/A20N".into(),
+            scope_all_href: "/aircraft/A20N".into(),
+            scope_mine_href: "/my/aircraft/A20N".into(),
             urls_json: serde_json::to_string(&urls).unwrap(),
             shots,
         };
@@ -625,8 +625,8 @@ mod tests {
     fn flight_view_owner_export_and_json() {
         let owner = FlightViewPage {
             nav: nav("flights"),
-            export_href: "/content/flights/7/export/flysto.csv".into(),
-            upload_href: "/content/flights/7/upload/flysto".into(),
+            export_href: "/flights/7/export/flysto.csv".into(),
+            upload_href: "/flights/7/upload/flysto".into(),
             flysto_connected: true,
             flysto_state: "none".into(),
             flysto_url: String::new(),
@@ -635,12 +635,12 @@ mod tests {
             deletable: true,
         };
         let html = owner.render().unwrap();
-        assert!(html.contains(r#"href="/content/flights/7/export/flysto.csv""#));
+        assert!(html.contains(r#"href="/flights/7/export/flysto.csv""#));
         assert!(html.contains(r#"const SHARE_DATA = {"summary":{"x":"</script>"}};"#));
         assert!(!html.contains("Delete share"));
         // Its pilot may delete it, once they confirm.
         assert!(html.contains(r#"id="fv-delete-open""#) && html.contains(r#"id="fv-delete""#));
-        assert!(html.contains(r#"data-flysto-upload="/content/flights/7/upload/flysto""#));
+        assert!(html.contains(r#"data-flysto-upload="/flights/7/upload/flysto""#));
         // Already on FlySto: the page links its log rather than offering it again.
         let on_flysto = FlightViewPage {
             flysto_state: "done".into(),

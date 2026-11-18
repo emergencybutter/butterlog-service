@@ -120,21 +120,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the router with trace logging
     let app = Router::new()
         .route("/", get(content_handler))
-        .route("/content", get(content_handler))
-        .route("/content/logo.png", get(logo_handler))
-        .route("/content/flight/user/:user_id", get(content_user_handler))
-        .route("/content/settings", get(settings_handler))
-        .route("/content/telemetry", get(telemetry_handler))
-        .route("/content/stats", get(stats_handler))
-        .route("/content/aircraft", get(aircraft_handler))
-        .route("/content/aircraft/:icao", get(aircraft_type_mine_handler))
-        .route("/content/stats/:icao", get(aircraft_type_all_handler))
+        .route("/logo.png", get(logo_handler))
+        .route("/pilots/:user_id", get(content_user_handler))
+        .route("/settings", get(settings_handler))
+        .route("/telemetry", get(telemetry_handler))
+        .route("/aircraft", get(stats_handler))
+        .route("/my/aircraft", get(aircraft_handler))
+        .route("/my/aircraft/:icao", get(aircraft_type_mine_handler))
+        .route("/aircraft/:icao", get(aircraft_type_all_handler))
         .route("/map", get(map_handler))
         .route("/api/v0/map/data", get(map_data_handler))
         .route("/api/v0/stats/aircraft", get(aircraft_stats_handler))
         .route("/api/v0/user/:user_id/current", get(user_current_flight_handler))
         .route("/api/v0/user/by-discord/:discord_id/current", get(user_current_flight_by_discord_handler))
-        .route("/content/discord/invite", get(discord_invite_handler))
+        .route("/discord/invite", get(discord_invite_handler))
         .route("/api/v0/auth/login", get(login_handler))
         .route("/api/v0/auth/discord/callback", get(callback_handler))
         .route(
@@ -216,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v0/anonymous", post(anonymous::create_handler))
         .route("/api/v0/anonymous/link", post(anonymous::rotate_link_handler))
         .route("/api/v0/account/claim", post(anonymous::claim_handler))
-        .route("/content/l/:secret", get(anonymous::link_handler))
+        .route("/l/:secret", get(anonymous::link_handler))
         .route("/api/v0/flights/:id/end", post(track::end_flight_handler))
         // Public, like the map and the flight history pages it mirrors.
         .route("/api/v0/flights/:id/live", get(live::live_flight_handler))
@@ -268,14 +267,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v0/flights/share/:share_id",
             get(handlers::get_flight_share_json_handler).delete(handlers::delete_flight_share_session_handler),
         )
-        .route("/content/flights/share/:share_id", get(flight_share_detail_handler))
-        .route("/content/flights/:id/export/flysto.csv", get(export::flysto_handler))
-        .route("/content/flights/:id/upload/flysto", post(flysto::upload_handler).get(flysto::status_handler))
+        .route("/flights/share/:share_id", get(flight_share_detail_handler))
+        .route("/flights/:id/export/flysto.csv", get(export::flysto_handler))
+        .route("/flights/:id/upload/flysto", post(flysto::upload_handler).get(flysto::status_handler))
         .route("/api/v0/me/flysto", put(flysto::put_token).delete(flysto::delete_token))
         .route("/api/v0/me/flysto/auto", put(flysto::put_auto))
         // The app's account panel, web commands and "flight done" notification.
         .route("/api/v0/me", get(me::me_handler))
-        .route("/content/flights/:id", get(flight_detail_handler))
+        .route("/flights/:id", get(flight_detail_handler))
         .route(
             "/api/v0/users/:webhook_token/multiplayer/ping",
             post(handlers::multiplayer_ping_handler),
@@ -329,10 +328,43 @@ fn redact_path(path: &str) -> String {
     }
 }
 
-/// A page asked for with a trailing slash (`/content/`, a link someone typed or
-/// pasted) goes to the page without it; anything else unknown is a 404.
+/// Where a page that used to live under `/content` lives now. `None` for
+/// any other path.
+fn legacy_content_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/content")?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let rest = rest.trim_end_matches('/');
+    // Never `//host`: a browser reads that as another site.
+    if rest.starts_with("//") || rest.contains('\\') {
+        return None;
+    }
+    Some(if let Some(r) = rest.strip_prefix("/flight/user/") {
+        format!("/pilots/{r}")
+    } else if let Some(r) = rest.strip_prefix("/stats") {
+        format!("/aircraft{r}")
+    } else if let Some(r) = rest.strip_prefix("/aircraft") {
+        format!("/my/aircraft{r}")
+    } else if rest.is_empty() {
+        "/".to_string()
+    } else {
+        rest.to_string()
+    })
+}
+
+/// An old `/content/...` address goes to where the page lives now (308, so a
+/// POST stays a POST). A page asked for with a trailing slash (a link someone
+/// typed or pasted) goes to the page without it; anything else unknown is a 404.
 async fn trailing_slash(method: axum::http::Method, uri: axum::http::Uri) -> Response {
     let path = uri.path();
+    if let Some(to) = legacy_content_path(path) {
+        let to = match uri.query() {
+            Some(q) => format!("{to}?{q}"),
+            None => to,
+        };
+        return Redirect::permanent(&to).into_response();
+    }
     // Never `//host`: a browser reads that as another site.
     let local = !path.starts_with("//") && !path.contains('\\');
     if (method == axum::http::Method::GET || method == axum::http::Method::HEAD) && local && path.len() > 1 && path.ends_with('/') {
@@ -708,8 +740,8 @@ async fn flight_detail_page(
     let exportable = is_owner && export::exportable(&state.db, flight_id).await?;
     let (export_href, upload_href) = if exportable {
         (
-            format!("/content/flights/{flight_id}/export/flysto.csv"),
-            format!("/content/flights/{flight_id}/upload/flysto"),
+            format!("/flights/{flight_id}/export/flysto.csv"),
+            format!("/flights/{flight_id}/upload/flysto"),
         )
     } else {
         (String::new(), String::new())
@@ -871,7 +903,7 @@ fn landing_badge_html(stats: &serde_json::Value) -> Option<String> {
     ))
 }
 
-/// Build the `/content` rail state for the current session. A signed-out
+/// Build the app-chrome rail state for the current session. A signed-out
 /// visitor still gets the full menu; the personal entries route through login.
 async fn nav_for(
     state: &AppState,
@@ -1038,7 +1070,7 @@ async fn render_flights_page(
                 r#"<div class="badge badge-ongoing">ONGOING</div>"#.to_string()
             };
             templates::FlightCard {
-                href: format!("/content/flights/{}", flight_id),
+                href: format!("/flights/{}", flight_id),
                 avatar_url,
                 pilot: flight.7.unwrap_or(flight.6),
                 dep: flight.1,
@@ -1130,7 +1162,7 @@ fn aircraft_type_of(statistics: &serde_json::Value) -> String {
 }
 
 /// Intentionally public (no auth): the live map shows every active flight's
-/// position to anyone, mirroring the public /content flight history.
+/// position to anyone, mirroring the public flight history.
 async fn map_data_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -1245,7 +1277,7 @@ fn flight_span_seconds(
         .filter(|&s| s > 0)
 }
 
-/// Shared aggregation behind both the JSON endpoint and the `/content/stats`
+/// Shared aggregation behind both the JSON endpoint and the `/aircraft`
 /// page. See `aircraft_stats_handler` for the field semantics.
 async fn aggregate_aircraft_stats(
     db: &sqlx::PgPool,
@@ -1447,7 +1479,7 @@ fn to_stat_rows(
         .collect()
 }
 
-/// Public aircraft-usage leaderboard page (`/content/stats`): the same three
+/// Public aircraft-usage leaderboard page (`/aircraft`): the same three
 /// rankings as `GET /api/v0/stats/aircraft`, rendered as bar charts.
 async fn stats_handler(
     State(state): State<AppState>,
@@ -1456,7 +1488,7 @@ async fn stats_handler(
     render_aircraft_page(&state, &headers, false).await
 }
 
-/// `/content/aircraft` - the same boards limited to the signed-in pilot. A
+/// `/my/aircraft` - the same boards limited to the signed-in pilot. A
 /// visitor who is not signed in has no "mine" to show, so they get everyone's.
 async fn aircraft_handler(
     State(state): State<AppState>,
@@ -1508,7 +1540,7 @@ async fn render_aircraft_type_page(
             let _ = (avatar, discord_id);
             templates::TypeShot {
                 url,
-                flight_href: format!("/content/flights/{}", flight_id),
+                flight_href: format!("/flights/{}", flight_id),
                 dep,
                 arr: arr.unwrap_or_else(|| "In Flight".to_string()),
                 pilot: global_name.unwrap_or(username),
@@ -1523,12 +1555,12 @@ async fn render_aircraft_type_page(
         name: aircraft_names().get(&icao).cloned().unwrap_or_default(),
         mine,
         scope_all_href: if viewer.is_some() {
-            format!("/content/stats/{}", percent_encode_segment(&icao))
+            format!("/aircraft/{}", percent_encode_segment(&icao))
         } else {
             String::new()
         },
         scope_mine_href: if viewer.is_some() {
-            format!("/content/aircraft/{}", percent_encode_segment(&icao))
+            format!("/my/aircraft/{}", percent_encode_segment(&icao))
         } else {
             String::new()
         },
@@ -1559,7 +1591,7 @@ async fn render_aircraft_page(
 ) -> Result<Response, AppError> {
     let viewer = handlers::get_user_id_from_session(&state.db, headers).await.ok();
     let mine = mine && viewer.is_some();
-    let base = if mine { "/content/aircraft" } else { "/content/stats" };
+    let base = if mine { "/my/aircraft" } else { "/aircraft" };
     let s = aggregate_aircraft_stats(&state.db, if mine { viewer } else { None }).await?;
     let shots = aircraft_shots(&state.db, if mine { viewer } else { None }).await?;
 
@@ -1573,8 +1605,8 @@ async fn render_aircraft_page(
         nav: nav_for(state, headers, "aircraft", "Aircrafts").await,
         mine,
         // The scope switch only appears for someone who has a "mine" to switch to.
-        scope_all_href: if viewer.is_some() { "/content/stats".to_string() } else { String::new() },
-        scope_mine_href: if viewer.is_some() { "/content/aircraft".to_string() } else { String::new() },
+        scope_all_href: if viewer.is_some() { "/aircraft".to_string() } else { String::new() },
+        scope_mine_href: if viewer.is_some() { "/my/aircraft".to_string() } else { String::new() },
         by_flights: to_stat_rows(
             &s.by_flights,
             |a| a.flights as f64,
@@ -1721,7 +1753,7 @@ async fn flight_share_detail_handler(
     // to its flight's page, which shows all of it. One that never found its flight still
     // shows what it was uploaded with.
     if let Some(id) = flight_id {
-        return Ok(axum::response::Redirect::permanent(&format!("/content/flights/{id}")).into_response());
+        return Ok(axum::response::Redirect::permanent(&format!("/flights/{id}")).into_response());
     }
 
     let compressed = match state.r2.download_object(&key).await {
@@ -1768,15 +1800,46 @@ mod tests {
     async fn a_trailing_slash_goes_to_the_page_without_it() {
         use axum::http::{header::LOCATION, Method, StatusCode, Uri};
         let go = |m: Method, u: &'static str| async move { trailing_slash(m, Uri::from_static(u)).await };
-        let r = go(Method::GET, "/content/").await;
+        let r = go(Method::GET, "/settings/").await;
         assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(r.headers()[LOCATION], "/content");
-        let r = go(Method::GET, "/content/flights/575/?x=1").await;
-        assert_eq!(r.headers()[LOCATION], "/content/flights/575?x=1");
+        assert_eq!(r.headers()[LOCATION], "/settings");
+        let r = go(Method::GET, "/flights/575/?x=1").await;
+        assert_eq!(r.headers()[LOCATION], "/flights/575?x=1");
         // Another site, a POST, and a path without the slash are not found.
         assert_eq!(go(Method::GET, "//evil.example/").await.status(), StatusCode::NOT_FOUND);
-        assert_eq!(go(Method::POST, "/content/").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(go(Method::POST, "/settings/").await.status(), StatusCode::NOT_FOUND);
         assert_eq!(go(Method::GET, "/nothing").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn old_content_addresses_go_to_the_tidy_paths() {
+        use axum::http::{header::LOCATION, Method, StatusCode, Uri};
+        let go = |m: Method, u: &'static str| async move { trailing_slash(m, Uri::from_static(u)).await };
+        for (from, to) in [
+            ("/content", "/"),
+            ("/content/", "/"),
+            ("/content/flights/599", "/flights/599"),
+            ("/content/flights/599/export/flysto.csv", "/flights/599/export/flysto.csv"),
+            ("/content/flights/share/abc", "/flights/share/abc"),
+            ("/content/flight/user/1", "/pilots/1"),
+            ("/content/stats", "/aircraft"),
+            ("/content/stats/A20N", "/aircraft/A20N"),
+            ("/content/aircraft", "/my/aircraft"),
+            ("/content/aircraft/A20N", "/my/aircraft/A20N"),
+            ("/content/settings", "/settings"),
+            ("/content/l/s3cret", "/l/s3cret"),
+            ("/content/discord/invite?guild=1", "/discord/invite?guild=1"),
+        ] {
+            let r = go(Method::GET, from).await;
+            assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT, "{from}");
+            assert_eq!(r.headers()[LOCATION], to, "{from}");
+        }
+        // A POST keeps its method through the 308.
+        let r = go(Method::POST, "/content/flights/7/upload/flysto").await;
+        assert_eq!(r.headers()[LOCATION], "/flights/7/upload/flysto");
+        // Not another site, and not a lookalike prefix.
+        assert_eq!(go(Method::GET, "/content//evil.example").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(go(Method::GET, "/contents").await.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1829,7 +1892,7 @@ mod tests {
             "/api/v0/users/***/flights/42"
         );
         assert_eq!(redact_path("/api/v0/users/abc123def"), "/api/v0/users/***");
-        assert_eq!(redact_path("/content/flights/7"), "/content/flights/7");
+        assert_eq!(redact_path("/flights/7"), "/flights/7");
         assert_eq!(redact_path("/"), "/");
     }
 

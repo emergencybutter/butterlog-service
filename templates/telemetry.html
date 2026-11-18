@@ -108,7 +108,7 @@
                 <span class="tflight-meta">{{ f.when }} · {{ f.sim }} · {{ f.aircraft }}</span>
                 {% match f.app_flight_id %}
                 {% when Some with (id) %}
-                <span class="tflight-meta"><a href="/content/flights/{{ id }}">App's flight {{ id }}</a></span>
+                <span class="tflight-meta"><a href="/flights/{{ id }}">App's flight {{ id }}</a></span>
                 {% when None %}
                 <span class="tflight-meta">No matching app flight</span>
                 {% endmatch %}
