@@ -409,13 +409,21 @@ async fn upload_ended(state: &AppState, limit: i64) -> Result<usize, AppError> {
 
 /// The ended flights waiting to go to FlySto by themselves, oldest first: `(flight, pilot,
 /// token)`.
+///
+/// Only once its telemetry is final: a session still open, or ended as abandoned (silent
+/// for `END_AFTER_SECS`), can carry on, and its flight with it. Flight 790 on 2026-11-18
+/// went to FlySto at the end of a 30-minute pause and missed its last two hours. A flight
+/// that ends later than it was uploaded grew since, and goes again.
 async fn due(db: &sqlx::PgPool, limit: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT f.id, f.user_id, u.flysto_token FROM flights f JOIN users u ON u.id = f.user_id \
           WHERE u.flysto_token IS NOT NULL AND u.flysto_auto AND f.status = 'ended' \
             AND f.ended_at >= u.flysto_since AND f.ended_at > NOW() - INTERVAL '2 days' \
             AND EXISTS (SELECT 1 FROM telemetry_flights t WHERE t.flight_id = f.id) \
-            AND NOT EXISTS (SELECT 1 FROM flysto_uploads x WHERE x.flight_id = f.id) \
+            AND NOT EXISTS (SELECT 1 FROM telemetry_flights t JOIN telemetry_sessions s ON s.id = t.session_id \
+                  WHERE t.flight_id = f.id \
+                    AND (s.status = 'open' OR (s.status = 'ended' AND s.end_reason = 'abandoned'))) \
+            AND NOT EXISTS (SELECT 1 FROM flysto_uploads x WHERE x.flight_id = f.id AND x.uploaded_at >= f.ended_at) \
             AND NOT EXISTS (SELECT 1 FROM flysto_auto_attempts a WHERE a.flight_id = f.id \
                   AND (a.attempts >= 5 OR a.tried_at > NOW() - a.attempts * INTERVAL '10 minutes')) \
           ORDER BY f.ended_at LIMIT $1",
@@ -500,8 +508,8 @@ mod tests {
                     .await
                     .unwrap();
                 sqlx::query(
-                    "INSERT INTO telemetry_sessions (id, user_id, schema_hash, open_blob, protocol_version, sim, sim_version, capture, client_version, aircraft) \
-                     VALUES ($1, $2, '\\x00', '\\x00', 1, 'msfs2024', '', 'simconnect', 'test', '{}')",
+                    "INSERT INTO telemetry_sessions (id, user_id, schema_hash, open_blob, protocol_version, sim, sim_version, capture, client_version, aircraft, status, end_reason) \
+                     VALUES ($1, $2, '\\x00', '\\x00', 1, 'msfs2024', '', 'simconnect', 'test', '{}', 'ended', 'client')",
                 )
                 .bind(session)
                 .bind(user)
@@ -537,6 +545,45 @@ mod tests {
         assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
         // On again while on: the date stays.
         set_auto(&db, user, true).await.unwrap();
+        assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
+
+        // Telemetry that can still carry on waits: an open session, or one ended as
+        // abandoned. Closed for good, it goes.
+        let session = |status: &'static str, reason: Option<&'static str>| {
+            let db = db.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE telemetry_sessions SET status = $2, end_reason = $3 \
+                      WHERE id = (SELECT session_id FROM telemetry_flights WHERE flight_id = $1)",
+                )
+                .bind(next)
+                .bind(status)
+                .bind(reason)
+                .execute(&db)
+                .await
+                .unwrap();
+            }
+        };
+        session("open", None).await;
+        assert!(mine(due(&db, 1000).await.unwrap()).is_empty());
+        session("ended", Some("abandoned")).await;
+        assert!(mine(due(&db, 1000).await.unwrap()).is_empty());
+        session("compacted", Some("abandoned")).await;
+        assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
+
+        // Uploaded, it is not due; grown past its upload, it is again.
+        sqlx::query("INSERT INTO flysto_uploads (flight_id, user_id, file_id) VALUES ($1, $2, 'f')")
+            .bind(next)
+            .bind(user)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(mine(due(&db, 1000).await.unwrap()).is_empty());
+        sqlx::query("UPDATE flights SET ended_at = NOW() + INTERVAL '1 hour' WHERE id = $1")
+            .bind(next)
+            .execute(&db)
+            .await
+            .unwrap();
         assert_eq!(mine(due(&db, 1000).await.unwrap()), [next]);
     }
 
