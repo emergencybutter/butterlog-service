@@ -31,7 +31,8 @@ fn magnetic(s: &Sample, true_field: Field) -> String {
     v.map_or_else(String::new, |v| format!("{v:.1}"))
 }
 
-fn row(s: &Sample) -> Option<String> {
+fn row(s: &Sample, stuck: &[Field]) -> Option<String> {
+    let num = |s: &Sample, field: Field, decimals: usize| if stuck.contains(&field) { String::new() } else { num(s, field, decimals) };
     let at: DateTime<Utc> = DateTime::from_timestamp_millis(s.wall_time_ms)?;
     s.get(Field::Latitude)?;
     let heading = match s.get(Field::HeadingMagnetic) {
@@ -113,15 +114,35 @@ fn row(s: &Sample) -> Option<String> {
 /// one on, as the G1000 logs every second; a longer silence, the app restarting, stays a gap.
 const CARRY_SECS: i64 = 10;
 
+/// Engine gauges an aircraft may leave undriven: some (DWSim's ATR in X-Plane) keep their
+/// own engine model, and the sim's standard gauges then read a flat 0 or 15 °C all flight.
+const GAUGES: [Field; 5] = [Field::OilTemp, Field::OilPressure, Field::Cht, Field::Egt, Field::Manifold];
+
+/// The gauges that read one value the whole flight: no running engine holds one, so the
+/// aircraft didn't drive them, and they are left empty rather than shown as a reading.
+fn stuck_gauges(samples: &[Sample]) -> Vec<Field> {
+    GAUGES
+        .into_iter()
+        .filter(|&field| {
+            let mut values = samples.iter().filter_map(|s| s.get(field));
+            match values.next() {
+                Some(first) => values.all(|v| v == first),
+                None => false,
+            }
+        })
+        .collect()
+}
+
 /// The CSV of a flight's samples, a row a second from the first with a position: the
 /// first sample of each second, or the last before it.
 pub fn flysto_csv(airframe: &str, samples: &[Sample]) -> String {
     let airframe = airframe.replace('"', "'");
+    let stuck = stuck_gauges(samples);
     let mut out = format!("{}\n{UNITS}\n{COLUMNS}\n", AIRFRAME.replace("{}", &airframe));
     let mut push = |s: &Sample, second: i64| {
         let mut at = s.clone();
         at.wall_time_ms = second * 1_000;
-        if let Some(line) = row(&at) {
+        if let Some(line) = row(&at, &stuck) {
             out.push_str(&line);
             out.push('\n');
         }
@@ -227,5 +248,28 @@ mod tests {
         assert_eq!(row[59], "1", "autopilot");
         assert_eq!(row[9], "", "no OAT recorded");
         assert!(lines[4].starts_with("2025-11-05, 03:01:45"));
+    }
+
+    #[test]
+    fn gauges_stuck_all_flight_are_left_empty() {
+        let mut a = Sample::empty();
+        a.wall_time_ms = 1_762_311_704_000;
+        a.set(Field::Latitude, 46.15);
+        a.set(Field::OilPressure, 0.0);
+        a.set(Field::OilTemp, 59.0);
+        a.set(Field::Rpm, 1200.0);
+        let mut b = a.clone();
+        b.wall_time_ms += 1_000;
+        b.set(Field::OilTemp, 61.0);
+        b.set(Field::Rpm, 1200.0);
+
+        let csv = flysto_csv("ATR", &[a, b]);
+        let lines: Vec<&str> = csv.lines().collect();
+        let columns: Vec<&str> = lines[2].split(',').map(str::trim).collect();
+        let at = |name: &str| columns.iter().position(|c| *c == name).unwrap();
+        let row: Vec<&str> = lines[3].split(", ").collect();
+        assert_eq!(row[at("E1 OilP")], "", "a flat 0 is no reading");
+        assert_eq!(row[at("E1 OilT")], "59.0", "it moved");
+        assert_eq!(row[at("E1 RPM")], "1200.0", "not a gauge the aircraft may leave alone");
     }
 }
