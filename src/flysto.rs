@@ -295,13 +295,18 @@ async fn where_it_is(state: &AppState, flight_id: i64, token: &str) -> Result<Va
         .await?;
     match r.status().as_u16() {
         200 => {}
-        // Deleted on FlySto: it is no longer there to point at.
+        // Not on FlySto (deleted there, or a file it folded into a log it already had):
+        // nothing to point at, but it was sent, so the automatic sender leaves it be and
+        // the button stays for sending it again by hand. Deleting the row here had the
+        // sender upload flights 785 and 790 every minute on 2026-11-19.
         404 => {
-            sqlx::query("DELETE FROM flysto_uploads WHERE flight_id = $1")
-                .bind(flight_id)
-                .execute(&state.db)
-                .await?;
-            return Ok(Pointer::None.json());
+            sqlx::query(
+                "UPDATE flysto_uploads SET processed = TRUE, log_ids = '{}', checked_at = NOW() WHERE flight_id = $1",
+            )
+            .bind(flight_id)
+            .execute(&state.db)
+            .await?;
+            return Ok(Pointer::Empty.json());
         }
         401 | 403 => {
             return Err(AppError::Upstream(

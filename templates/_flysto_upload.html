@@ -72,7 +72,7 @@
                 toast('Processed by FlySto. <a href="' + esc(where.url) + '" target="_blank" rel="noopener">Open it</a>');
                 return;
             }
-            if (where.state === 'empty') { toast('FlySto processed the file but found no flight in it.', true); break; }
+            if (where.state === 'empty') { toast('FlySto has no flight from this file: it found none in it, or it is no longer there.', true); break; }
             if (where.state === 'none') break;
         }
         btn.disabled = false;
