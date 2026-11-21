@@ -39,8 +39,16 @@ const ALIASES: &[(&str, &str)] = &[
 
 /// Curated marketing nicknames that do not appear in the characteristics columns,
 /// mapped to an ICAO code. Only applied when the code exists in the loaded database.
+///
+/// A nickname with a space is a phrase: it is indexed as its words glued together and only
+/// matches those words side by side (see [`phrase_token`]). Indexing its words one by one let
+/// a common word stand for the whole phrase - "jet" alone, out of "jumbo jet", turned
+/// "iniBuilds Global Jet" into a 747.
 const NICKNAMES: &[(&str, &str)] = &[
     ("jumbo jet", "B744"),
+    // iniBuilds' "Global Jet" (the add-on itself reports ATC model GLEX); "global" alone ties
+    // the 5000, 6000 and 7500.
+    ("global jet", "GLEX"),
     ("dreamliner", "B788"),
     // Both Super Hornet spellings map to F18S; F18H is the plain Hornet. The "FA18E" form
     // needs a nickname since the old code-prefix match (fa18e -> fa18) no longer applies now
@@ -151,7 +159,7 @@ const WEAK_NICKNAMES: &[(&str, &str)] = &[
 /// airline. Dropped during tokenization for both the ICAO-type and airline indexes.
 pub const ADDON_DEVELOPERS: &[&str] = &[
     "ifly", "blacksquare", "fsreborn", "pmdg", "fenix", "flightsimware",
-    "asobo", "fsltl", "passiveaircraft", "laminar", "tfdi",
+    "asobo", "fsltl", "passiveaircraft", "laminar", "tfdi", "inibuilds",
 ];
 
 /// Studio names made of words that are meaningful on their own, so they can
@@ -205,6 +213,8 @@ pub struct IcaoIndex {
     idf: HashMap<String, f32>,
     /// Lowercased set of all ICAO codes, for prefix matching against query words.
     code_set: HashSet<String>,
+    /// The glued tokens of phrase nicknames, which two adjacent query words may spell.
+    phrases: HashSet<String>,
 }
 
 /// Split a free string into normalized tokens: lowercased, broken on any non-alphanumeric
@@ -253,9 +263,28 @@ fn canonicalize(token: impl Into<String>) -> String {
 /// up via several fields.
 fn add_tokens(into: &mut HashMap<String, f32>, text: &str, weight: f32) {
     for token in tokenize(text) {
-        into.entry(token)
-            .and_modify(|w| *w = w.max(weight))
-            .or_insert(weight);
+        add_token(into, token, weight);
+    }
+}
+
+fn add_token(into: &mut HashMap<String, f32>, token: String, weight: f32) {
+    into.entry(token)
+        .and_modify(|w| *w = w.max(weight))
+        .or_insert(weight);
+}
+
+/// The single token a multi-word nickname is indexed under: its words glued together
+/// ("jumbo jet" -> "jumbojet"). A query matches it from two adjacent words, or glued.
+fn phrase_token(nick: &str) -> String {
+    tokenize(nick).concat()
+}
+
+/// Add a curated nickname: a phrase as one glued token, anything else word by word.
+fn add_nickname(into: &mut HashMap<String, f32>, nick: &str, weight: f32) {
+    if nick.contains(char::is_whitespace) {
+        add_token(into, phrase_token(nick), weight);
+    } else {
+        add_tokens(into, nick, weight);
     }
 }
 
@@ -283,14 +312,20 @@ impl IcaoIndex {
         }
 
         // Other source: curated nicknames, applied only when the target code exists.
+        let phrases: HashSet<String> = NICKNAMES
+            .iter()
+            .chain(WEAK_NICKNAMES)
+            .filter(|(nick, _)| nick.contains(char::is_whitespace))
+            .map(|(nick, _)| phrase_token(nick))
+            .collect();
         for (nick, code) in NICKNAMES {
             if let Some(&idx) = by_code.get(&code.to_lowercase()) {
-                add_tokens(&mut per_icao[idx], nick, W_ALIAS);
+                add_nickname(&mut per_icao[idx], nick, W_ALIAS);
             }
         }
         for (nick, code) in WEAK_NICKNAMES {
             if let Some(&idx) = by_code.get(&code.to_lowercase()) {
-                add_tokens(&mut per_icao[idx], nick, W_WEAK_ALIAS);
+                add_nickname(&mut per_icao[idx], nick, W_WEAK_ALIAS);
             }
         }
 
@@ -314,7 +349,7 @@ impl IcaoIndex {
 
         let code_set: HashSet<String> = by_code.keys().cloned().collect();
 
-        Self { icaos, postings, idf, code_set }
+        Self { icaos, postings, idf, code_set, phrases }
     }
 
     /// Accumulate IDF-weighted postings for one token, counting each token at most once.
@@ -364,12 +399,21 @@ impl IcaoIndex {
 
         for (text, factor) in parts {
             let mut part_scores: HashMap<u32, f32> = HashMap::new();
-            for token in tokenize(text) {
-                self.accumulate(&token, &mut part_scores, &mut seen);
+            let tokens = tokenize(text);
+            for token in &tokens {
+                self.accumulate(token, &mut part_scores, &mut seen);
                 // A type code that is an exact prefix of the word (with a non-neo/max suffix)
                 // implies that exact type — credit it as if the code appeared verbatim.
-                if let Some(code) = self.code_prefix_of(&token) {
+                if let Some(code) = self.code_prefix_of(token) {
                     self.accumulate(&code, &mut part_scores, &mut seen);
+                }
+            }
+            // Two adjacent words may spell a phrase nickname, indexed glued ("jumbojet").
+            // Only phrases: "ATR 72" must not reach the glued-only nickname "ATR72".
+            for pair in tokens.windows(2) {
+                let glued = pair.concat();
+                if self.phrases.contains(&glued) {
+                    self.accumulate(&glued, &mut part_scores, &mut seen);
                 }
             }
             for (idx, score) in part_scores {
@@ -517,6 +561,9 @@ mod tests {
             ac("E50P", "EMBRAER", "Embraer 500 Phenom 100", "Embraer EMB-500 Phenom 100"),
             ac("E55P", "EMBRAER", "Embraer Phenom 300", "Embraer EMB-505 Phenom 300"),
             ac("S108", "STINSON", "Stinson 108 Voyager", "Stinson 108 Voyager"),
+            ac("GL5T", "BOMBARDIER", "Bombardier BD-700 Global 5000", "Bombardier Global 5000"),
+            ac("GL7T", "BOMBARDIER", "Bombardier BD-700 Global 7500", "Bombardier Global 7500"),
+            ac("GLEX", "BOMBARDIER", "Bombardier BD-700 Global Express", "Bombardier Global 6000"),
         ];
         let mut characteristics = HashMap::new();
         for r in rows {
@@ -559,6 +606,24 @@ mod tests {
     fn nickname_source() {
         let idx = IcaoIndex::build(&test_db());
         assert_eq!(top(&idx, "the queen, a jumbo jet"), "B744");
+    }
+
+    /// A phrase nickname matches only as the phrase: "jet" out of "jumbo jet" made
+    /// "iniBuilds Global Jet" (a Bombardier Global) a 747.
+    #[test]
+    fn a_phrase_nickname_needs_the_whole_phrase() {
+        let idx = IcaoIndex::build(&test_db());
+        assert_eq!(top(&idx, "iniBuilds Global Jet"), "GLEX");
+        assert_eq!(top_tl(&idx, "iniBuilds Global Jet", "VistaJet 9H-VJS"), "GLEX");
+        assert_eq!(top(&idx, "Bombardier Global 7500"), "GL7T");
+        assert_ne!(top(&idx, "Jet"), "B744");
+        assert_ne!(top(&idx, "Jumbo"), "B744");
+        assert_eq!(top(&idx, "Jumbojet"), "B744");
+        assert_eq!(top(&idx, "Jumbo-Jet Cargo"), "B744");
+    }
+
+    fn top_tl(idx: &IcaoIndex, t: &str, l: &str) -> String {
+        idx.find_title_livery(t, l).map(|m| m.icao).unwrap_or_default()
     }
 
     #[test]

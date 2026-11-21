@@ -151,6 +151,13 @@ mod tests {
         assert_eq!(r.resolve("Boeing 767-300ER XP12", "Aircraft/FlightFactor & StepToSky/Boeing 767 Global Package Plus/liveries/[763 GE] Atlas Air (N641GT)/").icao_code(), "B763");
     }
 
+    /// A pilot's iniBuilds Global Jet was logged as a 747: "jet" alone matched "jumbo jet".
+    #[test]
+    fn the_global_jet_is_a_global_not_a_jumbo() {
+        let r = Resolver::embedded().resolve("iniBuilds Global Jet", "VistaJet 9H-VJS");
+        assert_eq!(r.icao_code(), "GLEX");
+    }
+
     #[test]
     fn a_light_aircraft_gets_no_airline() {
         let r = Resolver::embedded().resolve("Cessna Skyhawk", "United");
